@@ -1,2 +1,6 @@
 aiogram~=2.14
 environs~=8.0.0
+opencv-python~=4.10
+Pillow~=10.4
+python-dotenv~=1.0
+google-generativeai~=0.8

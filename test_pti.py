@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import logging
 import tempfile
 
 import cv2
@@ -29,21 +30,18 @@ SYSTEM_PROMPT = (
 
 def extract_frames(video_path: str, num_frames: int = 7) -> list[tuple[float, str]]:
     if not os.path.exists(video_path):
-        print(f"Error: File not found: {video_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Video file not found: {video_path}")
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Error: OpenCV could not open video: {video_path}")
-        sys.exit(1)
+        raise RuntimeError(f"OpenCV could not open video: {video_path}")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
     if total_frames == 0 or fps == 0:
-        print("Error: Could not read video properties (0 frames or 0 fps).")
         cap.release()
-        sys.exit(1)
+        raise RuntimeError("Could not read video properties (0 frames or 0 fps).")
 
     duration = total_frames / fps
     temp_dir = tempfile.mkdtemp(prefix="pti_frames_")
@@ -54,12 +52,11 @@ def extract_frames(video_path: str, num_frames: int = 7) -> list[tuple[float, st
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(timestamp * fps))
         ret, frame = cap.read()
         if not ret:
-            print(f"Warning: Could not read frame at {timestamp:.2f}s, skipping.")
+            logging.warning(f"Could not read frame at {timestamp:.2f}s, skipping.")
             continue
         path = os.path.join(temp_dir, f"frame_{i:02d}.jpg")
         cv2.imwrite(path, frame)
         saved.append((timestamp, path))
-        print(f"  Frame {i + 1}: {timestamp:.2f}s")
 
     cap.release()
     return saved
@@ -68,8 +65,7 @@ def extract_frames(video_path: str, num_frames: int = 7) -> list[tuple[float, st
 def call_gemini(frames: list[tuple[float, str]]) -> genai.types.GenerateContentResponse:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
-        print("Error: GEMINI_API_KEY is not set in .env")
-        sys.exit(1)
+        raise ValueError("GEMINI_API_KEY is not set in .env")
 
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
@@ -77,18 +73,14 @@ def call_gemini(frames: list[tuple[float, str]]) -> genai.types.GenerateContentR
         system_instruction=SYSTEM_PROMPT,
     )
 
+    n = len(frames)
     parts = []
     for i, (_, path) in enumerate(frames):
         parts.append(PIL.Image.open(path))
-        parts.append(f"Frame {i + 1} of 7")
-    parts.append("Analyze all 7 frames above as a single PTI inspection and return the JSON result.")
+        parts.append(f"Frame {i + 1} of {n}")
+    parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
-    try:
-        response = model.generate_content(parts)
-    except Exception as e:
-        print(f"API Error: {e}")
-        sys.exit(1)
-
+    response = model.generate_content(parts)
     return response
 
 
@@ -105,25 +97,23 @@ def delete_frames(frames: list[tuple[float, str]]) -> None:
             pass
 
 
-def print_result(response: genai.types.GenerateContentResponse) -> None:
-    raw_text = response.text
+def parse_result(response: genai.types.GenerateContentResponse) -> dict:
+    return json.loads(response.text)
 
+
+def print_result(response: genai.types.GenerateContentResponse) -> None:
     print("\n--- RESULT ---")
     try:
-        parsed = json.loads(raw_text)
+        parsed = parse_result(response)
         print(json.dumps(parsed, indent=2))
     except json.JSONDecodeError:
         print("Warning: Response is not valid JSON. Raw output:")
-        print(raw_text)
+        print(response.text)
 
     usage = response.usage_metadata
-    input_tokens = usage.prompt_token_count
-    output_tokens = usage.candidates_token_count
-
     print("\n--- USAGE ---")
-    print(f"  Input tokens:  {input_tokens}")
-    print(f"  Output tokens: {output_tokens}")
-    print(f"  Cost: FREE (Gemini free tier)")
+    print(f"  Input tokens:  {usage.prompt_token_count}")
+    print(f"  Output tokens: {usage.candidates_token_count}")
 
 
 if __name__ == "__main__":
@@ -141,9 +131,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\nSending {len(frames)} frames to Gemini 2.0 Flash...")
-    response = call_gemini(frames)
-
-    delete_frames(frames)
-    print("Temporary frame files deleted.")
+    try:
+        response = call_gemini(frames)
+    finally:
+        delete_frames(frames)
+        print("Temporary frame files deleted.")
 
     print_result(response)
