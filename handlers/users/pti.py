@@ -1,11 +1,14 @@
+import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import json
 
 from aiogram import types
 from aiogram.types import ContentType
 
+from data import config
 from loader import dp
 from test_pti import extract_frames, call_gemini, delete_frames, parse_result
 
@@ -43,24 +46,20 @@ def _format_result(data: dict) -> str:
     return "\n".join(lines)
 
 
-@dp.message_handler(content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT])
-async def handle_pti_video(message: types.Message):
-    file = message.video or message.video_note or message.document
-
-    if message.document and not (message.document.mime_type or "").startswith("video/"):
-        await message.answer("Iltimos, PTI tekshiruvi uchun video yuboring.")
-        return
-
-    status_msg = await message.answer("Video qabul qilindi. Kadrlar ajratilmoqda...")
+async def _process_video(file, reply_to: types.Message):
+    status_msg = await reply_to.answer("Video qabul qilindi. Kadrlar ajratilmoqda...")
 
     tmp_path = None
     frames = []
     try:
-        suffix = ".mp4"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
-        await file.download(destination=tmp_path)
+        file_info = await file.get_file()
+        if config.LOCAL_SERVER_URL:
+            await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_path)
+        else:
+            await file.download(destination=tmp_path)
 
         frames = extract_frames(tmp_path)
         if not frames:
@@ -94,3 +93,36 @@ async def handle_pti_video(message: types.Message):
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+
+@dp.message_handler(commands=["check"])
+async def handle_check_command(message: types.Message):
+    reply = message.reply_to_message
+    if not reply:
+        await message.answer("Videoga reply qilib /check yuboring.")
+        return
+
+    file = reply.video or reply.video_note or reply.document
+    if not file:
+        await message.answer("Reply qilingan xabar video emas.")
+        return
+
+    if reply.document and not (reply.document.mime_type or "").startswith("video/"):
+        await message.answer("Reply qilingan xabar video emas.")
+        return
+
+    await _process_video(file, message)
+
+
+@dp.message_handler(content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT])
+async def handle_pti_video(message: types.Message):
+    if message.chat.type != "private":
+        return
+
+    file = message.video or message.video_note or message.document
+
+    if message.document and not (message.document.mime_type or "").startswith("video/"):
+        await message.answer("Iltimos, PTI tekshiruvi uchun video yuboring.")
+        return
+
+    await _process_video(file, message)
