@@ -7,7 +7,8 @@ import tempfile
 import cv2
 import PIL.Image
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -62,16 +63,12 @@ def extract_frames(video_path: str, num_frames: int = 7) -> list[tuple[float, st
     return saved
 
 
-def call_gemini(frames: list[tuple[float, str]]) -> genai.types.GenerateContentResponse:
+def call_gemini(frames: list[tuple[float, str]]):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
         raise ValueError("GEMINI_API_KEY is not set in .env")
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=SYSTEM_PROMPT,
-    )
+    client = genai.Client(api_key=api_key)
 
     n = len(frames)
     parts = []
@@ -80,7 +77,11 @@ def call_gemini(frames: list[tuple[float, str]]) -> genai.types.GenerateContentR
         parts.append(f"Frame {i + 1} of {n}")
     parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
-    response = model.generate_content(parts)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+        contents=parts,
+    )
     return response
 
 
@@ -97,11 +98,11 @@ def delete_frames(frames: list[tuple[float, str]]) -> None:
             pass
 
 
-def parse_result(response: genai.types.GenerateContentResponse) -> dict:
+def parse_result(response) -> dict:
     return json.loads(response.text)
 
 
-def print_result(response: genai.types.GenerateContentResponse) -> None:
+def print_result(response) -> None:
     print("\n--- RESULT ---")
     try:
         parsed = parse_result(response)
