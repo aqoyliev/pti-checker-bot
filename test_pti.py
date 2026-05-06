@@ -12,9 +12,11 @@ from google.genai import types as genai_types
 
 load_dotenv()
 
+PTI_FRAMES = int(os.getenv("PTI_FRAMES", "7"))
+
 SYSTEM_PROMPT = (
     "You are an expert commercial truck Pre-Trip Inspection (PTI) analyst with 20+ years of DOT compliance experience. "
-    "You are seeing 7 frames extracted evenly from a PTI walk-around video. Analyze all frames together as one inspection. "
+    "You are seeing several frames extracted evenly from a PTI walk-around video. Analyze all frames together as one inspection. "
     "Respond ONLY with a raw JSON object, no markdown, no code fences:\n"
     "{\n"
     '  "status": "PASS" or "FAIL",\n'
@@ -29,7 +31,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def extract_frames(video_path: str, num_frames: int = 7) -> list[tuple[float, str]]:
+def extract_frames(video_path: str, num_frames: int = PTI_FRAMES) -> list[tuple[float, str]]:
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -124,7 +126,7 @@ if __name__ == "__main__":
 
     video_path = sys.argv[1]
 
-    print(f"Extracting 7 frames from: {video_path}")
+    print(f"Extracting {PTI_FRAMES} frames from: {video_path}")
     frames = extract_frames(video_path)
 
     if not frames:
