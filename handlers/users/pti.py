@@ -47,7 +47,7 @@ def _format_result(data: dict) -> str:
 
 
 async def _process_video(file, reply_to: types.Message):
-    status_msg = await reply_to.answer("Video qabul qilindi. Kadrlar ajratilmoqda...")
+    status_msg = await reply_to.answer("Video received. Extracting frames...")
 
     tmp_path = None
     frames = []
@@ -63,10 +63,10 @@ async def _process_video(file, reply_to: types.Message):
 
         frames = extract_frames(tmp_path)
         if not frames:
-            await status_msg.edit_text("Xato: Videodan kadrlar ajratib bo'lmadi.")
+            await status_msg.edit_text("Error: Could not extract frames from the video.")
             return
 
-        await status_msg.edit_text(f"{len(frames)} kadr Gemini AI ga yuborilmoqda...")
+        await status_msg.edit_text(f"Sending {len(frames)} frames to Gemini AI...")
 
         try:
             response = call_gemini(frames)
@@ -78,13 +78,13 @@ async def _process_video(file, reply_to: types.Message):
             data = parse_result(response)
             text = _format_result(data)
         except (json.JSONDecodeError, KeyError):
-            text = f"<b>PTI natijasi:</b>\n{response.text}"
+            text = f"<b>PTI Result:</b>\n{response.text}"
 
         await status_msg.edit_text(text, parse_mode="HTML")
 
     except Exception as e:
         logging.exception("PTI video processing error")
-        await status_msg.edit_text(f"Xato yuz berdi: {e}")
+        await status_msg.edit_text(f"An error occurred: {e}")
     finally:
         if frames:
             delete_frames(frames)
@@ -99,16 +99,16 @@ async def _process_video(file, reply_to: types.Message):
 async def handle_check_command(message: types.Message):
     reply = message.reply_to_message
     if not reply:
-        await message.answer("Videoga reply qilib /check yuboring.")
+        await message.answer("Reply to a video with /check.")
         return
 
     file = reply.video or reply.video_note or reply.document
     if not file:
-        await message.answer("Reply qilingan xabar video emas.")
+        await message.answer("The replied message is not a video.")
         return
 
     if reply.document and not (reply.document.mime_type or "").startswith("video/"):
-        await message.answer("Reply qilingan xabar video emas.")
+        await message.answer("The replied message is not a video.")
         return
 
     await _process_video(file, message)
@@ -122,7 +122,7 @@ async def handle_pti_video(message: types.Message):
     file = message.video or message.video_note or message.document
 
     if message.document and not (message.document.mime_type or "").startswith("video/"):
-        await message.answer("Iltimos, PTI tekshiruvi uchun video yuboring.")
+        await message.answer("Please send a video for PTI inspection.")
         return
 
     await _process_video(file, message)

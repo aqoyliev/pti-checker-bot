@@ -7,6 +7,6 @@ from loader import dp
 @dp.message_handler(CommandStart())
 async def bot_start(message: types.Message):
     await message.answer(
-        f"Salom, {message.from_user.full_name}!\n\n"
-        "PTI tekshiruvi uchun yuk mashinasi aylanib o'tish videosini yuboring."
+        f"Hello, {message.from_user.full_name}!\n\n"
+        "Send a truck walk-around video for PTI inspection."
     )
