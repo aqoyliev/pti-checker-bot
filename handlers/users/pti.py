@@ -7,6 +7,7 @@ import json
 from aiogram import types
 from aiogram.types import ContentType
 
+from data import config
 from loader import dp, bot
 from test_pti import extract_frames, call_gemini, delete_frames, parse_result
 
@@ -54,7 +55,10 @@ async def _process_video(file, reply_to: types.Message):
             tmp_path = tmp.name
 
         file_info = await file.get_file()
-        await bot.download_file(file_info.file_path, destination=tmp_path)
+        file_path = file_info.file_path
+        if config.LOCAL_SERVER_URL and file_path.startswith(config.LOCAL_BOT_API_DIR):
+            file_path = file_path[len(config.LOCAL_BOT_API_DIR):].lstrip('/')
+        await bot.download_file(file_path, destination=tmp_path)
 
         frames = extract_frames(tmp_path)
         if not frames:
