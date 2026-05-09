@@ -57,7 +57,13 @@ async def _process_video(file, reply_to: types.Message):
         file_info = await file.get_file()
         file_path = file_info.file_path
         if config.LOCAL_SERVER_URL and file_path.startswith(config.LOCAL_BOT_API_DIR):
+            # Strip data dir: /var/lib/telegram-bot-api/TOKEN/videos/f.MOV -> TOKEN/videos/f.MOV
             file_path = file_path[len(config.LOCAL_BOT_API_DIR):].lstrip('/')
+            # Strip token subdir: TOKEN/videos/f.MOV -> videos/f.MOV
+            # (the HTTP endpoint /file/botTOKEN/ already maps to <data_dir>/<token>/)
+            token_prefix = config.BOT_TOKEN + '/'
+            if file_path.startswith(token_prefix):
+                file_path = file_path[len(token_prefix):]
         await bot.download_file(file_path, destination=tmp_path)
 
         frames = extract_frames(tmp_path)
