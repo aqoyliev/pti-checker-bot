@@ -1,15 +1,13 @@
 import asyncio
 import logging
 import os
-import shutil
 import tempfile
 import json
 
 from aiogram import types
 from aiogram.types import ContentType
 
-from data import config
-from loader import dp
+from loader import dp, bot
 from test_pti import extract_frames, call_gemini, delete_frames, parse_result
 
 
@@ -56,10 +54,7 @@ async def _process_video(file, reply_to: types.Message):
             tmp_path = tmp.name
 
         file_info = await file.get_file()
-        if config.LOCAL_SERVER_URL:
-            await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_path)
-        else:
-            await file.download(destination=tmp_path)
+        await bot.download_file(file_info.file_path, destination=tmp_path)
 
         frames = extract_frames(tmp_path)
         if not frames:
