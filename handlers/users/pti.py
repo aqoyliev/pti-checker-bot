@@ -1,10 +1,9 @@
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import json
-
-import aiohttp
 
 from aiogram import types
 from aiogram.types import ContentType
@@ -57,17 +56,10 @@ async def _process_video(file, reply_to: types.Message):
             tmp_path = tmp.name
 
         file_info = await file.get_file()
-        file_path = file_info.file_path
         if config.LOCAL_SERVER_URL:
-            # Local bot API serves files at /file/local<absolute_path>
-            url = f"{config.LOCAL_SERVER_URL}/file/local{file_path}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    resp.raise_for_status()
-                    with open(tmp_path, 'wb') as f:
-                        f.write(await resp.read())
+            await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_path)
         else:
-            await bot.download_file(file_path, destination=tmp_path)
+            await bot.download_file(file_info.file_path, destination=tmp_path)
 
         frames = extract_frames(tmp_path)
         if not frames:
