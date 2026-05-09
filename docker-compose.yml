@@ -1,25 +1,7 @@
 services:
-  telegram-bot-api:
-    image: ghcr.io/bots-house/docker-telegram-bot-api:latest
-    restart: unless-stopped
-    environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
-      TELEGRAM_LOCAL: "true"
-    command: ["--local", "--dir=/var/lib/telegram-bot-api"]
-    volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api
-
   bot:
     build: .
     restart: unless-stopped
     env_file: .env
     environment:
-      LOCAL_SERVER_URL: http://telegram-bot-api:8081
-    depends_on:
-      - telegram-bot-api
-    volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
-
-volumes:
-  telegram-bot-api-data:
+      LOCAL_SERVER_URL: http://localhost:8081
