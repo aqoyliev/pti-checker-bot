@@ -5,33 +5,39 @@ import logging
 import tempfile
 
 import cv2
-import PIL.Image
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types as genai_types
 
 load_dotenv()
 
-PTI_FRAMES = int(os.getenv("PTI_FRAMES", "7"))
+PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "2"))
 
-SYSTEM_PROMPT = (
-    "You are an expert commercial truck Pre-Trip Inspection (PTI) analyst with 20+ years of DOT compliance experience. "
-    "You are seeing several frames extracted evenly from a PTI walk-around video. Analyze all frames together as one inspection. "
-    "Respond ONLY with a raw JSON object, no markdown, no code fences:\n"
-    "{\n"
-    '  "status": "PASS" or "FAIL",\n'
-    '  "severity": "NONE" or "MINOR" or "MAJOR" or "CRITICAL",\n'
-    '  "confidence": "LOW" or "MEDIUM" or "HIGH",\n'
-    '  "image_quality": "POOR" or "ACCEPTABLE" or "GOOD",\n'
-    '  "issues": ["issue 1", "issue 2"],\n'
-    '  "what_was_visible": ["truck parts clearly seen across frames"],\n'
-    '  "what_was_not_visible": ["required PTI areas not seen in any frame"],\n'
-    '  "advice": "short actionable advice for the driver"\n'
-    "}"
-)
+SYSTEM_PROMPT = """You are a professional US Department of Transportation (DOT) Vehicle Inspector with 20+ years of field experience. \
+You are analyzing frames extracted from a PTI walk-around video of a commercial semi-truck or trailer. \
+Treat all frames together as a single unified inspection.
+
+Your inspection protocol:
+1. IDENTIFY components visible across the frames (e.g., steer tires, drive tires, 5th wheel, glad hands, brake chambers, lights, reflectors, fuel tank, exhaust, frame, cab, mirrors).
+2. SCAN for defects: cuts/bulges/low tread on tires, air leaks, missing lug nuts, cracked leaf springs, non-functional lights, damaged reflective tape, fluid leaks, bent/cracked frame members.
+3. Use DOT terminology (e.g., ABC check — Airlines, Bill of Lading, Connections; CMS — Cracked, Missing, Stuck).
+4. If a photo is too dark or blurry to assess, note it under image_quality and list that area under what_was_not_visible.
+5. Severity definitions: NONE = all clear; MINOR = monitor but drivable; MAJOR = repair soon, drivable short-term; CRITICAL = Out of Service (OOS), do not move vehicle.
+
+Respond ONLY with a raw JSON object — no markdown, no code fences:
+{
+  "status": "PASS" or "FAIL",
+  "severity": "NONE" or "MINOR" or "MAJOR" or "CRITICAL",
+  "confidence": "LOW" or "MEDIUM" or "HIGH",
+  "image_quality": "POOR" or "ACCEPTABLE" or "GOOD",
+  "issues": ["specific defect with DOT regulation reference if applicable"],
+  "what_was_visible": ["truck parts clearly seen across frames"],
+  "what_was_not_visible": ["required PTI areas not seen or too dark/blurry to assess"],
+  "advice": "concise actionable advice for the driver, referencing 49 CFR if OOS"
+}"""
 
 
-def extract_frames(video_path: str, num_frames: int = PTI_FRAMES) -> list[tuple[float, str]]:
+def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL) -> list[tuple[float, str]]:
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -50,16 +56,25 @@ def extract_frames(video_path: str, num_frames: int = PTI_FRAMES) -> list[tuple[
     temp_dir = tempfile.mkdtemp(prefix="pti_frames_")
     saved: list[tuple[float, str]] = []
 
-    for i in range(num_frames):
-        timestamp = duration * (2 * i + 1) / (2 * num_frames)
+    timestamp = 0.0
+    i = 0
+    while timestamp < duration:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(timestamp * fps))
         ret, frame = cap.read()
         if not ret:
             logging.warning(f"Could not read frame at {timestamp:.2f}s, skipping.")
+            timestamp += interval_seconds
+            i += 1
             continue
-        path = os.path.join(temp_dir, f"frame_{i:02d}.jpg")
-        cv2.imwrite(path, frame)
+        h, w = frame.shape[:2]
+        if max(h, w) > 1280:
+            scale = 1280 / max(h, w)
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        path = os.path.join(temp_dir, f"frame_{i:04d}.jpg")
+        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         saved.append((timestamp, path))
+        timestamp += interval_seconds
+        i += 1
 
     cap.release()
     return saved
@@ -75,13 +90,14 @@ def call_gemini(frames: list[tuple[float, str]]):
     n = len(frames)
     parts = []
     for i, (_, path) in enumerate(frames):
-        parts.append(PIL.Image.open(path))
+        with open(path, "rb") as f:
+            parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
         parts.append(f"Frame {i + 1} of {n}")
     parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+        model="gemini-2.5-flash",
+        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2),
         contents=parts,
     )
     return response
@@ -126,14 +142,14 @@ if __name__ == "__main__":
 
     video_path = sys.argv[1]
 
-    print(f"Extracting {PTI_FRAMES} frames from: {video_path}")
+    print(f"Extracting frames every {PTI_FRAME_INTERVAL}s from: {video_path}")
     frames = extract_frames(video_path)
 
     if not frames:
         print("Error: No frames could be extracted from the video.")
         sys.exit(1)
 
-    print(f"\nSending {len(frames)} frames to Gemini 2.0 Flash...")
+    print(f"\nSending {len(frames)} frames to Gemini...")
     try:
         response = call_gemini(frames)
     finally:

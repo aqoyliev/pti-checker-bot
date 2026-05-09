@@ -68,9 +68,6 @@ async def _process_video(file, reply_to: types.Message):
 
         await status_msg.edit_text(f"Sending {len(frames)} frames to Gemini AI...")
 
-        media = [types.InputMediaPhoto(open(path, "rb"), caption=f"Frame {i+1} at {ts:.1f}s") for i, (ts, path) in enumerate(frames)]
-        await reply_to.answer_media_group(media)
-
         try:
             response = call_gemini(frames)
         finally:
