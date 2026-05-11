@@ -81,58 +81,61 @@ def get_nearby_media(group_id: int, user_id: int, anchor_message_id: int, window
     return media
 
 
+def buffer_message(message: types.Message) -> None:
+    """Buffer a message for vehicle-change detection. Call from any handler that intercepts media."""
+    buf = _get_buffer(message.chat.id)
+
+    if message.photo:
+        photo_size = message.photo[-1]
+        buf.append(BufferedMessage(
+            message_id=message.message_id,
+            user_id=message.from_user.id,
+            content_type="photo",
+            file_id=photo_size.file_id,
+            mime_type=None,
+            timestamp=datetime.now(),
+            photo_size=photo_size,
+        ))
+    elif message.video:
+        buf.append(BufferedMessage(
+            message_id=message.message_id,
+            user_id=message.from_user.id,
+            content_type="video",
+            file_id=message.video.file_id,
+            mime_type=message.video.mime_type,
+            timestamp=datetime.now(),
+            video=message.video,
+        ))
+    elif message.video_note:
+        buf.append(BufferedMessage(
+            message_id=message.message_id,
+            user_id=message.from_user.id,
+            content_type="video_note",
+            file_id=message.video_note.file_id,
+            mime_type=None,
+            timestamp=datetime.now(),
+            video_note=message.video_note,
+        ))
+    elif message.document:
+        buf.append(BufferedMessage(
+            message_id=message.message_id,
+            user_id=message.from_user.id,
+            content_type="document",
+            file_id=message.document.file_id,
+            mime_type=message.document.mime_type,
+            timestamp=datetime.now(),
+            document=message.document,
+        ))
+
+
 @dp.message_handler(
-    content_types=[ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO,
-                   ContentType.VIDEO_NOTE, ContentType.DOCUMENT],
+    content_types=[ContentType.TEXT],
     chat_type=GROUP_TYPES,
 )
 async def monitor_group_messages(message: types.Message):
     group = await get_group(message.chat.id)
     if not group or not group["setup_complete"]:
         return
-
-    buf = _get_buffer(message.chat.id)
-
-    file_id = None
-    mime_type = None
-    photo_size = None
-    document = None
-    video = None
-    video_note = None
-
-    if message.photo:
-        photo_size = message.photo[-1]
-        file_id = photo_size.file_id
-        content_type = "photo"
-    elif message.video:
-        video = message.video
-        file_id = video.file_id
-        mime_type = video.mime_type
-        content_type = "video"
-    elif message.video_note:
-        video_note = message.video_note
-        file_id = video_note.file_id
-        content_type = "video_note"
-    elif message.document:
-        document = message.document
-        file_id = document.file_id
-        mime_type = document.mime_type
-        content_type = "document"
-    else:
-        content_type = "text"
-
-    buf.append(BufferedMessage(
-        message_id=message.message_id,
-        user_id=message.from_user.id,
-        content_type=content_type,
-        file_id=file_id,
-        mime_type=mime_type,
-        timestamp=datetime.now(),
-        photo_size=photo_size,
-        document=document,
-        video=video,
-        video_note=video_note,
-    ))
 
     text = message.text or message.caption or ""
     if not text or not _has_keyword(text):

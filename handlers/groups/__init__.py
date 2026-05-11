@@ -1,4 +1,4 @@
 from . import registration
-from . import pti
 from . import monitoring
+from . import pti
 from . import vehicle_detection

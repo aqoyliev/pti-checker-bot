@@ -12,6 +12,7 @@ from utils.db import (
 )
 from utils.pti_processor import process_video, process_photos, process_image_docs
 from utils.enforcement import handle_pti_passed
+from handlers.groups.monitoring import buffer_message
 
 MEDIA_GROUP_TIMEOUT = 0.8
 
@@ -65,6 +66,12 @@ async def _handle_pti_result(
 @dp.message_handler(commands=["check"], chat_type=GROUP_TYPES)
 async def handle_check_group(message: types.Message):
     if not await _group_ready(message):
+        await message.answer(
+            "This group is not configured yet. An admin must:\n"
+            "1. Register a driver: <code>/adddriver @username Name</code>\n"
+            "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>",
+            parse_mode="HTML",
+        )
         return
 
     reply = message.reply_to_message
@@ -100,6 +107,7 @@ async def handle_check_group(message: types.Message):
 
 @dp.message_handler(content_types=[ContentType.PHOTO], chat_type=GROUP_TYPES)
 async def handle_group_photo(message: types.Message):
+    buffer_message(message)
     if not await _group_ready(message):
         return
     if not await is_registered_driver(message.chat.id, message.from_user.id):
@@ -137,6 +145,7 @@ async def handle_group_photo(message: types.Message):
     chat_type=GROUP_TYPES,
 )
 async def handle_group_video(message: types.Message):
+    buffer_message(message)
     if not await _group_ready(message):
         return
     if not await is_registered_driver(message.chat.id, message.from_user.id):

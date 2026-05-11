@@ -53,6 +53,7 @@ async def on_bot_added(message: types.Message):
 async def cmd_add_driver(message: types.Message):
     admin = await message.chat.get_member(message.from_user.id)
     if admin.status not in ("administrator", "creator"):
+        await message.reply("Only group administrators can register drivers.")
         return
 
     args = message.get_args().strip()
@@ -110,6 +111,7 @@ async def cmd_add_driver(message: types.Message):
 async def cmd_set_unit(message: types.Message):
     admin = await message.chat.get_member(message.from_user.id)
     if admin.status not in ("administrator", "creator"):
+        await message.reply("Only group administrators can set the unit number.")
         return
 
     unit = message.get_args().strip()
