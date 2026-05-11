@@ -14,15 +14,16 @@ load_dotenv()
 PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "2"))
 
 SYSTEM_PROMPT = """You are a professional US Department of Transportation (DOT) Vehicle Inspector with 20+ years of field experience. \
-You are analyzing frames extracted from a PTI walk-around video of a commercial semi-truck or trailer. \
-Treat all frames together as a single unified inspection.
+You are analyzing media (video frames or photos) from a PTI walk-around inspection of a commercial semi-truck or trailer. \
+Treat all provided frames/photos together as a single unified inspection.
 
 Your inspection protocol:
-1. IDENTIFY components visible across the frames (e.g., steer tires, drive tires, 5th wheel, glad hands, brake chambers, lights, reflectors, fuel tank, exhaust, frame, cab, mirrors).
+1. IDENTIFY components visible across the media (e.g., steer tires, drive tires, 5th wheel, glad hands, brake chambers, lights, reflectors, fuel tank, exhaust, frame, cab, mirrors).
 2. SCAN for defects: cuts/bulges/low tread on tires, air leaks, missing lug nuts, cracked leaf springs, non-functional lights, damaged reflective tape, fluid leaks, bent/cracked frame members.
 3. Use DOT terminology (e.g., ABC check — Airlines, Bill of Lading, Connections; CMS — Cracked, Missing, Stuck).
 4. If a photo is too dark or blurry to assess, note it under image_quality and list that area under what_was_not_visible.
 5. Severity definitions: NONE = all clear; MINOR = monitor but drivable; MAJOR = repair soon, drivable short-term; CRITICAL = Out of Service (OOS), do not move vehicle.
+6. VEHICLE IDENTIFICATION: Read any visible unit numbers (painted on cab door or body) and license plates. If previous PTI history is provided, check whether previously flagged issues have been resolved in this submission.
 
 Respond ONLY with a raw JSON object — no markdown, no code fences:
 {
@@ -33,8 +34,37 @@ Respond ONLY with a raw JSON object — no markdown, no code fences:
   "issues": ["specific defect with DOT regulation reference if applicable"],
   "what_was_visible": ["truck parts clearly seen across frames"],
   "what_was_not_visible": ["required PTI areas not seen or too dark/blurry to assess"],
-  "advice": "concise actionable advice for the driver, referencing 49 CFR if OOS"
+  "advice": "concise actionable advice for the driver, referencing 49 CFR if OOS",
+  "vehicle": {
+    "type": "truck" or "trailer" or null,
+    "unit_number": "visible unit number or null",
+    "plate": "visible license plate or null"
+  },
+  "previously_flagged_resolved": ["issue from history confirmed fixed"] or []
 }"""
+
+
+def _build_history_text(history: list[dict]) -> str | None:
+    if not history:
+        return None
+    lines = ["Previous PTI submissions for this driver (most recent first):"]
+    for i, entry in enumerate(history, 1):
+        status = "PASS" if entry.get("passed") else "FAIL"
+        severity = entry.get("severity", "?")
+        submitted_at = entry.get("submitted_at", "?")
+        date = submitted_at.strftime("%Y-%m-%d") if hasattr(submitted_at, "strftime") else str(submitted_at)[:10]
+        unit = entry.get("unit_number") or "unknown unit"
+        result = entry.get("result_json")
+        issues = []
+        if result:
+            try:
+                parsed = json.loads(result)
+                issues = parsed.get("issues", [])
+            except Exception:
+                pass
+        issue_text = "; ".join(issues) if issues else "none"
+        lines.append(f"  {i}. {date} — {status} ({severity}) on {unit}. Issues: {issue_text}")
+    return "\n".join(lines)
 
 
 def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL) -> list[tuple[float, str]]:
@@ -80,7 +110,7 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
     return saved
 
 
-def call_gemini(frames: list[tuple[float, str]]):
+def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
         raise ValueError("GEMINI_API_KEY is not set in .env")
@@ -93,7 +123,41 @@ def call_gemini(frames: list[tuple[float, str]]):
         with open(path, "rb") as f:
             parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
         parts.append(f"Frame {i + 1} of {n}")
+
+    history_text = _build_history_text(history or [])
+    if history_text:
+        parts.append(history_text)
+
     parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2),
+        contents=parts,
+    )
+    return response
+
+
+def call_gemini_photos(images: list[tuple[str, str]], history: list[dict] | None = None):
+    """images: list of (file_path, mime_type)"""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key or api_key == "your-gemini-key-here":
+        raise ValueError("GEMINI_API_KEY is not set in .env")
+
+    client = genai.Client(api_key=api_key)
+
+    n = len(images)
+    parts = []
+    for i, (path, mime_type) in enumerate(images):
+        with open(path, "rb") as f:
+            parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type=mime_type))
+        parts.append(f"Photo {i + 1} of {n}")
+
+    history_text = _build_history_text(history or [])
+    if history_text:
+        parts.append(history_text)
+
+    parts.append(f"Analyze all {n} photo(s) above as a single PTI inspection and return the JSON result.")
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
