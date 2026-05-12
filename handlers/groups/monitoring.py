@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections import deque
@@ -129,6 +131,7 @@ def buffer_message(message: types.Message) -> None:
 
 
 @dp.message_handler(
+    lambda m: not (m.text or "").startswith("/"),
     content_types=[ContentType.TEXT],
     chat_type=GROUP_TYPES,
 )
