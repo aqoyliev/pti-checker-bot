@@ -5,3 +5,25 @@ services:
     env_file: .env
     environment:
       LOCAL_SERVER_URL: http://localhost:8081
+      DATABASE_URL: postgresql://pti:pti@db:5432/pti_bot
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pti
+      POSTGRES_PASSWORD: pti
+      POSTGRES_DB: pti_bot
+    volumes:
+      - pti_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pti -d pti_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pti_db_data:
