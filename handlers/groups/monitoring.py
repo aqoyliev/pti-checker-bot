@@ -83,15 +83,23 @@ def get_nearby_media(group_id: int, user_id: int, anchor_message_id: int, window
     return media
 
 
+def _effective_sender_id(message: types.Message) -> int:
+    """The original author if the message was forwarded, else the direct sender."""
+    if message.forward_from:
+        return message.forward_from.id
+    return message.from_user.id
+
+
 def buffer_message(message: types.Message) -> None:
     """Buffer a message for vehicle-change detection. Call from any handler that intercepts media."""
     buf = _get_buffer(message.chat.id)
+    uid = _effective_sender_id(message)
 
     if message.photo:
         photo_size = message.photo[-1]
         buf.append(BufferedMessage(
             message_id=message.message_id,
-            user_id=message.from_user.id,
+            user_id=uid,
             content_type="photo",
             file_id=photo_size.file_id,
             mime_type=None,
@@ -101,7 +109,7 @@ def buffer_message(message: types.Message) -> None:
     elif message.video:
         buf.append(BufferedMessage(
             message_id=message.message_id,
-            user_id=message.from_user.id,
+            user_id=uid,
             content_type="video",
             file_id=message.video.file_id,
             mime_type=message.video.mime_type,
@@ -111,7 +119,7 @@ def buffer_message(message: types.Message) -> None:
     elif message.video_note:
         buf.append(BufferedMessage(
             message_id=message.message_id,
-            user_id=message.from_user.id,
+            user_id=uid,
             content_type="video_note",
             file_id=message.video_note.file_id,
             mime_type=None,
@@ -121,7 +129,7 @@ def buffer_message(message: types.Message) -> None:
     elif message.document:
         buf.append(BufferedMessage(
             message_id=message.message_id,
-            user_id=message.from_user.id,
+            user_id=uid,
             content_type="document",
             file_id=message.document.file_id,
             mime_type=message.document.mime_type,

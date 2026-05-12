@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -137,6 +139,83 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
         await status_msg.edit_text(f"An error occurred: {e}")
         return None, None
     finally:
+        for path in tmp_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def process_mixed_media(items, reply_to: types.Message, history: list[dict] | None = None) -> tuple[str | None, dict | None]:
+    """Process a mix of photos, image docs, and videos as a single PTI inspection.
+
+    `items` is a list of dicts: {"kind": "photo"|"image_doc"|"video"|"video_note"|"video_doc", "obj": <telegram file obj>}
+    """
+    status_msg = await reply_to.answer(f"Analyzing {len(items)} item(s)...")
+
+    tmp_paths: list[str] = []
+    video_frames: list[tuple[float, str]] = []
+    images: list[tuple[str, str]] = []
+    skipped = 0
+    try:
+        for item in items:
+            kind = item["kind"]
+            obj = item["obj"]
+
+            if kind == "photo":
+                suffix, mime = ".jpg", "image/jpeg"
+            elif kind == "image_doc":
+                suffix, mime = ".img", obj.mime_type or "image/jpeg"
+            elif kind in ("video", "video_note", "video_doc"):
+                suffix, mime = ".mp4", None
+            else:
+                continue
+
+            try:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp_path = tmp.name
+                tmp_paths.append(tmp_path)
+                file_info = await obj.get_file()
+                if config.LOCAL_SERVER_URL:
+                    await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_path)
+                else:
+                    await bot.download_file(file_info.file_path, destination=tmp_path)
+            except Exception:
+                logging.warning(f"Skipping {kind} item — could not download", exc_info=True)
+                skipped += 1
+                continue
+
+            if mime is None:
+                extracted = extract_frames(tmp_path)
+                video_frames.extend(extracted)
+            else:
+                images.append((tmp_path, mime))
+
+        all_images = images + [(path, "image/jpeg") for _, path in video_frames]
+        if not all_images:
+            msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
+            await status_msg.edit_text(msg)
+            return None, None
+
+        response = await asyncio.to_thread(call_gemini_photos, all_images, history=history)
+
+        try:
+            data = parse_result(response)
+            text = format_result(data)
+        except (json.JSONDecodeError, KeyError):
+            data = {}
+            text = f"<b>PTI Result:</b>\n{response.text}"
+
+        await status_msg.edit_text(text, parse_mode="HTML")
+        return text, data
+
+    except Exception as e:
+        logging.exception("PTI mixed-media processing error")
+        await status_msg.edit_text(f"An error occurred: {e}")
+        return None, None
+    finally:
+        if video_frames:
+            delete_frames(video_frames)
         for path in tmp_paths:
             try:
                 os.remove(path)

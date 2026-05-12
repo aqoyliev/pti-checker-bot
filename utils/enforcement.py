@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta
 
 from aiogram.types import ChatPermissions
+from aiogram.utils.exceptions import NotEnoughRightsToRestrict
 
 from loader import bot
 from data.config import ADMINS
@@ -31,6 +34,8 @@ _FULL_PERMISSIONS = ChatPermissions(
 async def unmute_driver(group_id: int, user_id: int):
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_FULL_PERMISSIONS)
+    except NotEnoughRightsToRestrict:
+        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't unmute {user_id}")
     except Exception:
         logging.exception(f"Failed to unmute user {user_id} in group {group_id}")
 
@@ -38,6 +43,8 @@ async def unmute_driver(group_id: int, user_id: int):
 async def mute_driver(group_id: int, user_id: int):
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_MUTED_PERMISSIONS)
+    except NotEnoughRightsToRestrict:
+        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't mute {user_id}")
     except Exception:
         logging.exception(f"Failed to mute user {user_id} in group {group_id}")
 
@@ -62,7 +69,7 @@ async def check_driver_compliance(group_id: int, user_id: int) -> tuple[bool, st
     if last is None:
         return False, "no PTI submitted yet this week"
 
-    last_dt = datetime.fromisoformat(last["submitted_at"])
+    last_dt = last["submitted_at"]
     gap = datetime.utcnow() - last_dt
     days_left = MIN_GAP_DAYS - gap.days
     if days_left > 0:

@@ -5,3 +5,5 @@ services:
     env_file: .env
     environment:
       LOCAL_SERVER_URL: http://localhost:8081
+    volumes:
+      - .:/app

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncpg
 from data.config import DATABASE_URL
 
@@ -35,8 +37,11 @@ async def init_db():
                 unit_number        TEXT,
                 plate              TEXT,
                 result_json        TEXT,
-                result_text        TEXT
+                result_text        TEXT,
+                media_signature    TEXT
             );
+
+            ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS media_signature TEXT;
         """)
 
 
@@ -89,6 +94,15 @@ async def add_driver(group_id: int, user_id: int, name: str) -> bool:
         return False
 
 
+async def remove_driver(group_id: int, user_id: int) -> bool:
+    """Returns False if driver was not registered."""
+    result = await _pool_check().execute(
+        "DELETE FROM group_drivers WHERE group_id = $1 AND user_id = $2",
+        group_id, user_id,
+    )
+    return result != "DELETE 0"
+
+
 async def is_registered_driver(group_id: int, user_id: int) -> bool:
     row = await _pool_check().fetchrow(
         "SELECT 1 FROM group_drivers WHERE group_id = $1 AND user_id = $2",
@@ -109,15 +123,27 @@ async def log_pti(
     result_json: str,
     result_text: str,
     replied_message_id: int | None = None,
+    media_signature: str | None = None,
 ):
     await _pool_check().execute(
         """INSERT INTO pti_log
            (group_id, user_id, replied_message_id, passed, severity,
-            unit_number, plate, result_json, result_text)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+            unit_number, plate, result_json, result_text, media_signature)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
         group_id, user_id, replied_message_id,
         passed, severity, unit_number, plate, result_json, result_text,
+        media_signature,
     )
+
+
+async def find_duplicate_pti(group_id: int, user_id: int, media_signature: str) -> dict | None:
+    row = await _pool_check().fetchrow(
+        """SELECT submitted_at FROM pti_log
+           WHERE group_id = $1 AND user_id = $2 AND media_signature = $3
+           ORDER BY submitted_at DESC LIMIT 1""",
+        group_id, user_id, media_signature,
+    )
+    return dict(row) if row else None
 
 
 async def get_cached_check(group_id: int, replied_message_id: int) -> str | None:
