@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 .idea/*
 .env
+
+# Local docker-compose override (dev-only volume mounts etc.)
+docker-compose.override.yml
