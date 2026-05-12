@@ -8,7 +8,7 @@ RUN git clone --depth=1 --recurse-submodules https://github.com/tdlib/telegram-b
 
 WORKDIR /src/build
 RUN cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    cmake --build . -j$(nproc)
+    cmake --build . -j2
 
 FROM python:3.11-slim
 
