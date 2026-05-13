@@ -8,10 +8,27 @@ import shutil
 import tempfile
 
 from aiogram import types
+from google.genai import errors as genai_errors
 
 from data import config
 from loader import bot
 from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
+
+_GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
+
+
+async def _call_gemini_with_retry(fn, *args, **kwargs):
+    last_exc = None
+    for attempt, delay in enumerate((0,) + _GEMINI_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except genai_errors.ServerError as e:
+            last_exc = e
+            logging.warning(f"Gemini {e.code} on attempt {attempt + 1}; retrying in {_GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0}s")
+            continue
+    raise last_exc
 
 
 def format_result(data: dict) -> str:
@@ -72,10 +89,10 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
             await status_msg.edit_text("Could not extract frames from the video.")
             return None, None
 
-        await status_msg.edit_text("Analyzing...")
+        await status_msg.edit_text(f"Analyzing {len(frames)} frame(s)...")
 
         try:
-            response = call_gemini(frames, history=history)
+            response = await _call_gemini_with_retry(call_gemini, frames, history=history)
         finally:
             delete_frames(frames)
             frames = []
@@ -90,6 +107,10 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
         await status_msg.edit_text(text, parse_mode="HTML")
         return text, data
 
+    except genai_errors.ServerError:
+        logging.warning("Gemini still unavailable after retries (video flow)")
+        await status_msg.edit_text("The analysis service is overloaded right now. Please try /check again in a minute.")
+        return None, None
     except Exception as e:
         logging.exception("PTI video processing error")
         await status_msg.edit_text(f"An error occurred: {e}")
@@ -120,7 +141,7 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
             else:
                 await bot.download_file(file_info.file_path, destination=tmp_paths[-1])
 
-        response = await asyncio.to_thread(
+        response = await _call_gemini_with_retry(
             call_gemini_photos, [(p, "image/jpeg") for p in tmp_paths], history=history
         )
 
@@ -134,6 +155,10 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
         await status_msg.edit_text(text, parse_mode="HTML")
         return text, data
 
+    except genai_errors.ServerError:
+        logging.warning("Gemini still unavailable after retries (photo flow)")
+        await status_msg.edit_text("The analysis service is overloaded right now. Please try /check again in a minute.")
+        return None, None
     except Exception as e:
         logging.exception("PTI photo processing error")
         await status_msg.edit_text(f"An error occurred: {e}")
@@ -197,7 +222,15 @@ async def process_mixed_media(items, reply_to: types.Message, history: list[dict
             await status_msg.edit_text(msg)
             return None, None
 
-        response = await asyncio.to_thread(call_gemini_photos, all_images, history=history)
+        logging.info(
+            f"PTI mixed-media: {len(images)} photo(s) + {len(video_frames)} video frame(s) "
+            f"= {len(all_images)} image(s) → Gemini"
+        )
+        await status_msg.edit_text(
+            f"Analyzing {len(all_images)} image(s) "
+            f"({len(images)} photo(s) + {len(video_frames)} video frame(s))..."
+        )
+        response = await _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
 
         try:
             data = parse_result(response)
@@ -209,6 +242,10 @@ async def process_mixed_media(items, reply_to: types.Message, history: list[dict
         await status_msg.edit_text(text, parse_mode="HTML")
         return text, data
 
+    except genai_errors.ServerError:
+        logging.warning("Gemini still unavailable after retries (mixed-media flow)")
+        await status_msg.edit_text("The analysis service is overloaded right now. Please try /check again in a minute.")
+        return None, None
     except Exception as e:
         logging.exception("PTI mixed-media processing error")
         await status_msg.edit_text(f"An error occurred: {e}")

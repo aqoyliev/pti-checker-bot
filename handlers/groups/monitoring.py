@@ -40,6 +40,7 @@ class BufferedMessage:
     file_id: str | None
     mime_type: str | None
     timestamp: datetime
+    media_group_id: str | None = None
     photo_size: types.PhotoSize | None = None
     document: types.Document | None = None
     video: types.Video | None = None
@@ -83,6 +84,16 @@ def get_nearby_media(group_id: int, user_id: int, anchor_message_id: int, window
     return media
 
 
+def get_album_media(group_id: int, media_group_id: str) -> list[BufferedMessage]:
+    """Return all buffered media items belonging to the given Telegram album."""
+    buf = _get_buffer(group_id)
+    return [
+        msg for msg in buf
+        if msg.media_group_id == media_group_id
+        and msg.content_type in ("photo", "video", "video_note", "document")
+    ]
+
+
 def _effective_sender_id(message: types.Message) -> int:
     """The original author if the message was forwarded, else the direct sender."""
     if message.forward_from:
@@ -94,6 +105,7 @@ def buffer_message(message: types.Message) -> None:
     """Buffer a message for vehicle-change detection. Call from any handler that intercepts media."""
     buf = _get_buffer(message.chat.id)
     uid = _effective_sender_id(message)
+    mgid = message.media_group_id
 
     if message.photo:
         photo_size = message.photo[-1]
@@ -104,6 +116,7 @@ def buffer_message(message: types.Message) -> None:
             file_id=photo_size.file_id,
             mime_type=None,
             timestamp=datetime.now(),
+            media_group_id=mgid,
             photo_size=photo_size,
         ))
     elif message.video:
@@ -114,6 +127,7 @@ def buffer_message(message: types.Message) -> None:
             file_id=message.video.file_id,
             mime_type=message.video.mime_type,
             timestamp=datetime.now(),
+            media_group_id=mgid,
             video=message.video,
         ))
     elif message.video_note:
@@ -124,6 +138,7 @@ def buffer_message(message: types.Message) -> None:
             file_id=message.video_note.file_id,
             mime_type=None,
             timestamp=datetime.now(),
+            media_group_id=mgid,
             video_note=message.video_note,
         ))
     elif message.document:
@@ -134,6 +149,7 @@ def buffer_message(message: types.Message) -> None:
             file_id=message.document.file_id,
             mime_type=message.document.mime_type,
             timestamp=datetime.now(),
+            media_group_id=mgid,
             document=message.document,
         ))
 

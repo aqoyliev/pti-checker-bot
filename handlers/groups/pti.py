@@ -13,7 +13,7 @@ from utils.db import (
 )
 from utils.pti_processor import process_mixed_media
 from utils.enforcement import handle_pti_passed
-from handlers.groups.monitoring import buffer_message, get_nearby_media
+from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
@@ -148,14 +148,15 @@ async def handle_check_group(message: types.Message):
         await message.answer("The replied message is not a video or photo.")
         return
 
-    seen_ids = {reply.message_id}
-    for buf_item in get_nearby_media(message.chat.id, driver_uid, reply.message_id, window=20):
-        if buf_item.message_id in seen_ids:
-            continue
-        seen_ids.add(buf_item.message_id)
-        converted = _items_from_buffered(buf_item)
-        if converted:
-            items.append(converted)
+    if reply.media_group_id:
+        seen_ids = {reply.message_id}
+        for buf_item in get_album_media(message.chat.id, reply.media_group_id):
+            if buf_item.message_id in seen_ids:
+                continue
+            seen_ids.add(buf_item.message_id)
+            converted = _items_from_buffered(buf_item)
+            if converted:
+                items.append(converted)
 
     history = await get_recent_ptis(message.chat.id, limit=5)
     text, data = await process_mixed_media(items, message, history=history)

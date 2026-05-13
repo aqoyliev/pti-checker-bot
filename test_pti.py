@@ -109,6 +109,7 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
         i += 1
 
     cap.release()
+    logging.info(f"Extracted {len(saved)} frames from {os.path.basename(video_path)} ({duration:.1f}s @ {interval_seconds}s interval)")
     return saved
 
 
