@@ -132,3 +132,6 @@ dmypy.json
 
 # Local docker-compose override (dev-only volume mounts etc.)
 docker-compose.override.yml
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
