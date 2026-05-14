@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import asyncpg
 from data.config import DATABASE_URL
 
@@ -42,6 +44,36 @@ async def init_db():
             );
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS media_signature TEXT;
+
+            CREATE TABLE IF NOT EXISTS pending_proposals (
+                id            BIGSERIAL PRIMARY KEY,
+                group_id      BIGINT NOT NULL,
+                proposal_type TEXT NOT NULL,
+                payload       JSONB NOT NULL,
+                proposer_id   BIGINT,
+                message_id    BIGINT,
+                status        TEXT NOT NULL DEFAULT 'open',
+                created_at    TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS proposal_votes (
+                proposal_id BIGINT NOT NULL REFERENCES pending_proposals(id) ON DELETE CASCADE,
+                user_id     BIGINT NOT NULL,
+                vote        TEXT NOT NULL,
+                voted_at    TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (proposal_id, user_id)
+            );
+
+            ALTER TABLE pending_proposals ADD COLUMN IF NOT EXISTS reminder_count INT DEFAULT 0;
+
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS setup_nag_count INT DEFAULT 0;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_setup_nag_at TIMESTAMP;
+
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS truck_plate TEXT;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS trailer_unit TEXT;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS trailer_plate TEXT;
+
+            ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS driver_name TEXT;
         """)
 
 
@@ -62,7 +94,100 @@ async def get_group(group_id: int) -> dict | None:
 
 async def upsert_group(group_id: int):
     await _pool_check().execute(
-        "INSERT INTO groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id
+        "INSERT INTO groups (group_id, last_setup_nag_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING",
+        group_id,
+    )
+
+
+async def get_groups_needing_setup_nag() -> list[dict]:
+    rows = await _pool_check().fetch(
+        """SELECT g.* FROM groups g
+           WHERE g.setup_complete = FALSE
+             AND COALESCE(g.setup_nag_count, 0) < 3
+             AND NOT EXISTS (
+               SELECT 1 FROM pending_proposals p
+               WHERE p.group_id = g.group_id AND p.status = 'open'
+             )"""
+    )
+    return [dict(r) for r in rows]
+
+
+async def bump_setup_nag(group_id: int):
+    await _pool_check().execute(
+        """UPDATE groups
+           SET setup_nag_count = COALESCE(setup_nag_count, 0) + 1,
+               last_setup_nag_at = NOW()
+           WHERE group_id = $1""",
+        group_id,
+    )
+
+
+async def reset_setup_nag(group_id: int):
+    await _pool_check().execute(
+        "UPDATE groups SET setup_nag_count = 0, last_setup_nag_at = NULL WHERE group_id = $1",
+        group_id,
+    )
+
+
+# ---------- vehicle info ----------
+
+async def set_truck_plate(group_id: int, plate: str):
+    await _pool_check().execute(
+        "UPDATE groups SET truck_plate = $1 WHERE group_id = $2", plate, group_id,
+    )
+
+
+async def set_trailer(group_id: int, unit: str | None, plate: str | None):
+    if unit is not None and plate is not None:
+        await _pool_check().execute(
+            "UPDATE groups SET trailer_unit = $1, trailer_plate = $2 WHERE group_id = $3",
+            unit, plate, group_id,
+        )
+    elif unit is not None:
+        await _pool_check().execute(
+            "UPDATE groups SET trailer_unit = $1 WHERE group_id = $2", unit, group_id,
+        )
+    elif plate is not None:
+        await _pool_check().execute(
+            "UPDATE groups SET trailer_plate = $1 WHERE group_id = $2", plate, group_id,
+        )
+
+
+async def set_truck_unit(group_id: int, unit: str, plate: str | None):
+    """Replace truck unit (and optionally plate) without flipping setup_complete."""
+    if plate is not None:
+        await _pool_check().execute(
+            "UPDATE groups SET unit_number = $1, truck_plate = $2 WHERE group_id = $3",
+            unit, plate, group_id,
+        )
+    else:
+        await _pool_check().execute(
+            "UPDATE groups SET unit_number = $1 WHERE group_id = $2", unit, group_id,
+        )
+
+
+async def find_open_vehicle_change(group_id: int, kind: str) -> dict | None:
+    row = await _pool_check().fetchrow(
+        """SELECT * FROM pending_proposals
+           WHERE group_id = $1
+             AND proposal_type = 'vehicle_change'
+             AND status = 'open'
+             AND payload->>'kind' = $2
+           ORDER BY created_at DESC LIMIT 1""",
+        group_id, kind,
+    )
+    if not row:
+        return None
+    d = dict(row)
+    payload = d["payload"]
+    if isinstance(payload, str):
+        d["payload"] = json.loads(payload)
+    return d
+
+
+async def mark_pti_failed(pti_log_id: int):
+    await _pool_check().execute(
+        "UPDATE pti_log SET passed = FALSE WHERE id = $1", pti_log_id,
     )
 
 
@@ -124,16 +249,19 @@ async def log_pti(
     result_text: str,
     replied_message_id: int | None = None,
     media_signature: str | None = None,
-):
-    await _pool_check().execute(
+    driver_name: str | None = None,
+) -> int:
+    row = await _pool_check().fetchrow(
         """INSERT INTO pti_log
            (group_id, user_id, replied_message_id, passed, severity,
-            unit_number, plate, result_json, result_text, media_signature)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+            unit_number, plate, result_json, result_text, media_signature, driver_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING id""",
         group_id, user_id, replied_message_id,
         passed, severity, unit_number, plate, result_json, result_text,
-        media_signature,
+        media_signature, driver_name,
     )
+    return row["id"]
 
 
 async def find_duplicate_pti(group_id: int, user_id: int, media_signature: str) -> dict | None:
@@ -154,6 +282,11 @@ async def get_cached_check(group_id: int, replied_message_id: int) -> str | None
         group_id, replied_message_id,
     )
     return row["result_text"] if row else None
+
+
+async def get_pti_log(pti_log_id: int) -> dict | None:
+    row = await _pool_check().fetchrow("SELECT * FROM pti_log WHERE id = $1", pti_log_id)
+    return dict(row) if row else None
 
 
 async def get_recent_ptis(group_id: int, limit: int = 5) -> list[dict]:
@@ -190,3 +323,118 @@ async def get_all_registered_groups() -> list[dict]:
         "SELECT * FROM groups WHERE setup_complete = TRUE"
     )
     return [dict(r) for r in rows]
+
+
+# ---------- proposals ----------
+
+async def create_proposal(
+    group_id: int,
+    proposal_type: str,
+    payload: dict,
+    proposer_id: int | None,
+) -> int:
+    row = await _pool_check().fetchrow(
+        """INSERT INTO pending_proposals (group_id, proposal_type, payload, proposer_id)
+           VALUES ($1, $2, $3::jsonb, $4)
+           RETURNING id""",
+        group_id, proposal_type, json.dumps(payload), proposer_id,
+    )
+    return row["id"]
+
+
+async def attach_proposal_message(proposal_id: int, message_id: int):
+    await _pool_check().execute(
+        "UPDATE pending_proposals SET message_id = $1 WHERE id = $2",
+        message_id, proposal_id,
+    )
+
+
+async def get_proposal(proposal_id: int) -> dict | None:
+    row = await _pool_check().fetchrow(
+        "SELECT * FROM pending_proposals WHERE id = $1", proposal_id
+    )
+    if not row:
+        return None
+    d = dict(row)
+    payload = d["payload"]
+    if isinstance(payload, str):
+        d["payload"] = json.loads(payload)
+    return d
+
+
+async def set_proposal_status(proposal_id: int, status: str):
+    await _pool_check().execute(
+        "UPDATE pending_proposals SET status = $1 WHERE id = $2",
+        status, proposal_id,
+    )
+
+
+async def cast_vote(proposal_id: int, user_id: int, vote: str):
+    """Insert or update the user's vote on this proposal."""
+    await _pool_check().execute(
+        """INSERT INTO proposal_votes (proposal_id, user_id, vote)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (proposal_id, user_id)
+           DO UPDATE SET vote = EXCLUDED.vote, voted_at = NOW()""",
+        proposal_id, user_id, vote,
+    )
+
+
+async def count_votes(proposal_id: int) -> tuple[int, int]:
+    """Return (confirms, rejects) for this proposal."""
+    rows = await _pool_check().fetch(
+        "SELECT vote, COUNT(*) AS c FROM proposal_votes WHERE proposal_id = $1 GROUP BY vote",
+        proposal_id,
+    )
+    confirms = 0
+    rejects = 0
+    for r in rows:
+        if r["vote"] == "confirm":
+            confirms = r["c"]
+        elif r["vote"] == "reject":
+            rejects = r["c"]
+    return confirms, rejects
+
+
+async def bump_proposal_reminder(proposal_id: int) -> int:
+    row = await _pool_check().fetchrow(
+        """UPDATE pending_proposals
+           SET reminder_count = reminder_count + 1
+           WHERE id = $1
+           RETURNING reminder_count""",
+        proposal_id,
+    )
+    return row["reminder_count"] if row else 0
+
+
+async def get_open_proposals() -> list[dict]:
+    rows = await _pool_check().fetch(
+        "SELECT * FROM pending_proposals WHERE status = 'open' ORDER BY id"
+    )
+    out: list[dict] = []
+    for row in rows:
+        d = dict(row)
+        payload = d["payload"]
+        if isinstance(payload, str):
+            d["payload"] = json.loads(payload)
+        out.append(d)
+    return out
+
+
+async def find_open_add_driver_proposal(group_id: int, driver_user_id: int) -> dict | None:
+    row = await _pool_check().fetchrow(
+        """SELECT * FROM pending_proposals
+           WHERE group_id = $1
+             AND proposal_type = 'add_driver'
+             AND status = 'open'
+             AND (payload->>'user_id')::bigint = $2
+           ORDER BY created_at DESC LIMIT 1""",
+        group_id, driver_user_id,
+    )
+    if not row:
+        return None
+    d = dict(row)
+    payload = d["payload"]
+    if isinstance(payload, str):
+        d["payload"] = json.loads(payload)
+    return d

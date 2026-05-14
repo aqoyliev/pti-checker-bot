@@ -31,7 +31,18 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
     raise last_exc
 
 
-def format_result(data: dict) -> str:
+def _media_summary(photos: int, videos: int) -> str | None:
+    if not photos and not videos:
+        return None
+    parts: list[str] = []
+    if photos:
+        parts.append(f"{photos} photo{'s' if photos != 1 else ''}")
+    if videos:
+        parts.append(f"{videos} video{'s' if videos != 1 else ''}")
+    return f"📎 Checked: {' and '.join(parts)}"
+
+
+def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str | None = None) -> str:
     status = data.get("status", "?")
     severity = data.get("severity", "?")
     confidence = data.get("confidence", "?")
@@ -45,9 +56,17 @@ def format_result(data: dict) -> str:
 
     lines = [
         f"{status_icon} <b>PTI Result: {status}</b>",
+    ]
+    if driver_name:
+        from html import escape
+        lines.append(f"👤 Driver: <b>{escape(driver_name)}</b>")
+    lines.extend([
         f"{severity_icon} Severity: <b>{severity}</b>",
         f"Confidence: <b>{confidence}</b>  |  Image quality: <b>{image_quality}</b>",
-    ]
+    ])
+    summary = _media_summary(photos, videos)
+    if summary:
+        lines.append(summary)
 
     if issues:
         lines.append("\n<b>Issues found:</b>")
@@ -99,7 +118,7 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
 
         try:
             data = parse_result(response)
-            text = format_result(data)
+            text = format_result(data, photos=0, videos=1)
         except (json.JSONDecodeError, KeyError):
             data = {}
             text = f"<b>PTI Result:</b>\n{response.text}"
@@ -147,7 +166,7 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
 
         try:
             data = parse_result(response)
-            text = format_result(data)
+            text = format_result(data, photos=len(photos), videos=0)
         except (json.JSONDecodeError, KeyError):
             data = {}
             text = f"<b>PTI Result:</b>\n{response.text}"
@@ -171,12 +190,27 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
                 pass
 
 
-async def process_mixed_media(items, reply_to: types.Message, history: list[dict] | None = None) -> tuple[str | None, dict | None]:
+async def process_mixed_media(
+    items,
+    reply_to: types.Message,
+    history: list[dict] | None = None,
+    driver_name: str | None = None,
+) -> tuple[str | None, dict | None, types.Message | None]:
     """Process a mix of photos, image docs, and videos as a single PTI inspection.
 
     `items` is a list of dicts: {"kind": "photo"|"image_doc"|"video"|"video_note"|"video_doc", "obj": <telegram file obj>}
+
+    Returns ``(text, data, status_msg)`` — the formatted PASS/FAIL text, the raw
+    parsed dict, and the bot's status message in the chat. On success the status
+    message is left with the "Analyzing..." progress text; the caller chooses what
+    to render there (full result, or a hold message during vehicle-change vote).
+    On error the status message is edited with the error and ``(None, None, status_msg)``
+    is returned.
     """
     status_msg = await reply_to.answer(f"Analyzing {len(items)} item(s)...")
+
+    photo_count = sum(1 for it in items if it["kind"] in ("photo", "image_doc"))
+    video_count = sum(1 for it in items if it["kind"] in ("video", "video_note", "video_doc"))
 
     tmp_paths: list[str] = []
     video_frames: list[tuple[float, str]] = []
@@ -226,30 +260,31 @@ async def process_mixed_media(items, reply_to: types.Message, history: list[dict
             f"PTI mixed-media: {len(images)} photo(s) + {len(video_frames)} video frame(s) "
             f"= {len(all_images)} image(s) → Gemini"
         )
-        await status_msg.edit_text(
-            f"Analyzing {len(all_images)} image(s) "
-            f"({len(images)} photo(s) + {len(video_frames)} video frame(s))..."
-        )
+        parts: list[str] = []
+        if photo_count:
+            parts.append(f"{photo_count} photo{'s' if photo_count != 1 else ''}")
+        if video_count:
+            parts.append(f"{video_count} video{'s' if video_count != 1 else ''}")
+        await status_msg.edit_text(f"Analyzing {' and '.join(parts) or 'media'}...")
         response = await _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
 
         try:
             data = parse_result(response)
-            text = format_result(data)
+            text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}
             text = f"<b>PTI Result:</b>\n{response.text}"
 
-        await status_msg.edit_text(text, parse_mode="HTML")
-        return text, data
+        return text, data, status_msg
 
     except genai_errors.ServerError:
         logging.warning("Gemini still unavailable after retries (mixed-media flow)")
         await status_msg.edit_text("The analysis service is overloaded right now. Please try /check again in a minute.")
-        return None, None
+        return None, None, status_msg
     except Exception as e:
         logging.exception("PTI mixed-media processing error")
         await status_msg.edit_text(f"An error occurred: {e}")
-        return None, None
+        return None, None, status_msg
     finally:
         if video_frames:
             delete_frames(video_frames)
@@ -282,7 +317,7 @@ async def process_image_docs(docs: list[types.Document], reply_to: types.Message
 
         try:
             data = parse_result(response)
-            text = format_result(data)
+            text = format_result(data, photos=len(docs), videos=0)
         except (json.JSONDecodeError, KeyError):
             data = {}
             text = f"<b>PTI Result:</b>\n{response.text}"

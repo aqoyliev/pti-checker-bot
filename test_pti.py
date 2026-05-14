@@ -25,7 +25,7 @@ Your inspection protocol:
 3. Use DOT terminology (e.g., ABC check — Airlines, Bill of Lading, Connections; CMS — Cracked, Missing, Stuck).
 4. If a photo is too dark or blurry to assess, note it under image_quality and list that area under what_was_not_visible.
 5. Severity definitions: NONE = all clear; MINOR = monitor but drivable; MAJOR = repair soon, drivable short-term; CRITICAL = Out of Service (OOS), do not move vehicle.
-6. VEHICLE IDENTIFICATION: Read any visible unit numbers (painted on cab door or body) and license plates. If previous PTI history is provided, check whether previously flagged issues have been resolved in this submission.
+6. VEHICLE IDENTIFICATION: Read any visible unit numbers (painted on cab door or body) and license plates for BOTH the truck and the trailer if both are visible across the media. Return one entry per distinct vehicle in the "vehicles" array. If previous PTI history is provided, check whether previously flagged issues have been resolved in this submission.
 
 Respond ONLY with a raw JSON object — no markdown, no code fences:
 {
@@ -37,11 +37,13 @@ Respond ONLY with a raw JSON object — no markdown, no code fences:
   "what_was_visible": ["truck parts clearly seen across frames"],
   "what_was_not_visible": ["required PTI areas not seen or too dark/blurry to assess"],
   "advice": "concise actionable advice for the driver, referencing 49 CFR if OOS",
-  "vehicle": {
-    "type": "truck" or "trailer" or null,
-    "unit_number": "visible unit number or null",
-    "plate": "visible license plate or null"
-  },
+  "vehicles": [
+    {
+      "type": "truck" or "trailer",
+      "unit_number": "visible unit number or null",
+      "plate": "visible license plate or null"
+    }
+  ],
   "previously_flagged_resolved": ["issue from history confirmed fixed"] or []
 }"""
 
