@@ -13,38 +13,42 @@ from google.genai import types as genai_types
 
 load_dotenv()
 
-PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "2"))
+PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "1"))
 
-SYSTEM_PROMPT = """You are a professional US Department of Transportation (DOT) Vehicle Inspector with 20+ years of field experience. \
-You are analyzing media (video frames or photos) from a PTI walk-around inspection of a commercial semi-truck or trailer. \
-Treat all provided frames/photos together as a single unified inspection.
+SYSTEM_PROMPT = """You are an experienced commercial-truck inspector. \
+Analyze the supplied frames/photos from a pre-trip inspection (PTI) of a semi-truck and/or trailer as one combined inspection.
 
-Your inspection protocol:
-1. IDENTIFY components visible across the media (e.g., steer tires, drive tires, 5th wheel, glad hands, brake chambers, lights, reflectors, fuel tank, exhaust, frame, cab, mirrors).
-2. SCAN for defects: cuts/bulges/low tread on tires, air leaks, missing lug nuts, cracked leaf springs, non-functional lights, damaged reflective tape, fluid leaks, bent/cracked frame members.
-3. Use DOT terminology (e.g., ABC check — Airlines, Bill of Lading, Connections; CMS — Cracked, Missing, Stuck).
-4. If a photo is too dark or blurry to assess, note it under image_quality and list that area under what_was_not_visible.
-5. Severity definitions: NONE = all clear; MINOR = monitor but drivable; MAJOR = repair soon, drivable short-term; CRITICAL = Out of Service (OOS), do not move vehicle.
-6. VEHICLE IDENTIFICATION: Read any visible unit numbers (painted on cab door or body) and license plates for BOTH the truck and the trailer if both are visible across the media. Return one entry per distinct vehicle in the "vehicles" array. If previous PTI history is provided, check whether previously flagged issues have been resolved in this submission.
+Inspection process:
+1. Scan each frame for visible defects: flat or worn tires, missing lug nuts, broken/non-working lights, fluid leaks, cracked frame, damaged mirrors, broken reflectors, air-line problems, cracked windshield, etc.
+2. Look across ALL frames before deciding — a defect visible in one frame is still a defect.
+3. Severity: NONE = all clear; MINOR = small problem, can drive; MAJOR = needs fixing soon; CRITICAL = unsafe, do not drive.
+4. VEHICLE IDENTIFICATION: Read visible unit numbers (painted on cab or trailer body) and license plates for the truck and trailer separately. Return one entry per distinct vehicle in "vehicles". If previous PTI history is provided, check whether prior issues are now fixed.
+
+Write issues in plain everyday English the driver will understand. Examples of the style you should use:
+  - "Front left tire is flat"
+  - "Left headlight is out"
+  - "Oil leak under engine"
+  - "Mud flap is torn"
+Do NOT cite CFR sections or DOT acronyms. Keep each issue under ~10 words.
+
+Advice should be one short sentence telling the driver what to do next (e.g. "Replace front tire before driving.").
+
+If a frame is too dark, too blurry, or angled so a required PTI area isn't visible, list that area under "what_was_not_visible" so the driver knows what to re-shoot.
 
 Respond ONLY with a raw JSON object — no markdown, no code fences:
 {
   "status": "PASS" or "FAIL",
   "severity": "NONE" or "MINOR" or "MAJOR" or "CRITICAL",
-  "confidence": "LOW" or "MEDIUM" or "HIGH",
-  "image_quality": "POOR" or "ACCEPTABLE" or "GOOD",
-  "issues": ["specific defect with DOT regulation reference if applicable"],
-  "what_was_visible": ["truck parts clearly seen across frames"],
-  "what_was_not_visible": ["required PTI areas not seen or too dark/blurry to assess"],
-  "advice": "concise actionable advice for the driver, referencing 49 CFR if OOS",
+  "issues": ["short plain-English defect"],
+  "what_was_not_visible": ["plain-English areas that couldn't be assessed"],
+  "advice": "one short sentence",
   "vehicles": [
     {
       "type": "truck" or "trailer",
       "unit_number": "visible unit number or null",
       "plate": "visible license plate or null"
     }
-  ],
-  "previously_flagged_resolved": ["issue from history confirmed fixed"] or []
+  ]
 }"""
 
 
@@ -186,7 +190,15 @@ def delete_frames(frames: list[tuple[float, str]]) -> None:
 
 
 def parse_result(response) -> dict:
-    return json.loads(response.text)
+    text = getattr(response, "text", None)
+    if not text:
+        reason = "unknown"
+        try:
+            reason = str(response.candidates[0].finish_reason)
+        except Exception:
+            pass
+        raise ValueError(f"Gemini returned no text (finish_reason={reason})")
+    return json.loads(text)
 
 
 def print_result(response) -> None:

@@ -15,6 +15,7 @@ from loader import bot
 from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
+MAX_FRAMES_TO_GEMINI = 60
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
@@ -43,46 +44,39 @@ def _media_summary(photos: int, videos: int) -> str | None:
 
 
 def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str | None = None) -> str:
+    from html import escape
+
     status = data.get("status", "?")
-    severity = data.get("severity", "?")
-    confidence = data.get("confidence", "?")
-    image_quality = data.get("image_quality", "?")
-    issues = data.get("issues", [])
-    not_visible = data.get("what_was_not_visible", [])
-    advice = data.get("advice", "")
+    severity = data.get("severity", "")
+    issues = data.get("issues", []) or []
+    not_visible = data.get("what_was_not_visible", []) or []
+    advice = (data.get("advice") or "").strip()
 
-    status_icon = "✅" if status == "PASS" else "❌"
-    severity_icon = {"NONE": "🟢", "MINOR": "🟡", "MAJOR": "🟠", "CRITICAL": "🔴"}.get(severity, "⚪")
+    icon = "✅" if status == "PASS" else "❌"
+    header = f"{icon} <b>PTI {escape(status)}</b>"
+    if status != "PASS" and severity and severity != "NONE":
+        header += f" — <b>{escape(severity)}</b>"
 
-    lines = [
-        f"{status_icon} <b>PTI Result: {status}</b>",
-    ]
+    lines = [header]
     if driver_name:
-        from html import escape
-        lines.append(f"👤 Driver: <b>{escape(driver_name)}</b>")
-    lines.extend([
-        f"{severity_icon} Severity: <b>{severity}</b>",
-        f"Confidence: <b>{confidence}</b>  |  Image quality: <b>{image_quality}</b>",
-    ])
+        lines.append(f"👤 {escape(driver_name)}")
     summary = _media_summary(photos, videos)
     if summary:
         lines.append(summary)
 
     if issues:
-        lines.append("\n<b>Issues found:</b>")
-        lines.extend(f"  • {issue}" for issue in issues)
+        lines.append("")
+        lines.append("<b>Issues:</b>")
+        lines.extend(f"  • {escape(str(i))}" for i in issues)
 
     if not_visible:
-        lines.append("\n<b>Not visible:</b>")
-        lines.extend(f"  • {item}" for item in not_visible)
-
-    resolved = data.get("previously_flagged_resolved", [])
-    if resolved:
-        lines.append("\n<b>Previously flagged — now resolved:</b>")
-        lines.extend(f"  ✔ {item}" for item in resolved)
+        lines.append("")
+        lines.append("<b>Not visible:</b>")
+        lines.extend(f"  • {escape(str(i))}" for i in not_visible)
 
     if advice:
-        lines.append(f"\n<b>Advice:</b> {advice}")
+        lines.append("")
+        lines.append(f"<b>Advice:</b> {escape(advice)}")
 
     return "\n".join(lines)
 
@@ -250,15 +244,26 @@ async def process_mixed_media(
             else:
                 images.append((tmp_path, mime))
 
-        all_images = images + [(path, "image/jpeg") for _, path in video_frames]
+        # Subsample video frames so we don't blow past Gemini's input limits on long videos.
+        # Photos always go through; video frames get uniformly sampled to fit the remaining budget.
+        budget_for_video = max(MAX_FRAMES_TO_GEMINI - len(images), 0)
+        if len(video_frames) > budget_for_video and budget_for_video > 0:
+            step = len(video_frames) / budget_for_video
+            sampled_frames = [video_frames[int(i * step)] for i in range(budget_for_video)]
+        elif budget_for_video == 0:
+            sampled_frames = []
+        else:
+            sampled_frames = video_frames
+
+        all_images = images + [(path, "image/jpeg") for _, path in sampled_frames]
         if not all_images:
             msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)
-            return None, None
+            return None, None, status_msg
 
         logging.info(
-            f"PTI mixed-media: {len(images)} photo(s) + {len(video_frames)} video frame(s) "
-            f"= {len(all_images)} image(s) → Gemini"
+            f"PTI mixed-media: {len(images)} photo(s) + {len(sampled_frames)} sampled video frame(s) "
+            f"(from {len(video_frames)} extracted) = {len(all_images)} image(s) → Gemini"
         )
         parts: list[str] = []
         if photo_count:
@@ -280,6 +285,13 @@ async def process_mixed_media(
     except genai_errors.ServerError:
         logging.warning("Gemini still unavailable after retries (mixed-media flow)")
         await status_msg.edit_text("The analysis service is overloaded right now. Please try /check again in a minute.")
+        return None, None, status_msg
+    except ValueError as e:
+        logging.warning(f"Gemini returned unusable response: {e}")
+        await status_msg.edit_text(
+            "The analysis service could not read this PTI (response was empty or blocked). "
+            "Please re-record and try /check again."
+        )
         return None, None, status_msg
     except Exception as e:
         logging.exception("PTI mixed-media processing error")
