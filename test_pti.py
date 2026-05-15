@@ -144,8 +144,12 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
     parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2),
+        model="gemini-2.5-pro",
+        config=genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0,
+            response_mime_type="application/json",
+        ),
         contents=parts,
     )
     return response
@@ -173,8 +177,12 @@ def call_gemini_photos(images: list[tuple[str, str]], history: list[dict] | None
     parts.append(f"Analyze all {n} photo(s) above as a single PTI inspection and return the JSON result.")
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        config=genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.2),
+        model="gemini-2.5-pro",
+        config=genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0,
+            response_mime_type="application/json",
+        ),
         contents=parts,
     )
     return response

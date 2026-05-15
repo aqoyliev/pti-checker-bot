@@ -15,7 +15,7 @@ from loader import bot
 from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
-MAX_FRAMES_TO_GEMINI = 60
+MAX_FRAMES_TO_GEMINI = 90
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
