@@ -43,40 +43,55 @@ def _media_summary(photos: int, videos: int) -> str | None:
     return f"📎 Checked: {' and '.join(parts)}"
 
 
+_SEVERITY_ICON = {"NONE": "🟢", "MINOR": "🟡", "MAJOR": "🟠", "CRITICAL": "🔴"}
+
+
 def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str | None = None) -> str:
     from html import escape
 
     status = data.get("status", "?")
-    severity = data.get("severity", "")
+    severity = data.get("severity", "") or ""
+    confidence = data.get("confidence", "") or ""
+    image_quality = data.get("image_quality", "") or ""
     issues = data.get("issues", []) or []
+    clean = data.get("checked_clean", []) or []
     not_visible = data.get("what_was_not_visible", []) or []
     advice = (data.get("advice") or "").strip()
 
-    icon = "✅" if status == "PASS" else "❌"
-    header = f"{icon} <b>PTI {escape(status)}</b>"
-    if status != "PASS" and severity and severity != "NONE":
-        header += f" — <b>{escape(severity)}</b>"
-
-    lines = [header]
+    status_icon = "✅" if status == "PASS" else "❌"
+    lines = [f"{status_icon} <b>PTI Result: {escape(status)}</b>"]
     if driver_name:
-        lines.append(f"👤 {escape(driver_name)}")
+        lines.append(f"👤 <b>Driver:</b> {escape(driver_name)}")
+    if severity and severity != "NONE":
+        sev_icon = _SEVERITY_ICON.get(severity, "")
+        lines.append(f"{sev_icon} <b>Severity:</b> {escape(severity)}".lstrip())
+    meta_bits = []
+    if confidence:
+        meta_bits.append(f"Confidence: {escape(confidence)}")
+    if image_quality:
+        meta_bits.append(f"Image quality: {escape(image_quality)}")
+    if meta_bits:
+        lines.append(" | ".join(meta_bits))
     summary = _media_summary(photos, videos)
     if summary:
         lines.append(summary)
 
     if issues:
         lines.append("")
-        lines.append("<b>Issues:</b>")
-        lines.extend(f"  • {escape(str(i))}" for i in issues)
+        lines.extend(f"❌ {escape(str(i))}" for i in issues)
+
+    if clean:
+        if not issues:
+            lines.append("")
+        lines.extend(f"✅ {escape(str(c))}" for c in clean)
 
     if not_visible:
         lines.append("")
-        lines.append("<b>Not visible:</b>")
-        lines.extend(f"  • {escape(str(i))}" for i in not_visible)
+        lines.append(f"👁 <b>Not visible:</b> {escape(', '.join(str(n) for n in not_visible))}")
 
     if advice:
         lines.append("")
-        lines.append(f"<b>Advice:</b> {escape(advice)}")
+        lines.append(f"💡 {escape(advice)}")
 
     return "\n".join(lines)
 

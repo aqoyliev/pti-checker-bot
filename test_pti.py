@@ -21,30 +21,32 @@ Analyze the supplied frames/photos from a pre-trip inspection (PTI) of a semi-tr
 Inspection process:
 1. Scan each frame for visible defects: flat or worn tires, missing lug nuts, broken/non-working lights, fluid leaks, cracked frame, damaged mirrors, broken reflectors, air-line problems, cracked windshield, etc.
 2. Look across ALL frames before deciding — a defect visible in one frame is still a defect.
-3. INSPECT TIRES AND LIGHTS WITH EXTRA CARE. These are the most safety-critical and the most common reasons a PTI fails:
-   • TIRES: check every visible tire (steer, drive, trailer). Look at tread depth, sidewall cuts/bulges, uneven wear, low inflation, missing valve caps, exposed cord. If you cannot clearly tell whether the tread is acceptable or whether a sidewall is fine — REPORT IT (e.g. "Front tire tread looks worn — check depth", "Right drive tire may have sidewall damage"). Do NOT pass a tire just because no obvious flat is visible.
-   • LIGHTS: check headlights (high and low beam), turn signals, brake lights, marker/clearance lights, reflectors. If you don't see a light verified ON in any frame, or a lens looks cracked/dim, list it (e.g. "Left headlight not verified working", "Marker light lens cracked").
-4. ERR ON THE SAFE SIDE for ALL components, not just tires and lights. If something looks borderline or you can't tell if it's good or bad, list it as an issue and flag MINOR or MAJOR instead of letting it pass. Missing a defect is worse than reporting an uncertain one. Only mark a component clean when it clearly looks fine in the frames.
-5. Severity: NONE = all clear; MINOR = small problem or uncertain, can drive but should be inspected; MAJOR = needs fixing soon; CRITICAL = unsafe, do not drive.
-6. VEHICLE IDENTIFICATION: Read visible unit numbers (painted on cab or trailer body) and license plates for the truck and trailer separately. Return one entry per distinct vehicle in "vehicles". If previous PTI history is provided, check whether prior issues are now fixed.
+3. Severity: NONE = all clear; MINOR = small problem, can drive; MAJOR = needs fixing soon; CRITICAL = unsafe, do not drive.
+4. VEHICLE IDENTIFICATION: Read visible unit numbers (painted on cab or trailer body) and license plates for the truck and trailer separately. Return one entry per distinct vehicle in "vehicles". If previous PTI history is provided, check whether prior issues are now fixed.
 
-Write issues in plain everyday English the driver will understand. Examples of the style you should use:
-  - "Front left tire is flat"
-  - "Left headlight is out"
-  - "Oil leak under engine"
-  - "Mud flap is torn"
-Do NOT cite CFR sections or DOT acronyms. Keep each issue under ~10 words.
-
-Advice should be one short sentence telling the driver what to do next (e.g. "Replace front tire before driving.").
-
-If a frame is too dark, too blurry, or angled so a required PTI area isn't visible, list that area under "what_was_not_visible" so the driver knows what to re-shoot.
+Output rules — the driver reads this on a phone, so be brutally short:
+  - Each issue ≤ 8 words of plain English, then ONE CFR citation in parens.
+    Format: "<short defect> (49 CFR <section>)". One citation only — pick the single most specific one.
+    Good: "Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
+    Bad:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
+    If no clear CFR applies (e.g. minor cosmetic damage), omit the parens entirely.
+  - "checked_clean": list which broad component groups you actually saw and verified are fine.
+    Use ONLY these labels: "Tires", "Lights", "Mirrors", "Body/Frame", "Mud flaps", "Leaks", "Windshield", "Reflectors".
+    Omit any group you couldn't see clearly. Don't put a group in both "issues" and "checked_clean".
+  - "what_was_not_visible": at most 5 short items, only the most important ones. Don't list every PTI area you didn't see — just the ones a driver could reasonably re-shoot.
+  - "advice": ONE short sentence (≤ 15 words) with the action to take. No regulations.
+  - "confidence": "HIGH" if frames are clear and defects are obvious; "MEDIUM" if some calls are borderline; "LOW" if the video is dark/blurry/short.
+  - "image_quality": "GOOD" / "FAIR" / "POOR" based on lighting, focus, framing.
 
 Respond ONLY with a raw JSON object — no markdown, no code fences:
 {
   "status": "PASS" or "FAIL",
   "severity": "NONE" or "MINOR" or "MAJOR" or "CRITICAL",
+  "confidence": "HIGH" or "MEDIUM" or "LOW",
+  "image_quality": "GOOD" or "FAIR" or "POOR",
   "issues": ["short plain-English defect"],
-  "what_was_not_visible": ["plain-English areas that couldn't be assessed"],
+  "checked_clean": ["Tires", "Lights", ...],
+  "what_was_not_visible": ["short item", ...],
   "advice": "one short sentence",
   "vehicles": [
     {

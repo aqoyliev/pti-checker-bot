@@ -302,7 +302,11 @@ async def handle_check_group(message: types.Message):
             )
             return
 
+    group = await get_group(message.chat.id)
     history = await get_recent_ptis(message.chat.id, limit=5)
+    current_unit = group.get("unit_number") if group else None
+    if current_unit:
+        history = [h for h in history if h.get("unit_number") == current_unit]
     text, data, status_msg = await process_mixed_media(
         items, message, history=history, driver_name=driver_name,
     )
@@ -310,7 +314,6 @@ async def handle_check_group(message: types.Message):
     if text is None or data is None or status_msg is None:
         return  # error path; process_mixed_media already edited the status message
 
-    group = await get_group(message.chat.id)
     truck_change = _truck_change_suspected(group, data)
 
     if truck_change:
