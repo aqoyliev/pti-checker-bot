@@ -12,10 +12,9 @@ from google.genai import errors as genai_errors
 
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
+from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
-MAX_FRAMES_TO_GEMINI = 300
 
 
 def _fmt_timestamp(seconds: float) -> str:
@@ -117,7 +116,14 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
         else:
             await bot.download_file(file_info.file_path, destination=tmp_path)
 
-        frames = extract_frames(tmp_path)
+        try:
+            frames = extract_frames(tmp_path)
+        except VideoTooLongError as e:
+            mins = int(e.duration) // 60
+            await status_msg.edit_text(
+                f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
+            )
+            return None, None
         if not frames:
             await status_msg.edit_text("Could not extract frames from the video.")
             return None, None
@@ -259,33 +265,35 @@ async def process_mixed_media(
                 continue
 
             if mime is None:
-                extracted = extract_frames(tmp_path)
+                try:
+                    extracted = extract_frames(tmp_path)
+                except VideoTooLongError as e:
+                    mins = int(e.duration) // 60
+                    await status_msg.edit_text(
+                        f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
+                    )
+                    return None, None, status_msg
                 video_frames.extend(extracted)
             else:
                 images.append((tmp_path, mime))
 
-        # Subsample video frames so we don't blow past Gemini's input limits on long videos.
-        # Photos always go through; video frames get uniformly sampled to fit the remaining budget.
-        budget_for_video = max(MAX_FRAMES_TO_GEMINI - len(images), 0)
-        if len(video_frames) > budget_for_video and budget_for_video > 0:
-            step = len(video_frames) / budget_for_video
-            sampled_frames = [video_frames[int(i * step)] for i in range(budget_for_video)]
-        elif budget_for_video == 0:
-            sampled_frames = []
-        else:
-            sampled_frames = video_frames
+        capped_frames = video_frames
+        if len(video_frames) > MAX_FRAMES:
+            step = len(video_frames) / MAX_FRAMES
+            capped_frames = [video_frames[int(i * step)] for i in range(MAX_FRAMES)]
 
         photo_labels = [(p, m, f"Photo {i + 1}") for i, (p, m) in enumerate(images)]
-        video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in sampled_frames]
+        video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in capped_frames]
         all_images = photo_labels + video_labels
         if not all_images:
             msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)
             return None, None, status_msg
 
+        cap_note = f" (capped from {len(video_frames)})" if len(capped_frames) < len(video_frames) else ""
         logging.info(
-            f"PTI mixed-media: {len(images)} photo(s) + {len(sampled_frames)} sampled video frame(s) "
-            f"(from {len(video_frames)} extracted) = {len(all_images)} image(s) → Gemini"
+            f"PTI mixed-media: {len(images)} photo(s) + {len(capped_frames)} video frame(s){cap_note} "
+            f"= {len(all_images)} image(s) → Gemini"
         )
         parts: list[str] = []
         if photo_count:
