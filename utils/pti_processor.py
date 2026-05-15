@@ -15,7 +15,12 @@ from loader import bot
 from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
-MAX_FRAMES_TO_GEMINI = 90
+MAX_FRAMES_TO_GEMINI = 300
+
+
+def _fmt_timestamp(seconds: float) -> str:
+    s = int(round(seconds))
+    return f"{s // 60}:{s % 60:02d}"
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
@@ -216,7 +221,7 @@ async def process_mixed_media(
     On error the status message is edited with the error and ``(None, None, status_msg)``
     is returned.
     """
-    status_msg = await reply_to.answer(f"Analyzing {len(items)} item(s)...")
+    status_msg = await reply_to.reply(f"Analyzing {len(items)} item(s)...")
 
     photo_count = sum(1 for it in items if it["kind"] in ("photo", "image_doc"))
     video_count = sum(1 for it in items if it["kind"] in ("video", "video_note", "video_doc"))
@@ -270,7 +275,9 @@ async def process_mixed_media(
         else:
             sampled_frames = video_frames
 
-        all_images = images + [(path, "image/jpeg") for _, path in sampled_frames]
+        photo_labels = [(p, m, f"Photo {i + 1}") for i, (p, m) in enumerate(images)]
+        video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in sampled_frames]
+        all_images = photo_labels + video_labels
         if not all_images:
             msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)

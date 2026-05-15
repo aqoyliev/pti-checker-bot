@@ -308,7 +308,7 @@ async def handle_check_group(message: types.Message):
     if current_unit:
         history = [h for h in history if h.get("unit_number") == current_unit]
     text, data, status_msg = await process_mixed_media(
-        items, message, history=history, driver_name=driver_name,
+        items, reply, history=history, driver_name=driver_name,
     )
 
     if text is None or data is None or status_msg is None:

@@ -25,15 +25,22 @@ Inspection process:
 4. VEHICLE IDENTIFICATION: Read visible unit numbers (painted on cab or trailer body) and license plates for the truck and trailer separately. Return one entry per distinct vehicle in "vehicles". If previous PTI history is provided, check whether prior issues are now fixed.
 
 Output rules — the driver reads this on a phone, so be brutally short:
+  - Frames from a video are labeled "Video frame at M:SS". Plain photos are labeled "Photo N".
+  - For any defect you spot in a video frame, prefix the issue with that frame's timestamp in parens, e.g. "(1:14)". If the same defect spans several frames, use the timestamp where it's clearest. For defects only seen in a Photo (not a video frame), do NOT add a timestamp prefix.
   - Each issue ≤ 8 words of plain English, then ONE CFR citation in parens.
-    Format: "<short defect> (49 CFR <section>)". One citation only — pick the single most specific one.
-    Good: "Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
+    Format: "(M:SS) <short defect> (49 CFR <section>)" for video defects, or "<short defect> (49 CFR <section>)" for photo defects.
+    Good: "(1:14) Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
     Bad:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
-    If no clear CFR applies (e.g. minor cosmetic damage), omit the parens entirely.
-  - "checked_clean": list which broad component groups you actually saw and verified are fine.
-    Use ONLY these labels: "Tires", "Lights", "Mirrors", "Body/Frame", "Mud flaps", "Leaks", "Windshield", "Reflectors".
-    Omit any group you couldn't see clearly. Don't put a group in both "issues" and "checked_clean".
+    If no clear CFR applies (e.g. minor cosmetic damage), omit the CFR parens entirely (but keep the timestamp).
+  - "checked_clean": list which broad component groups you actually saw and verified are fine, each with the timestamps where you saw them clearly.
+    Use ONLY these component labels: "Tires", "Lights", "Mirrors", "Body/Frame", "Mud flaps", "Leaks", "Windshield", "Reflectors".
+    Format each entry as: "<Component> — <moments>" where moments is a comma-separated list of M:SS timestamps and/or M:SS-M:SS ranges.
+    Example: "Mirrors — 0:11-0:13, 2:12-2:15, 2:20".
+    Use a range when the component is in view across consecutive frames; use a single timestamp when it's a brief glimpse. List 1–4 moments per component, the clearest ones.
+    Omit any component you couldn't see clearly. Don't put a component in both "issues" and "checked_clean".
   - "what_was_not_visible": at most 5 short items, only the most important ones. Don't list every PTI area you didn't see — just the ones a driver could reasonably re-shoot.
+    DO NOT include "Trailer license plate" or "Trailer unit number" — drivers are not required to film these.
+  - DO NOT list trailer license plate or trailer unit number absence as an issue. Drivers are not required to show them. (You may still fill them in the "vehicles" section if they happen to be visible.)
   - "advice": ONE short sentence (≤ 15 words) with the action to take. No regulations.
   - "confidence": "HIGH" if frames are clear and defects are obvious; "MEDIUM" if some calls are borderline; "LOW" if the video is dark/blurry/short.
   - "image_quality": "GOOD" / "FAIR" / "POOR" based on lighting, focus, framing.
@@ -115,7 +122,7 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
             scale = 1280 / max(h, w)
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
         path = os.path.join(temp_dir, f"frame_{i:04d}.jpg")
-        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         saved.append((timestamp, path))
         timestamp += interval_seconds
         i += 1
@@ -157,8 +164,10 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
     return response
 
 
-def call_gemini_photos(images: list[tuple[str, str]], history: list[dict] | None = None):
-    """images: list of (file_path, mime_type)"""
+def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
+    """images: list of (file_path, mime_type) or (file_path, mime_type, label).
+    Label is shown to Gemini after each image — e.g. "Video frame at 1:14" or "Photo 2".
+    """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
         raise ValueError("GEMINI_API_KEY is not set in .env")
@@ -167,16 +176,21 @@ def call_gemini_photos(images: list[tuple[str, str]], history: list[dict] | None
 
     n = len(images)
     parts = []
-    for i, (path, mime_type) in enumerate(images):
+    for i, item in enumerate(images):
+        if len(item) == 3:
+            path, mime_type, label = item
+        else:
+            path, mime_type = item
+            label = f"Photo {i + 1} of {n}"
         with open(path, "rb") as f:
             parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type=mime_type))
-        parts.append(f"Photo {i + 1} of {n}")
+        parts.append(label)
 
     history_text = _build_history_text(history or [])
     if history_text:
         parts.append(history_text)
 
-    parts.append(f"Analyze all {n} photo(s) above as a single PTI inspection and return the JSON result.")
+    parts.append(f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
 
     response = client.models.generate_content(
         model="gemini-2.5-pro",
