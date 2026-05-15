@@ -32,6 +32,21 @@ def _upload_one(client, path: str, mime_type: str, label: str):
         config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=label[:40]),
     )
 
+
+def _delete_files_background(client, files: list):
+    """Delete uploaded files in parallel without blocking the caller."""
+    def _del(uf):
+        try:
+            client.files.delete(name=uf.name)
+        except Exception:
+            logging.warning(f"Failed to delete uploaded file {uf.name}", exc_info=True)
+
+    pool = ThreadPoolExecutor(max_workers=16)
+    for uf in files:
+        if uf is not None:
+            pool.submit(_del, uf)
+    pool.shutdown(wait=False)
+
 SYSTEM_PROMPT = """You are an experienced commercial-truck inspector. \
 Analyze the supplied frames/photos from a pre-trip inspection (PTI) of a semi-truck and/or trailer as one combined inspection.
 
@@ -198,13 +213,8 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
         )
         return response
     finally:
-        for uf in uploaded_files:
-            if uf is None:
-                continue
-            try:
-                client.files.delete(name=uf.name)
-            except Exception:
-                logging.warning(f"Failed to delete uploaded file {uf.name}")
+        if uploaded_files:
+            _delete_files_background(client, uploaded_files)
 
 
 def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
@@ -266,13 +276,8 @@ def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
         )
         return response
     finally:
-        for uf in uploaded_files:
-            if uf is None:
-                continue
-            try:
-                client.files.delete(name=uf.name)
-            except Exception:
-                logging.warning(f"Failed to delete uploaded file {uf.name}")
+        if uploaded_files:
+            _delete_files_background(client, uploaded_files)
 
 
 def delete_frames(frames: list[tuple[float, str]]) -> None:

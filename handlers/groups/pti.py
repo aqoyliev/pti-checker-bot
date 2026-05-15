@@ -280,6 +280,16 @@ async def handle_check_group(message: types.Message):
         await message.answer("The replied message is not a video or photo.")
         return
 
+    for item in items:
+        obj = item["obj"]
+        duration = getattr(obj, "duration", None)
+        if duration and duration > 900:
+            await message.answer(
+                f"⚠️ Video is {duration // 60} min long — too long for a PTI inspection. "
+                "Please send a video under 15 minutes."
+            )
+            return
+
     if reply.media_group_id:
         seen_ids = {reply.message_id}
         for buf_item in get_album_media(message.chat.id, reply.media_group_id):

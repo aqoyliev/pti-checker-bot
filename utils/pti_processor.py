@@ -7,8 +7,12 @@ import os
 import shutil
 import tempfile
 
+import httpcore
+import httpx
 from aiogram import types
 from google.genai import errors as genai_errors
+
+_TRANSIENT_ERRORS = (genai_errors.ServerError, httpcore.RemoteProtocolError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.TimeoutException)
 
 from data import config
 from loader import bot
@@ -29,9 +33,10 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
             await asyncio.sleep(delay)
         try:
             return await asyncio.to_thread(fn, *args, **kwargs)
-        except genai_errors.ServerError as e:
+        except _TRANSIENT_ERRORS as e:
             last_exc = e
-            logging.warning(f"Gemini {e.code} on attempt {attempt + 1}; retrying in {_GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0}s")
+            delay_next = _GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0
+            logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
             continue
     raise last_exc
 
