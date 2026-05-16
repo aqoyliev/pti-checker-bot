@@ -233,6 +233,13 @@ async def process_mixed_media(
     is returned.
     """
     status_msg = await reply_to.reply(f"Analyzing {len(items)} item(s)...")
+    logging.info(
+        f"PTI reply debug: status_msg.id={status_msg.message_id} "
+        f"reply_to_message={'SET id=' + str(status_msg.reply_to_message.message_id) if status_msg.reply_to_message else 'NONE'} "
+        f"chat_type={reply_to.chat.type} is_forum={getattr(reply_to.chat, 'is_forum', None)} "
+        f"video_is_topic={reply_to.is_topic_message} video_thread_id={reply_to.message_thread_id} "
+        f"status_thread_id={status_msg.message_thread_id}"
+    )
 
     photo_count = sum(1 for it in items if it["kind"] in ("photo", "image_doc"))
     video_count = sum(1 for it in items if it["kind"] in ("video", "video_note", "video_doc"))
