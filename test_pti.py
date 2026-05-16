@@ -5,6 +5,7 @@ import os
 import json
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 from dotenv import load_dotenv
@@ -14,6 +15,37 @@ from google.genai import types as genai_types
 load_dotenv()
 
 PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "1"))
+MAX_VIDEO_DURATION = 900   # 15 minutes — reject anything longer
+MAX_FRAMES = 900           # safety cap so we never exceed Gemini's token limit
+FILE_API_THRESHOLD = 300   # frames above this count are uploaded via File API instead of sent inline
+
+
+class VideoTooLongError(Exception):
+    def __init__(self, duration: float):
+        self.duration = duration
+        super().__init__(f"Video duration {duration:.0f}s exceeds the {MAX_VIDEO_DURATION}s limit")
+
+
+def _upload_one(client, path: str, mime_type: str, label: str):
+    return client.files.upload(
+        file=path,
+        config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=label[:40]),
+    )
+
+
+def _delete_files_background(client, files: list):
+    """Delete uploaded files in parallel without blocking the caller."""
+    def _del(uf):
+        try:
+            client.files.delete(name=uf.name)
+        except Exception:
+            logging.warning(f"Failed to delete uploaded file {uf.name}", exc_info=True)
+
+    pool = ThreadPoolExecutor(max_workers=16)
+    for uf in files:
+        if uf is not None:
+            pool.submit(_del, uf)
+    pool.shutdown(wait=False)
 
 SYSTEM_PROMPT = """You are an experienced commercial-truck inspector. \
 Analyze the supplied frames/photos from a pre-trip inspection (PTI) of a semi-truck and/or trailer as one combined inspection.
@@ -32,11 +64,10 @@ Output rules — the driver reads this on a phone, so be brutally short:
     Good: "(1:14) Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
     Bad:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
     If no clear CFR applies (e.g. minor cosmetic damage), omit the CFR parens entirely (but keep the timestamp).
-  - "checked_clean": list which broad component groups you actually saw and verified are fine, each with the timestamps where you saw them clearly.
+  - "checked_clean": list which broad component groups you actually saw and verified are fine.
     Use ONLY these component labels: "Tires", "Lights", "Mirrors", "Body/Frame", "Mud flaps", "Leaks", "Windshield", "Reflectors".
-    Format each entry as: "<Component> — <moments>" where moments is a comma-separated list of M:SS timestamps and/or M:SS-M:SS ranges.
-    Example: "Mirrors — 0:11-0:13, 2:12-2:15, 2:20".
-    Use a range when the component is in view across consecutive frames; use a single timestamp when it's a brief glimpse. List 1–4 moments per component, the clearest ones.
+    Each entry is just the component name — no timestamps, no extra text.
+    Example: ["Tires", "Mirrors", "Lights"].
     Omit any component you couldn't see clearly. Don't put a component in both "issues" and "checked_clean".
   - "what_was_not_visible": at most 5 short items, only the most important ones. Don't list every PTI area you didn't see — just the ones a driver could reasonably re-shoot.
     DO NOT include "Trailer license plate" or "Trailer unit number" — drivers are not required to film these.
@@ -104,6 +135,9 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
         raise RuntimeError("Could not read video properties (0 frames or 0 fps).")
 
     duration = total_frames / fps
+    if duration > MAX_VIDEO_DURATION:
+        cap.release()
+        raise VideoTooLongError(duration)
     temp_dir = tempfile.mkdtemp(prefix="pti_frames_")
     saved: list[tuple[float, str]] = []
 
@@ -138,70 +172,112 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
         raise ValueError("GEMINI_API_KEY is not set in .env")
 
     client = genai.Client(api_key=api_key)
-
     n = len(frames)
-    parts = []
-    for i, (_, path) in enumerate(frames):
-        with open(path, "rb") as f:
-            parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
-        parts.append(f"Frame {i + 1} of {n}")
+    use_file_api = n > FILE_API_THRESHOLD
+    uploaded_files = []
 
-    history_text = _build_history_text(history or [])
-    if history_text:
-        parts.append(history_text)
+    try:
+        parts = []
+        if use_file_api:
+            logging.info(f"Uploading {n} frames via File API (parallel)...")
+            frame_tuples = [("image/jpeg", path, f"Frame {i + 1} of {n}") for i, (_, path) in enumerate(frames)]
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futs = {pool.submit(_upload_one, client, path, mime, label): idx
+                        for idx, (mime, path, label) in enumerate(frame_tuples)}
+                results = [None] * n
+                for fut in as_completed(futs):
+                    results[futs[fut]] = fut.result()
+            uploaded_files = results
+            for i, uf in enumerate(uploaded_files):
+                parts.append(genai_types.Part.from_uri(file_uri=uf.uri, mime_type="image/jpeg"))
+                parts.append(f"Frame {i + 1} of {n}")
+        else:
+            for i, (_, path) in enumerate(frames):
+                with open(path, "rb") as f:
+                    parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
+                parts.append(f"Frame {i + 1} of {n}")
 
-    parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
+        history_text = _build_history_text(history or [])
+        if history_text:
+            parts.append(history_text)
+        parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
-    response = client.models.generate_content(
-        model="gemini-2.5-pro",
-        config=genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-        contents=parts,
-    )
-    return response
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+            contents=parts,
+        )
+        return response
+    finally:
+        if uploaded_files:
+            _delete_files_background(client, uploaded_files)
 
 
 def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
     """images: list of (file_path, mime_type) or (file_path, mime_type, label).
     Label is shown to Gemini after each image — e.g. "Video frame at 1:14" or "Photo 2".
+    Above FILE_API_THRESHOLD images, files are uploaded via the File API instead of sent inline.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
         raise ValueError("GEMINI_API_KEY is not set in .env")
 
     client = genai.Client(api_key=api_key)
-
     n = len(images)
-    parts = []
+    use_file_api = n > FILE_API_THRESHOLD
+    uploaded_files = []
+
+    # Normalise to (path, mime_type, label) triples
+    triples = []
     for i, item in enumerate(images):
         if len(item) == 3:
-            path, mime_type, label = item
+            triples.append(item)
         else:
             path, mime_type = item
-            label = f"Photo {i + 1} of {n}"
-        with open(path, "rb") as f:
-            parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type=mime_type))
-        parts.append(label)
+            triples.append((path, mime_type, f"Photo {i + 1} of {n}"))
 
-    history_text = _build_history_text(history or [])
-    if history_text:
-        parts.append(history_text)
+    try:
+        parts = []
+        if use_file_api:
+            logging.info(f"Uploading {n} images via File API (parallel)...")
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futs = {pool.submit(_upload_one, client, path, mime, label): idx
+                        for idx, (path, mime, label) in enumerate(triples)}
+                results = [None] * n
+                for fut in as_completed(futs):
+                    results[futs[fut]] = fut.result()
+            uploaded_files = results
+            for uf, (_, mime_type, label) in zip(uploaded_files, triples):
+                parts.append(genai_types.Part.from_uri(file_uri=uf.uri, mime_type=mime_type))
+                parts.append(label)
+        else:
+            for path, mime_type, label in triples:
+                with open(path, "rb") as f:
+                    parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type=mime_type))
+                parts.append(label)
 
-    parts.append(f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
+        history_text = _build_history_text(history or [])
+        if history_text:
+            parts.append(history_text)
+        parts.append(f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
 
-    response = client.models.generate_content(
-        model="gemini-2.5-pro",
-        config=genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-        contents=parts,
-    )
-    return response
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+            contents=parts,
+        )
+        return response
+    finally:
+        if uploaded_files:
+            _delete_files_background(client, uploaded_files)
 
 
 def delete_frames(frames: list[tuple[float, str]]) -> None:

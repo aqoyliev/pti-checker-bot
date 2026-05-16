@@ -7,12 +7,16 @@ import os
 import shutil
 import tempfile
 
+import httpcore
+import httpx
 from aiogram import types
 from google.genai import errors as genai_errors
 
+_TRANSIENT_ERRORS = (genai_errors.ServerError, httpcore.RemoteProtocolError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.TimeoutException)
+
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result
+from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
 
@@ -29,9 +33,10 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
             await asyncio.sleep(delay)
         try:
             return await asyncio.to_thread(fn, *args, **kwargs)
-        except genai_errors.ServerError as e:
+        except _TRANSIENT_ERRORS as e:
             last_exc = e
-            logging.warning(f"Gemini {e.code} on attempt {attempt + 1}; retrying in {_GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0}s")
+            delay_next = _GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0
+            logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
             continue
     raise last_exc
 
@@ -116,7 +121,14 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
         else:
             await bot.download_file(file_info.file_path, destination=tmp_path)
 
-        frames = extract_frames(tmp_path)
+        try:
+            frames = extract_frames(tmp_path)
+        except VideoTooLongError as e:
+            mins = int(e.duration) // 60
+            await status_msg.edit_text(
+                f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
+            )
+            return None, None
         if not frames:
             await status_msg.edit_text("Could not extract frames from the video.")
             return None, None
@@ -258,21 +270,34 @@ async def process_mixed_media(
                 continue
 
             if mime is None:
-                extracted = extract_frames(tmp_path)
+                try:
+                    extracted = extract_frames(tmp_path)
+                except VideoTooLongError as e:
+                    mins = int(e.duration) // 60
+                    await status_msg.edit_text(
+                        f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
+                    )
+                    return None, None, status_msg
                 video_frames.extend(extracted)
             else:
                 images.append((tmp_path, mime))
 
+        capped_frames = video_frames
+        if len(video_frames) > MAX_FRAMES:
+            step = len(video_frames) / MAX_FRAMES
+            capped_frames = [video_frames[int(i * step)] for i in range(MAX_FRAMES)]
+
         photo_labels = [(p, m, f"Photo {i + 1}") for i, (p, m) in enumerate(images)]
-        video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in video_frames]
+        video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in capped_frames]
         all_images = photo_labels + video_labels
         if not all_images:
             msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)
             return None, None, status_msg
 
+        cap_note = f" (capped from {len(video_frames)})" if len(capped_frames) < len(video_frames) else ""
         logging.info(
-            f"PTI mixed-media: {len(images)} photo(s) + {len(video_frames)} video frame(s) "
+            f"PTI mixed-media: {len(images)} photo(s) + {len(capped_frames)} video frame(s){cap_note} "
             f"= {len(all_images)} image(s) → Gemini"
         )
         parts: list[str] = []
