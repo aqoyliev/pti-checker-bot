@@ -232,7 +232,7 @@ async def _handle_pti_result(
         driver_name=driver_name,
     )
     await _reconcile_vehicles(message, pti_log_id, data, result_message_id)
-    if passed and not truck_change_pending:
+    if not truck_change_pending:
         await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
 
 

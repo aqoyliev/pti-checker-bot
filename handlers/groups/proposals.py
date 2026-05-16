@@ -320,7 +320,7 @@ async def _on_confirmed(chat_id: int, proposal: dict):
                     )
                 except Exception:
                     logging.exception("Failed to restore PTI result message")
-            if pti and pti.get("passed"):
+            if pti:
                 try:
                     await handle_pti_passed(
                         chat_id,

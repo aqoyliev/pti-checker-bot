@@ -301,7 +301,7 @@ async def get_recent_ptis(group_id: int, limit: int = 5) -> list[dict]:
 async def get_pti_count_this_week(group_id: int, user_id: int) -> int:
     row = await _pool_check().fetchrow(
         """SELECT COUNT(*) FROM pti_log
-           WHERE group_id = $1 AND user_id = $2 AND passed = TRUE
+           WHERE group_id = $1 AND user_id = $2
            AND submitted_at >= date_trunc('week', NOW())""",
         group_id, user_id,
     )
@@ -311,7 +311,7 @@ async def get_pti_count_this_week(group_id: int, user_id: int) -> int:
 async def get_last_pti(group_id: int, user_id: int) -> dict | None:
     row = await _pool_check().fetchrow(
         """SELECT * FROM pti_log
-           WHERE group_id = $1 AND user_id = $2 AND passed = TRUE
+           WHERE group_id = $1 AND user_id = $2
            ORDER BY submitted_at DESC LIMIT 1""",
         group_id, user_id,
     )
