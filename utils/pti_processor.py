@@ -237,14 +237,10 @@ async def process_mixed_media(
             f"Analyzing {len(items)} item(s)...",
             allow_sending_without_reply=False,
         )
-        logging.info(
-            f"PTI reply debug (strict): status_msg.id={status_msg.message_id} "
-            f"reply_to_message={'SET id=' + str(status_msg.reply_to_message.message_id) if status_msg.reply_to_message else 'NONE'} "
-            f"reply_to.id={reply_to.message_id} reply_to.date={reply_to.date}"
-        )
     except Exception as e:
         logging.warning(
-            f"PTI reply debug: strict reply failed ({type(e).__name__}: {e}); falling back to non-reply send"
+            f"PTI reply-quote unavailable ({type(e).__name__}: {e}); sending non-reply status. "
+            f"Often means the inspected message was posted by an anonymous admin."
         )
         status_msg = await reply_to.answer(f"Analyzing {len(items)} item(s)...")
 
