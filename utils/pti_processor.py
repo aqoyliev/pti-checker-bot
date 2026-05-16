@@ -232,14 +232,21 @@ async def process_mixed_media(
     On error the status message is edited with the error and ``(None, None, status_msg)``
     is returned.
     """
-    status_msg = await reply_to.reply(f"Analyzing {len(items)} item(s)...")
-    logging.info(
-        f"PTI reply debug: status_msg.id={status_msg.message_id} "
-        f"reply_to_message={'SET id=' + str(status_msg.reply_to_message.message_id) if status_msg.reply_to_message else 'NONE'} "
-        f"chat_type={reply_to.chat.type} is_forum={getattr(reply_to.chat, 'is_forum', None)} "
-        f"video_is_topic={reply_to.is_topic_message} video_thread_id={reply_to.message_thread_id} "
-        f"status_thread_id={status_msg.message_thread_id}"
-    )
+    try:
+        status_msg = await reply_to.reply(
+            f"Analyzing {len(items)} item(s)...",
+            allow_sending_without_reply=False,
+        )
+        logging.info(
+            f"PTI reply debug (strict): status_msg.id={status_msg.message_id} "
+            f"reply_to_message={'SET id=' + str(status_msg.reply_to_message.message_id) if status_msg.reply_to_message else 'NONE'} "
+            f"reply_to.id={reply_to.message_id} reply_to.date={reply_to.date}"
+        )
+    except Exception as e:
+        logging.warning(
+            f"PTI reply debug: strict reply failed ({type(e).__name__}: {e}); falling back to non-reply send"
+        )
+        status_msg = await reply_to.answer(f"Analyzing {len(items)} item(s)...")
 
     photo_count = sum(1 for it in items if it["kind"] in ("photo", "image_doc"))
     video_count = sum(1 for it in items if it["kind"] in ("video", "video_note", "video_doc"))
