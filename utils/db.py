@@ -74,6 +74,8 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS trailer_plate TEXT;
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS driver_name TEXT;
+
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
         """)
 
 
@@ -94,8 +96,16 @@ async def get_group(group_id: int) -> dict | None:
 
 async def upsert_group(group_id: int):
     await _pool_check().execute(
-        "INSERT INTO groups (group_id, last_setup_nag_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING",
+        """INSERT INTO groups (group_id, last_setup_nag_at)
+           VALUES ($1, NOW())
+           ON CONFLICT (group_id) DO UPDATE SET is_active = TRUE""",
         group_id,
+    )
+
+
+async def mark_group_inactive(group_id: int):
+    await _pool_check().execute(
+        "UPDATE groups SET is_active = FALSE WHERE group_id = $1", group_id,
     )
 
 
@@ -103,6 +113,7 @@ async def get_groups_needing_setup_nag() -> list[dict]:
     rows = await _pool_check().fetch(
         """SELECT g.* FROM groups g
            WHERE g.setup_complete = FALSE
+             AND COALESCE(g.is_active, TRUE) = TRUE
              AND COALESCE(g.setup_nag_count, 0) < 3
              AND NOT EXISTS (
                SELECT 1 FROM pending_proposals p
@@ -320,7 +331,7 @@ async def get_last_pti(group_id: int, user_id: int) -> dict | None:
 
 async def get_all_registered_groups() -> list[dict]:
     rows = await _pool_check().fetch(
-        "SELECT * FROM groups WHERE setup_complete = TRUE"
+        "SELECT * FROM groups WHERE setup_complete = TRUE AND COALESCE(is_active, TRUE) = TRUE"
     )
     return [dict(r) for r in rows]
 

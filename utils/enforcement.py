@@ -4,13 +4,20 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram.types import ChatPermissions
-from aiogram.utils.exceptions import NotEnoughRightsToRestrict
+from aiogram.utils.exceptions import (
+    BotBlocked,
+    BotKicked,
+    ChatNotFound,
+    MethodIsNotAvailable,
+    NotEnoughRightsToRestrict,
+)
 
 from loader import bot
 from data.config import ADMINS
 from utils.db import (
     get_all_registered_groups, get_drivers,
     get_pti_count_this_week, get_last_pti,
+    mark_group_inactive,
 )
 
 REQUIRED_PER_WEEK = 2
@@ -30,23 +37,48 @@ _FULL_PERMISSIONS = ChatPermissions(
     can_add_web_page_previews=True,
 )
 
+_UNREACHABLE_EXCEPTIONS = (ChatNotFound, BotKicked, BotBlocked, MethodIsNotAvailable)
 
-async def unmute_driver(group_id: int, user_id: int):
+
+async def _deregister_group(group_id: int, reason: str):
+    await mark_group_inactive(group_id)
+    logging.warning(f"Group {group_id} marked inactive: {reason}")
+    await notify_admins(
+        f"⚠️ Group <code>{group_id}</code> is unreachable ({reason}). "
+        f"Compliance checks are disabled until it is re-registered."
+    )
+
+
+async def unmute_driver(group_id: int, user_id: int) -> bool:
+    """Returns False if the group is unreachable (caller should deregister)."""
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_FULL_PERMISSIONS)
+        return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't unmute {user_id}")
+        return True
+    except _UNREACHABLE_EXCEPTIONS as e:
+        logging.warning(f"Group {group_id} unreachable while unmuting {user_id}: {type(e).__name__}")
+        return False
     except Exception:
         logging.exception(f"Failed to unmute user {user_id} in group {group_id}")
+        return True
 
 
-async def mute_driver(group_id: int, user_id: int):
+async def mute_driver(group_id: int, user_id: int) -> bool:
+    """Returns False if the group is unreachable (caller should deregister)."""
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_MUTED_PERMISSIONS)
+        return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't mute {user_id}")
+        return True
+    except _UNREACHABLE_EXCEPTIONS as e:
+        logging.warning(f"Group {group_id} unreachable while muting {user_id}: {type(e).__name__}")
+        return False
     except Exception:
         logging.exception(f"Failed to mute user {user_id} in group {group_id}")
+        return True
 
 
 def is_gap_ok(last_pti: dict | None) -> bool:
@@ -92,6 +124,17 @@ async def run_compliance_check():
 
     for group in groups:
         group_id = group["group_id"]
+
+        try:
+            chat = await bot.get_chat(group_id)
+        except _UNREACHABLE_EXCEPTIONS as e:
+            await _deregister_group(group_id, type(e).__name__)
+            continue
+        except Exception:
+            logging.exception(f"Unable to fetch chat {group_id}; skipping this cycle")
+            continue
+
+        group_name = chat.title or str(group_id)
         drivers = await get_drivers(group_id)
 
         for driver in drivers:
@@ -100,24 +143,28 @@ async def run_compliance_check():
             compliant, reason = await check_driver_compliance(group_id, user_id)
 
             if compliant:
-                await unmute_driver(group_id, user_id)
-            else:
-                await mute_driver(group_id, user_id)
-                try:
-                    chat = await bot.get_chat(group_id)
-                    group_name = chat.title or str(group_id)
-                except Exception:
-                    group_name = str(group_id)
-                non_compliant.append(f"• {name} ({group_name}) — {reason}")
+                if not await unmute_driver(group_id, user_id):
+                    await _deregister_group(group_id, "unreachable during unmute")
+                    break
+                continue
 
-                try:
-                    await bot.send_message(
-                        group_id,
-                        f"⚠️ {name}, your PTI is overdue. "
-                        f"You have been restricted until a PTI is submitted.",
-                    )
-                except Exception:
-                    logging.exception(f"Failed to send reminder in group {group_id}")
+            if not await mute_driver(group_id, user_id):
+                await _deregister_group(group_id, "unreachable during mute")
+                break
+
+            non_compliant.append(f"• {name} ({group_name}) — {reason}")
+
+            try:
+                await bot.send_message(
+                    group_id,
+                    f"⚠️ {name}, your PTI is overdue. "
+                    f"You have been restricted until a PTI is submitted.",
+                )
+            except _UNREACHABLE_EXCEPTIONS as e:
+                await _deregister_group(group_id, type(e).__name__)
+                break
+            except Exception:
+                logging.exception(f"Failed to send reminder in group {group_id}")
 
     if non_compliant:
         lines = ["🚨 <b>Non-compliant drivers:</b>\n"] + non_compliant
