@@ -3,18 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from zoneinfo import ZoneInfo
 
 from aiogram import types
 from aiogram.types import ContentType
 
-EASTERN = ZoneInfo("America/New_York")
-UTC = ZoneInfo("UTC")
-
 from loader import dp
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
-    log_pti, get_cached_check, get_recent_ptis, find_duplicate_pti,
+    log_pti, get_cached_check, get_recent_ptis,
     set_truck_plate, set_trailer, find_open_vehicle_change,
 )
 from utils.pti_processor import process_mixed_media
@@ -270,11 +266,6 @@ async def handle_check_group(message: types.Message):
     driver_row = next((d for d in drivers if d["user_id"] == driver_uid), None)
     driver_name = driver_row["name"] if driver_row else None
 
-    cached = await get_cached_check(message.chat.id, reply.message_id)
-    if cached:
-        await message.reply(cached, parse_mode="HTML")
-        return
-
     items = _items_from_reply(reply)
     if items is None:
         await message.answer("The replied message is not a video or photo.")
@@ -302,14 +293,24 @@ async def handle_check_group(message: types.Message):
 
     signature = _signature_from_items(items)
     if signature:
-        duplicate = await find_duplicate_pti(message.chat.id, driver_uid, signature)
-        if duplicate:
-            prior_dt = duplicate["submitted_at"].replace(tzinfo=UTC).astimezone(EASTERN)
-            prior = prior_dt.strftime("%Y-%m-%d %I:%M %p %Z")
-            await message.answer(
-                f"This media matches a PTI already submitted by this driver on {prior}. "
-                "Please record a new inspection."
-            )
+        cached = await get_cached_check(message.chat.id, signature)
+        if cached:
+            if cached["user_id"] == driver_uid:
+                await message.reply(cached["result_text"], parse_mode="HTML")
+            else:
+                original = next(
+                    (d for d in drivers if d["user_id"] == cached["user_id"]),
+                    None,
+                )
+                original_name = (
+                    (original and original["name"])
+                    or cached.get("driver_name")
+                    or "another driver"
+                )
+                await message.answer(
+                    f"This PTI is already attributed to {original_name}. "
+                    f"Please record your own inspection."
+                )
             return
 
     group = await get_group(message.chat.id)

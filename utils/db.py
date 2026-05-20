@@ -275,24 +275,20 @@ async def log_pti(
     return row["id"]
 
 
-async def find_duplicate_pti(group_id: int, user_id: int, media_signature: str) -> dict | None:
+async def get_cached_check(group_id: int, media_signature: str) -> dict | None:
+    """Return the most recent cached PTI for this media in this group.
+
+    Returns a dict with ``user_id``, ``driver_name``, and ``result_text`` so
+    callers can tell whether the cache hit belongs to the same driver or a
+    different one.
+    """
     row = await _pool_check().fetchrow(
-        """SELECT submitted_at FROM pti_log
-           WHERE group_id = $1 AND user_id = $2 AND media_signature = $3
+        """SELECT user_id, driver_name, result_text FROM pti_log
+           WHERE group_id = $1 AND media_signature = $2
            ORDER BY submitted_at DESC LIMIT 1""",
-        group_id, user_id, media_signature,
+        group_id, media_signature,
     )
     return dict(row) if row else None
-
-
-async def get_cached_check(group_id: int, replied_message_id: int) -> str | None:
-    row = await _pool_check().fetchrow(
-        """SELECT result_text FROM pti_log
-           WHERE group_id = $1 AND replied_message_id = $2
-           LIMIT 1""",
-        group_id, replied_message_id,
-    )
-    return row["result_text"] if row else None
 
 
 async def get_pti_log(pti_log_id: int) -> dict | None:
