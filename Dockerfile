@@ -4,7 +4,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake gperf zlib1g-dev libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth=1 --recurse-submodules https://github.com/tdlib/telegram-bot-api.git /src
+ARG TGAPI_COMMIT=01a3679c0bbf9bbba03d1d3e20f621fa4becddcc
+RUN git clone https://github.com/tdlib/telegram-bot-api.git /src \
+    && cd /src && git checkout ${TGAPI_COMMIT} \
+    && git submodule update --init --recursive
 
 WORKDIR /src/build
 RUN cmake -DCMAKE_BUILD_TYPE=Release .. && \
