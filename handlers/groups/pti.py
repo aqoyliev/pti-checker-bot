@@ -79,6 +79,34 @@ def _signature_from_items(items: list[dict]) -> str | None:
     return f"album:{h}"
 
 
+_VIDEO_KINDS = ("video", "video_note", "video_doc")
+
+
+def _content_signature_from_items(items: list[dict]) -> str | None:
+    """Second dedup signature for video items, based on ``(file_size, duration)``.
+
+    Telegram assigns a fresh ``file_unique_id`` on every upload session, so
+    re-uploading the same video defeats the file_unique_id signature. Size and
+    duration stay identical for a byte-for-byte re-upload, so this catches that
+    case. Photos are excluded because Telegram re-compresses them client-side,
+    making size unreliable. Returns None if no video items have usable metadata.
+    """
+    parts: list[tuple[int, int]] = []
+    for it in items:
+        if it["kind"] not in _VIDEO_KINDS:
+            continue
+        obj = it["obj"]
+        size = getattr(obj, "file_size", None)
+        duration = getattr(obj, "duration", 0) or 0
+        if size:
+            parts.append((size, duration))
+    if not parts:
+        return None
+    parts.sort()
+    h = hashlib.sha1(repr(parts).encode()).hexdigest()[:20]
+    return f"content:{h}"
+
+
 def _extract_vehicles(data: dict) -> list[dict]:
     """Normalize Gemini's vehicle output. Returns a list of {type, unit_number, plate}."""
     vehicles = data.get("vehicles")
@@ -206,6 +234,7 @@ async def _handle_pti_result(
     driver_name: str | None,
     replied_message_id: int | None = None,
     media_signature: str | None = None,
+    content_signature: str | None = None,
     result_message_id: int | None = None,
     truck_change_pending: bool = False,
 ):
@@ -226,6 +255,7 @@ async def _handle_pti_result(
         replied_message_id=replied_message_id,
         media_signature=media_signature,
         driver_name=driver_name,
+        content_signature=content_signature,
     )
     await _reconcile_vehicles(message, pti_log_id, data, result_message_id)
     if not truck_change_pending:
@@ -292,8 +322,9 @@ async def handle_check_group(message: types.Message):
                 items.append(converted)
 
     signature = _signature_from_items(items)
-    if signature:
-        cached = await get_cached_check(message.chat.id, signature)
+    content_sig = _content_signature_from_items(items)
+    if signature or content_sig:
+        cached = await get_cached_check(message.chat.id, signature, content_sig)
         if cached:
             if cached["user_id"] == driver_uid:
                 await message.reply(cached["result_text"], parse_mode="HTML")
@@ -351,6 +382,7 @@ async def handle_check_group(message: types.Message):
         driver_name=driver_name,
         replied_message_id=reply.message_id,
         media_signature=signature,
+        content_signature=content_sig,
         result_message_id=status_msg.message_id,
         truck_change_pending=bool(truck_change),
     )

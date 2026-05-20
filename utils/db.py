@@ -76,6 +76,8 @@ async def init_db():
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS driver_name TEXT;
 
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+
+            ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS content_signature TEXT;
         """)
 
 
@@ -261,32 +263,46 @@ async def log_pti(
     replied_message_id: int | None = None,
     media_signature: str | None = None,
     driver_name: str | None = None,
+    content_signature: str | None = None,
 ) -> int:
     row = await _pool_check().fetchrow(
         """INSERT INTO pti_log
            (group_id, user_id, replied_message_id, passed, severity,
-            unit_number, plate, result_json, result_text, media_signature, driver_name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            unit_number, plate, result_json, result_text, media_signature,
+            driver_name, content_signature)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            RETURNING id""",
         group_id, user_id, replied_message_id,
         passed, severity, unit_number, plate, result_json, result_text,
-        media_signature, driver_name,
+        media_signature, driver_name, content_signature,
     )
     return row["id"]
 
 
-async def get_cached_check(group_id: int, media_signature: str) -> dict | None:
-    """Return the most recent cached PTI for this media in this group.
+async def get_cached_check(
+    group_id: int,
+    media_signature: str | None,
+    content_signature: str | None = None,
+) -> dict | None:
+    """Return the most recent cached PTI matching either signature.
 
-    Returns a dict with ``user_id``, ``driver_name``, and ``result_text`` so
-    callers can tell whether the cache hit belongs to the same driver or a
-    different one.
+    ``media_signature`` is based on Telegram ``file_unique_id`` (catches forwards).
+    ``content_signature`` is based on ``(file_size, duration)`` of video items
+    (catches byte-identical re-uploads where ``file_unique_id`` changes).
+
+    Returns a dict with ``user_id``, ``driver_name``, and ``result_text``.
     """
+    if not media_signature and not content_signature:
+        return None
     row = await _pool_check().fetchrow(
         """SELECT user_id, driver_name, result_text FROM pti_log
-           WHERE group_id = $1 AND media_signature = $2
+           WHERE group_id = $1
+             AND (
+               ($2::text IS NOT NULL AND media_signature = $2)
+               OR ($3::text IS NOT NULL AND content_signature = $3)
+             )
            ORDER BY submitted_at DESC LIMIT 1""",
-        group_id, media_signature,
+        group_id, media_signature, content_signature,
     )
     return dict(row) if row else None
 
