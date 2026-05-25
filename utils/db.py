@@ -348,6 +348,32 @@ async def get_all_registered_groups() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_all_groups() -> list[dict]:
+    """Every group the bot has ever been added to, regardless of setup/active state.
+
+    Ordered so the admin panel shows live, configured groups first.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT * FROM groups
+           ORDER BY COALESCE(is_active, TRUE) DESC, setup_complete DESC, created_at ASC"""
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_active_group_ids() -> list[int]:
+    """Group ids the bot can currently message — broadcast targets."""
+    rows = await _pool_check().fetch(
+        "SELECT group_id FROM groups WHERE COALESCE(is_active, TRUE) = TRUE ORDER BY group_id"
+    )
+    return [r["group_id"] for r in rows]
+
+
+async def set_group_active(group_id: int, active: bool):
+    await _pool_check().execute(
+        "UPDATE groups SET is_active = $1 WHERE group_id = $2", active, group_id,
+    )
+
+
 # ---------- proposals ----------
 
 async def create_proposal(
