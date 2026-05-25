@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import glob
 import sys
 import os
 import json
 import logging
+import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import cv2
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types as genai_types
@@ -119,50 +121,77 @@ def _build_history_text(history: list[dict]) -> str | None:
     return "\n".join(lines)
 
 
+def _probe_duration(video_path: str) -> float | None:
+    """Return video duration in seconds via ffprobe, or None if it can't be read."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("ffprobe not found on PATH (ffmpeg must be installed)")
+    try:
+        return float((proc.stdout or "").strip())
+    except ValueError:
+        logging.warning(
+            f"ffprobe could not read duration for {os.path.basename(video_path)}: "
+            f"{proc.stderr.strip()[:200]}"
+        )
+        return None
+
+
 def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL) -> list[tuple[float, str]]:
+    """Sample one JPEG frame every ``interval_seconds`` using ffmpeg.
+
+    Returns ``[(timestamp_seconds, jpg_path), ...]``. ffmpeg decodes the stream
+    once sequentially (far faster than per-frame seeking), caps the longest side
+    at 1280px (never upscaling), and JPEG-encodes in one pass. Raises
+    ``VideoTooLongError`` if the clip exceeds ``MAX_VIDEO_DURATION``.
+    """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"OpenCV could not open video: {video_path}")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
-    if total_frames == 0 or fps == 0:
-        cap.release()
-        raise RuntimeError("Could not read video properties (0 frames or 0 fps).")
-
-    duration = total_frames / fps
-    if duration > MAX_VIDEO_DURATION:
-        cap.release()
+    duration = _probe_duration(video_path)
+    if duration is not None and duration > MAX_VIDEO_DURATION:
         raise VideoTooLongError(duration)
+
     temp_dir = tempfile.mkdtemp(prefix="pti_frames_")
-    saved: list[tuple[float, str]] = []
+    pattern = os.path.join(temp_dir, "frame_%05d.jpg")
+    fps = 1.0 / interval_seconds
+    vf = (
+        f"fps={fps:g},"
+        "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+        "-i", video_path,
+        "-vf", vf,
+        "-frames:v", str(MAX_FRAMES),
+        "-q:v", "2",
+        pattern,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError("ffmpeg not found on PATH (ffmpeg must be installed)")
+    if proc.returncode != 0:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(f"ffmpeg frame extraction failed: {proc.stderr.strip()[:300]}")
 
-    timestamp = 0.0
-    i = 0
-    while timestamp < duration:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(timestamp * fps))
-        ret, frame = cap.read()
-        if not ret:
-            logging.warning(f"Could not read frame at {timestamp:.2f}s, skipping.")
-            timestamp += interval_seconds
-            i += 1
-            continue
-        h, w = frame.shape[:2]
-        if max(h, w) > 1280:
-            scale = 1280 / max(h, w)
-            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-        path = os.path.join(temp_dir, f"frame_{i:04d}.jpg")
-        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        saved.append((timestamp, path))
-        timestamp += interval_seconds
-        i += 1
+    files = sorted(glob.glob(os.path.join(temp_dir, "frame_*.jpg")))
+    if not files:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logging.warning(f"ffmpeg produced no frames for {os.path.basename(video_path)}")
+        return []
 
-    cap.release()
-    logging.info(f"Extracted {len(saved)} frames from {os.path.basename(video_path)} ({duration:.1f}s @ {interval_seconds}s interval)")
+    saved = [(i * interval_seconds, path) for i, path in enumerate(files)]
+    dur_text = f"{duration:.1f}s" if duration is not None else "unknown duration"
+    logging.info(
+        f"Extracted {len(saved)} frames from {os.path.basename(video_path)} "
+        f"({dur_text} @ {interval_seconds}s interval)"
+    )
     return saved
 
 

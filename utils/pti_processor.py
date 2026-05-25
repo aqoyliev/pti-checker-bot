@@ -122,7 +122,7 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
             await bot.download_file(file_info.file_path, destination=tmp_path)
 
         try:
-            frames = extract_frames(tmp_path)
+            frames = await asyncio.to_thread(extract_frames, tmp_path)
         except VideoTooLongError as e:
             mins = int(e.duration) // 60
             await status_msg.edit_text(
@@ -281,7 +281,7 @@ async def process_mixed_media(
 
             if mime is None:
                 try:
-                    extracted = extract_frames(tmp_path)
+                    extracted = await asyncio.to_thread(extract_frames, tmp_path)
                 except VideoTooLongError as e:
                     mins = int(e.duration) // 60
                     await status_msg.edit_text(
