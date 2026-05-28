@@ -66,6 +66,87 @@ def _media_summary(photos: int, videos: int) -> str | None:
 
 _SEVERITY_ICON = {"NONE": "🟢", "MINOR": "🟡", "MAJOR": "🟠", "CRITICAL": "🔴"}
 
+# Phrases that indicate a vague conclusion rather than concrete visual evidence.
+# Issues whose evidence (or text) contains any of these are dropped as likely hallucinations.
+_BANNED_EVIDENCE_PHRASES = (
+    "severe wear",
+    "heavy wear",
+    "tires show wear",
+    "worn tires",
+    "replace soon",
+    "tread is low",
+    "tread depth low",
+    "outer shoulder is smooth",
+    "outer shoulder bald",
+    "shoulder is smooth",
+    "shoulder bald",
+    "shoulder is bald",
+    "below 4/32",
+    "below 2/32",
+    "wear bars",
+    "tire is worn",
+    "visible damage",
+    "severe visible wear",
+)
+_MIN_EVIDENCE_CHARS = 20
+
+
+def _issue_text(item) -> str:
+    if isinstance(item, dict):
+        return (item.get("text") or "").strip()
+    return str(item).strip()
+
+
+def _issue_evidence(item) -> str:
+    if isinstance(item, dict):
+        return (item.get("evidence") or "").strip()
+    return ""
+
+
+def filter_hallucinated_issues(data: dict) -> int:
+    """Drop issues whose evidence is missing/too short or matches a banned conclusion phrase.
+
+    If every issue is dropped, flip status -> PASS and severity -> NONE so the driver
+    sees a clean result instead of a FAIL with no defects listed.
+
+    Returns the number of issues dropped (for logging).
+    """
+    raw = data.get("issues") or []
+    kept = []
+    dropped = 0
+    for item in raw:
+        text = _issue_text(item)
+        evidence = _issue_evidence(item)
+        if not text:
+            dropped += 1
+            logging.info(f"Filtered issue: empty text — {item!r}")
+            continue
+        # Legacy plain-string issues (no evidence field): keep but log so we notice the
+        # model didn't follow the new schema.
+        if isinstance(item, str):
+            logging.info(f"Plain-string issue kept (legacy format): {text!r}")
+            kept.append(item)
+            continue
+        if len(evidence) < _MIN_EVIDENCE_CHARS:
+            dropped += 1
+            logging.info(f"Filtered issue '{text}': evidence too short ({len(evidence)} chars) — {evidence!r}")
+            continue
+        haystack = (text + " " + evidence).lower()
+        matched = next((p for p in _BANNED_EVIDENCE_PHRASES if p in haystack), None)
+        if matched:
+            dropped += 1
+            logging.info(f"Filtered issue '{text}': banned phrase '{matched}' in evidence — {evidence!r}")
+            continue
+        kept.append(item)
+    data["issues"] = kept
+    if dropped and not kept:
+        logging.info(f"All {dropped} issue(s) filtered as hallucinations — flipping status to PASS")
+        data["status"] = "PASS"
+        data["severity"] = "NONE"
+        # Drop the now-misleading advice and let format_result render a clean PASS
+        data["advice"] = ""
+    return dropped
+
 
 def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str | None = None) -> str:
     from html import escape
@@ -97,12 +178,13 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     if summary:
         lines.append(summary)
 
-    if issues:
+    rendered_issues = [t for t in (_issue_text(i) for i in issues) if t]
+    if rendered_issues:
         lines.append("")
-        lines.extend(f"❌ {escape(str(i))}" for i in issues)
+        lines.extend(f"❌ {escape(t)}" for t in rendered_issues)
 
     if clean:
-        if not issues:
+        if not rendered_issues:
             lines.append("")
         lines.extend(f"✅ {escape(str(c))}" for c in clean)
 
@@ -155,6 +237,7 @@ async def process_video(file, reply_to: types.Message, history: list[dict] | Non
 
         try:
             data = parse_result(response)
+            filter_hallucinated_issues(data)
             text = format_result(data, photos=0, videos=1)
         except (json.JSONDecodeError, KeyError):
             data = {}
@@ -207,6 +290,7 @@ async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message,
 
         try:
             data = parse_result(response)
+            filter_hallucinated_issues(data)
             text = format_result(data, photos=len(photos), videos=0)
         except (json.JSONDecodeError, KeyError):
             data = {}
@@ -340,6 +424,7 @@ async def process_mixed_media(
 
         try:
             data = parse_result(response)
+            filter_hallucinated_issues(data)
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}
@@ -398,6 +483,7 @@ async def process_image_docs(docs: list[types.Document], reply_to: types.Message
 
         try:
             data = parse_result(response)
+            filter_hallucinated_issues(data)
             text = format_result(data, photos=len(docs), videos=0)
         except (json.JSONDecodeError, KeyError):
             data = {}

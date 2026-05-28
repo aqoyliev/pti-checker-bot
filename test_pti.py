@@ -95,11 +95,14 @@ Process:
 Output rules — the driver reads this on a phone, so be brutally short:
   - Frames from a video are labeled "Video frame at M:SS". Plain photos are labeled "Photo N".
   - For any defect you spot in a video frame, prefix the issue with that frame's timestamp in parens, e.g. "(1:14)". If the same defect spans several frames, use the timestamp where it's clearest. For defects only seen in a Photo (not a video frame), do NOT add a timestamp prefix.
-  - Each issue ≤ 8 words of plain English, then ONE CFR citation in parens.
-    Format: "(M:SS) <short defect> (49 CFR <section>)" for video defects, or "<short defect> (49 CFR <section>)" for photo defects.
-    Good: "(1:14) Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
-    Bad:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
+  - Each issue is an OBJECT with two fields: "text" and "evidence".
+    "text" = ≤ 8 words plain English, then ONE CFR citation in parens. Format: "(M:SS) <short defect> (49 CFR <section>)" for video defects, or "<short defect> (49 CFR <section>)" for photo defects.
+    Good text: "(1:14) Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
+    Bad text:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
     If no clear CFR applies (e.g. minor cosmetic damage), omit the CFR parens entirely (but keep the timestamp).
+    "evidence" = a sentence (20–200 chars) describing WHAT YOU ACTUALLY SAW on the frame — specific location, shape, size, contrast. Do NOT restate the defect; describe the visual observation that proves it. If you cannot write a concrete evidence sentence with specific location and visual contrast, DO NOT include the issue.
+    Good evidence: "Round dark cavity ~1cm wide on rightmost tread block of inner dual, recessed below surrounding rubber".
+    Bad evidence (DO NOT produce): "Tire is worn", "Visible damage", "Severe wear visible", "Tread depth low", "Shoulder is smooth".
   - "checked_clean": list which of the 9 inspection areas you actually saw and verified are fine.
     Use ONLY these component labels (one per inspection area):
       "Brake pads", "Lights", "Fire extinguisher & triangle", "Tires", "Mirrors",
@@ -120,7 +123,12 @@ Respond ONLY with a raw JSON object — no markdown, no code fences:
   "severity": "NONE" or "MINOR" or "MAJOR" or "CRITICAL",
   "confidence": "HIGH" or "MEDIUM" or "LOW",
   "image_quality": "GOOD" or "FAIR" or "POOR",
-  "issues": ["short plain-English defect"],
+  "issues": [
+    {
+      "text": "(M:SS) short defect (49 CFR ...)",
+      "evidence": "what you actually saw — location, shape, contrast, 20-200 chars"
+    }
+  ],
   "checked_clean": ["Tires", "Lights", ...],
   "what_was_not_visible": ["short item", ...],
   "advice": "one short sentence",
