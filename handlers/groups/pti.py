@@ -270,8 +270,7 @@ async def handle_check_group(message: types.Message):
         await message.answer(
             "This group is not configured yet. Anyone in the group can run:\n"
             "1. Have the driver send a message, then reply with: <code>/adddriver Driver Name</code>\n"
-            "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>\n\n"
-            "Each command needs 3 confirmations from members before it takes effect.",
+            "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>",
             parse_mode="HTML",
         )
         return

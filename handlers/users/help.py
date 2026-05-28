@@ -10,10 +10,8 @@ HELP_TEXT = (
     "<b>Setup (one-time per group)</b>\n"
     "When I'm added to a group, I read the group name and bio to detect the unit number and "
     "driver names. If anything is missing, anyone in the group can run:\n"
-    "• <code>/setunit &lt;unit_number&gt;</code> — set the truck unit (needs 3 confirms)\n"
-    "• <code>/adddriver Driver Name</code> — reply to the driver's message (needs 3 confirms)\n"
-    "Each command opens a vote — tap ✅ Confirm or ❌ Reject. 3 confirms saves it; 3 rejects asks you to re-enter. "
-    "If a vote stalls, I'll re-post the poll up to 3 times every 10 minutes.\n\n"
+    "• <code>/setunit &lt;unit_number&gt;</code> — set the truck unit\n"
+    "• <code>/adddriver Driver Name</code> — reply to the driver's message\n\n"
 
     "<b>Running an inspection</b>\n"
     "1. The driver sends the PTI as one or more photos and/or a video (one album works best).\n"

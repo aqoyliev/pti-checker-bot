@@ -470,20 +470,3 @@ async def get_open_proposals() -> list[dict]:
     return out
 
 
-async def find_open_add_driver_proposal(group_id: int, driver_user_id: int) -> dict | None:
-    row = await _pool_check().fetchrow(
-        """SELECT * FROM pending_proposals
-           WHERE group_id = $1
-             AND proposal_type = 'add_driver'
-             AND status = 'open'
-             AND (payload->>'user_id')::bigint = $2
-           ORDER BY created_at DESC LIMIT 1""",
-        group_id, driver_user_id,
-    )
-    if not row:
-        return None
-    d = dict(row)
-    payload = d["payload"]
-    if isinstance(payload, str):
-        d["payload"] = json.loads(payload)
-    return d

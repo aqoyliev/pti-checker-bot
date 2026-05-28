@@ -17,8 +17,6 @@ from utils.db import (
     cast_vote,
     count_votes,
     create_proposal,
-    get_drivers,
-    get_group,
     get_groups_needing_setup_nag,
     get_open_proposals,
     get_pti_log,
@@ -28,7 +26,6 @@ from utils.db import (
     set_proposal_status,
     set_trailer,
     set_truck_unit,
-    upsert_group,
 )
 from utils.enforcement import handle_pti_passed
 
@@ -42,8 +39,7 @@ SETUP_NAG_MAX = 3
 SETUP_NAG_MESSAGE = (
     "⏰ This group is still not configured. Anyone in the group can run:\n"
     "1. Have the driver send a message, then reply with: <code>/adddriver Driver Name</code>\n"
-    "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>\n\n"
-    "Each command needs 3 confirmations from members before it takes effect."
+    "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>"
 )
 
 _reminder_tasks: dict[int, asyncio.Task] = {}
@@ -65,19 +61,6 @@ def _vote_kb(proposal_id: int, confirms: int, rejects: int) -> InlineKeyboardMar
 
 
 def _proposal_body(proposal_type: str, payload: dict) -> str:
-    if proposal_type == "set_unit":
-        unit = escape(payload.get("unit_number") or "—")
-        return (
-            f"📝 Proposal: set unit number to <b>{unit}</b>.\n\n"
-            f"Needs <b>{CONFIRM_THRESHOLD} confirmations</b> from members."
-        )
-    if proposal_type == "add_driver":
-        name = escape(payload.get("name") or "—")
-        display = escape(payload.get("display_name") or "this user")
-        return (
-            f"📝 Proposal: register <b>{display}</b> as driver <b>{name}</b>.\n\n"
-            f"Needs <b>{CONFIRM_THRESHOLD} confirmations</b> from members."
-        )
     if proposal_type == "vehicle_change":
         kind = escape(payload.get("kind") or "vehicle")
         current_unit = escape(payload.get("current_unit") or "—")
@@ -210,28 +193,6 @@ async def schedule_pending_reminders():
         _schedule_reminder(proposal["id"], delay)
 
 
-async def propose_set_unit(chat_id: int, unit: str, proposer_id: int) -> int:
-    await upsert_group(chat_id)
-    return await _send_proposal(
-        chat_id,
-        "set_unit",
-        {"unit_number": unit},
-        proposer_id=proposer_id,
-    )
-
-
-async def propose_add_driver(
-    chat_id: int, driver_user_id: int, driver_name: str, display_name: str, proposer_id: int
-) -> int:
-    await upsert_group(chat_id)
-    return await _send_proposal(
-        chat_id,
-        "add_driver",
-        {"user_id": driver_user_id, "name": driver_name, "display_name": display_name},
-        proposer_id=proposer_id,
-    )
-
-
 async def propose_vehicle_change(
     chat_id: int,
     kind: str,
@@ -261,31 +222,8 @@ async def propose_vehicle_change(
 # ---------- execution on confirm / reject ----------
 
 async def _on_confirmed(chat_id: int, proposal: dict):
-    from utils.db import add_driver, set_group_unit  # local import to avoid cycles
-
     ptype = proposal["proposal_type"]
     payload = proposal["payload"]
-
-    if ptype == "set_unit":
-        unit = payload.get("unit_number")
-        if unit:
-            await set_group_unit(chat_id, unit)
-        drivers = await get_drivers(chat_id)
-        if drivers:
-            names = " & ".join(d["name"] for d in drivers)
-            await bot.send_message(
-                chat_id,
-                f"✅ Setup complete. Unit <b>{escape(unit)}</b> assigned to {escape(names)}.",
-                parse_mode="HTML",
-            )
-        else:
-            await bot.send_message(
-                chat_id,
-                f"✅ Unit <b>{escape(unit)}</b> saved. Now register the driver(s) — have them send a message, "
-                f"then anyone reply with <code>/adddriver Driver Name</code> (also needs 3 confirmations).",
-                parse_mode="HTML",
-            )
-        return
 
     if ptype == "vehicle_change":
         kind = payload["kind"]
@@ -331,52 +269,9 @@ async def _on_confirmed(chat_id: int, proposal: dict):
                     logging.exception("Failed to run handle_pti_passed after vehicle confirm")
         return
 
-    if ptype == "add_driver":
-        driver_uid = int(payload["user_id"])
-        name = payload["name"]
-        added = await add_driver(chat_id, driver_uid, name)
-        if not added:
-            await bot.send_message(chat_id, f"{escape(name)} was already registered; no change.")
-            return
-        group = await get_group(chat_id)
-        if group and group.get("unit_number"):
-            # Now drivers + unit both present; mark setup complete
-            await set_group_unit(chat_id, group["unit_number"])  # also flips setup_complete = TRUE
-            drivers = await get_drivers(chat_id)
-            names = " & ".join(d["name"] for d in drivers)
-            await bot.send_message(
-                chat_id,
-                f"✅ {escape(name)} registered.\n"
-                f"Setup complete: unit <b>{escape(group['unit_number'])}</b> assigned to {escape(names)}.",
-                parse_mode="HTML",
-            )
-        else:
-            await bot.send_message(
-                chat_id,
-                f"✅ {escape(name)} registered. Now set the unit number:\n"
-                f"<code>/setunit &lt;unit_number&gt;</code> (also needs 3 confirmations).",
-                parse_mode="HTML",
-            )
-        return
-
 
 async def _on_rejected(chat_id: int, proposal: dict):
     ptype = proposal["proposal_type"]
-    if ptype == "set_unit":
-        await bot.send_message(
-            chat_id,
-            "❌ Unit number rejected. Re-enter with <code>/setunit &lt;unit_number&gt;</code>.",
-            parse_mode="HTML",
-        )
-        return
-    if ptype == "add_driver":
-        await bot.send_message(
-            chat_id,
-            "❌ Driver registration rejected. Re-do with <code>/adddriver Driver Name</code> "
-            "(reply to the driver's message).",
-            parse_mode="HTML",
-        )
-        return
     if ptype == "vehicle_change":
         payload = proposal["payload"]
         kind = payload.get("kind") or "vehicle"
