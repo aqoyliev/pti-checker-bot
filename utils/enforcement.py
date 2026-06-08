@@ -50,54 +50,44 @@ async def _deregister_group(group_id: int, reason: str):
     )
 
 
-async def unmute_driver(group_id: int, user_id: int) -> bool:
-    """Returns False if the group should be deregistered."""
+async def _set_driver_restriction(group_id: int, user_id: int, permissions, action: str) -> bool:
+    """Apply `permissions` to a driver. `action` ('mute'/'unmute') is for log text.
+
+    Returns False only when the group is unreachable / mis-permissioned and should
+    be deregistered; True otherwise (including benign no-ops like the chat owner).
+    """
     try:
-        await bot.restrict_chat_member(group_id, user_id, permissions=_FULL_PERMISSIONS)
+        await bot.restrict_chat_member(group_id, user_id, permissions=permissions)
         return True
     except CantRestrictChatOwner:
-        # Telegram never lets a bot restrict the chat creator, so the owner is
-        # effectively always unmuted. Benign no-op — not an error, don't deregister.
-        logging.debug(f"Skipping unmute of chat owner {user_id} in group {group_id}")
+        # Telegram never lets a bot restrict the chat creator, so enforcement
+        # simply doesn't apply to the owner. Benign no-op — not an error, and it
+        # recurs every cycle, so keep it at debug to avoid log spam.
+        logging.debug(f"Cannot {action} chat owner {user_id} in group {group_id}; skipped")
         return True
     except NotEnoughRightsToRestrict:
-        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't unmute {user_id}")
+        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't {action} {user_id}")
         await notify_admins(
             f"⚠️ Bot lacks <b>Restrict Members</b> permission in group <code>{group_id}</code>.\n"
             f"Enforcement is disabled there. Grant admin rights or use /deregister to remove it."
         )
         return False
     except _UNREACHABLE_EXCEPTIONS as e:
-        logging.warning(f"Group {group_id} unreachable while unmuting {user_id}: {type(e).__name__}")
+        logging.warning(f"Group {group_id} unreachable while trying to {action} {user_id}: {type(e).__name__}")
         return False
     except Exception:
-        logging.exception(f"Failed to unmute user {user_id} in group {group_id}")
+        logging.exception(f"Failed to {action} user {user_id} in group {group_id}")
         return True
+
+
+async def unmute_driver(group_id: int, user_id: int) -> bool:
+    """Returns False if the group should be deregistered."""
+    return await _set_driver_restriction(group_id, user_id, _FULL_PERMISSIONS, "unmute")
 
 
 async def mute_driver(group_id: int, user_id: int) -> bool:
     """Returns False if the group should be deregistered."""
-    try:
-        await bot.restrict_chat_member(group_id, user_id, permissions=_MUTED_PERMISSIONS)
-        return True
-    except CantRestrictChatOwner:
-        # The chat creator can't be restricted by a bot, so enforcement simply
-        # doesn't apply to them. Benign — don't spam errors or deregister the group.
-        logging.info(f"Cannot mute chat owner {user_id} in group {group_id}; enforcement skipped for owner")
-        return True
-    except NotEnoughRightsToRestrict:
-        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't mute {user_id}")
-        await notify_admins(
-            f"⚠️ Bot lacks <b>Restrict Members</b> permission in group <code>{group_id}</code>.\n"
-            f"Enforcement is disabled there. Grant admin rights or use /deregister to remove it."
-        )
-        return False
-    except _UNREACHABLE_EXCEPTIONS as e:
-        logging.warning(f"Group {group_id} unreachable while muting {user_id}: {type(e).__name__}")
-        return False
-    except Exception:
-        logging.exception(f"Failed to mute user {user_id} in group {group_id}")
-        return True
+    return await _set_driver_restriction(group_id, user_id, _MUTED_PERMISSIONS, "mute")
 
 
 def is_gap_ok(last_pti: dict | None) -> bool:
