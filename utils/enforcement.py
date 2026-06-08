@@ -7,6 +7,7 @@ from aiogram.types import ChatPermissions
 from aiogram.utils.exceptions import (
     BotBlocked,
     BotKicked,
+    CantRestrictChatOwner,
     ChatNotFound,
     MethodIsNotAvailable,
     NotEnoughRightsToRestrict,
@@ -54,6 +55,11 @@ async def unmute_driver(group_id: int, user_id: int) -> bool:
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_FULL_PERMISSIONS)
         return True
+    except CantRestrictChatOwner:
+        # Telegram never lets a bot restrict the chat creator, so the owner is
+        # effectively always unmuted. Benign no-op — not an error, don't deregister.
+        logging.debug(f"Skipping unmute of chat owner {user_id} in group {group_id}")
+        return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't unmute {user_id}")
         await notify_admins(
@@ -73,6 +79,11 @@ async def mute_driver(group_id: int, user_id: int) -> bool:
     """Returns False if the group should be deregistered."""
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_MUTED_PERMISSIONS)
+        return True
+    except CantRestrictChatOwner:
+        # The chat creator can't be restricted by a bot, so enforcement simply
+        # doesn't apply to them. Benign — don't spam errors or deregister the group.
+        logging.info(f"Cannot mute chat owner {user_id} in group {group_id}; enforcement skipped for owner")
         return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't mute {user_id}")
