@@ -30,6 +30,19 @@ from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_fra
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
 
+# Global cap on concurrent PTI analyses (frame extraction + Gemini). Bounds CPU,
+# memory, disk, thread-pool, and Gemini-quota pressure when submissions arrive in
+# a burst; extra inspections queue here instead of overwhelming the host.
+# Created lazily so it binds to the running event loop on first use.
+_analysis_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_analysis_slot() -> asyncio.Semaphore:
+    global _analysis_semaphore
+    if _analysis_semaphore is None:
+        _analysis_semaphore = asyncio.Semaphore(max(1, config.PTI_MAX_CONCURRENCY))
+    return _analysis_semaphore
+
 
 def _fmt_timestamp(seconds: float) -> str:
     s = int(round(seconds))
@@ -371,6 +384,18 @@ async def process_mixed_media(
     video_frames: list[tuple[float, str]] = []
     images: list[tuple[str, str]] = []
     skipped = 0
+
+    # Bound concurrent analyses so a burst of submissions queues instead of
+    # exhausting CPU/memory/threads/Gemini quota. Tell the driver if they wait.
+    slot = _get_analysis_slot()
+    if slot.locked():
+        try:
+            await status_msg.edit_text(
+                "📈 High volume right now — your PTI is queued and will start in a moment…"
+            )
+        except Exception:
+            pass
+    await slot.acquire()
     try:
         for item in items:
             kind = item["kind"]
@@ -468,6 +493,7 @@ async def process_mixed_media(
         await status_msg.edit_text(f"An error occurred: {e}")
         return None, None, status_msg
     finally:
+        slot.release()
         if video_frames:
             delete_frames(video_frames)
         for path in tmp_paths:
