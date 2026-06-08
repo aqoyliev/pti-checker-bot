@@ -50,13 +50,17 @@ async def _deregister_group(group_id: int, reason: str):
 
 
 async def unmute_driver(group_id: int, user_id: int) -> bool:
-    """Returns False if the group is unreachable (caller should deregister)."""
+    """Returns False if the group should be deregistered."""
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_FULL_PERMISSIONS)
         return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't unmute {user_id}")
-        return True
+        await notify_admins(
+            f"⚠️ Bot lacks <b>Restrict Members</b> permission in group <code>{group_id}</code>.\n"
+            f"Enforcement is disabled there. Grant admin rights or use /deregister to remove it."
+        )
+        return False
     except _UNREACHABLE_EXCEPTIONS as e:
         logging.warning(f"Group {group_id} unreachable while unmuting {user_id}: {type(e).__name__}")
         return False
@@ -66,13 +70,17 @@ async def unmute_driver(group_id: int, user_id: int) -> bool:
 
 
 async def mute_driver(group_id: int, user_id: int) -> bool:
-    """Returns False if the group is unreachable (caller should deregister)."""
+    """Returns False if the group should be deregistered."""
     try:
         await bot.restrict_chat_member(group_id, user_id, permissions=_MUTED_PERMISSIONS)
         return True
     except NotEnoughRightsToRestrict:
         logging.warning(f"Bot lacks restrict rights in group {group_id} — can't mute {user_id}")
-        return True
+        await notify_admins(
+            f"⚠️ Bot lacks <b>Restrict Members</b> permission in group <code>{group_id}</code>.\n"
+            f"Enforcement is disabled there. Grant admin rights or use /deregister to remove it."
+        )
+        return False
     except _UNREACHABLE_EXCEPTIONS as e:
         logging.warning(f"Group {group_id} unreachable while muting {user_id}: {type(e).__name__}")
         return False
