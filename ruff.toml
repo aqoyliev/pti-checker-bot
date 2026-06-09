@@ -1,0 +1,16 @@
+# Conservative lint config: catch real defects (syntax errors, undefined names,
+# unused imports/variables) without imposing style churn on the existing code.
+# Run with:  ruff check .
+line-length = 120
+target-version = "py311"
+
+[lint]
+# E9  = syntax / runtime-ish errors, F = pyflakes (undefined names, unused, etc.)
+select = ["E9", "F"]
+
+[lint.per-file-ignores]
+# aiogram registers handlers, middlewares, and filters purely via import side
+# effects; package __init__ files and the app entrypoint re-export them, so the
+# "unused import" / "star import" warnings there are expected, not bugs.
+"__init__.py" = ["F401", "F403"]
+"app.py" = ["F401"]

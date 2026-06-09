@@ -104,7 +104,7 @@ async def cmd_add_driver(message: types.Message):
 
     existing = await get_drivers(message.chat.id)
     if any(d["user_id"] == reply.from_user.id for d in existing):
-        await message.reply(f"That user is already registered as a driver.")
+        await message.reply("That user is already registered as a driver.")
         return
     if len(existing) >= 2:
         names = " & ".join(d["name"] for d in existing)

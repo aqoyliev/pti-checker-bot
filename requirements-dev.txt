@@ -1,0 +1,5 @@
+# Dev/CI tooling — not needed at runtime (see requirements.txt for the bot deps).
+# Installed by .claude/hooks/session-start.sh so Claude Code web sessions can
+# lint and test changes before pushing.
+ruff~=0.6
+pytest~=8.0

@@ -4,3 +4,13 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+
+# Dev/test tooling — not needed in the runtime image
+.claude
+.github
+tests
+.pytest_cache
+ruff.toml
+pytest.ini
+requirements-dev.txt
+CLAUDE.md
