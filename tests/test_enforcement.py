@@ -10,18 +10,26 @@ from unittest.mock import AsyncMock
 from aiogram.utils.exceptions import CantRestrictChatOwner
 
 from utils import enforcement
+from utils.enforcement import RestrictOutcome
 
 
-def _owner_restrict_mock():
-    return AsyncMock(side_effect=CantRestrictChatOwner("Can't remove chat owner"))
+def test_unmute_chat_owner_returns_owner(monkeypatch):
+    monkeypatch.setattr(
+        enforcement.bot, "restrict_chat_member",
+        AsyncMock(side_effect=CantRestrictChatOwner("Can't remove chat owner")),
+    )
+    # Owner can't be restricted: benign no-op, not a deregistration, not "applied".
+    assert asyncio.run(enforcement.unmute_driver(-100123, 555)) is RestrictOutcome.OWNER
 
 
-def test_unmute_chat_owner_is_benign(monkeypatch):
-    monkeypatch.setattr(enforcement.bot, "restrict_chat_member", _owner_restrict_mock())
-    # Returns True (no deregistration) and does not raise.
-    assert asyncio.run(enforcement.unmute_driver(-100123, 555)) is True
+def test_mute_chat_owner_returns_owner(monkeypatch):
+    monkeypatch.setattr(
+        enforcement.bot, "restrict_chat_member",
+        AsyncMock(side_effect=CantRestrictChatOwner("Can't remove chat owner")),
+    )
+    assert asyncio.run(enforcement.mute_driver(-100123, 555)) is RestrictOutcome.OWNER
 
 
-def test_mute_chat_owner_is_benign(monkeypatch):
-    monkeypatch.setattr(enforcement.bot, "restrict_chat_member", _owner_restrict_mock())
-    assert asyncio.run(enforcement.mute_driver(-100123, 555)) is True
+def test_mute_success_returns_applied(monkeypatch):
+    monkeypatch.setattr(enforcement.bot, "restrict_chat_member", AsyncMock(return_value=True))
+    assert asyncio.run(enforcement.mute_driver(-100123, 555)) is RestrictOutcome.APPLIED
