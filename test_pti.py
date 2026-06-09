@@ -88,15 +88,41 @@ Leniency rules — BE CONSERVATIVE. The default is PASS. It is FAR worse to fals
   - Windshield: small stone chips outside the driver's line of sight are NOT a defect; only flag long/spreading cracks or chips in the swept area.
   - If you are unsure whether something is a defect, treat it as PASS and (if relevant) add it to "what_was_not_visible" rather than "issues".
 
+PASS / FAIL rule — based on FMCSA / CVSA Out-of-Service (OOS) criteria:
+  The overall verdict is FAIL only if AT LEAST ONE defect is an Out-of-Service condition under the CVSA North
+  American Standard Out-of-Service Criteria. If there are NO OOS defects, the verdict is PASS — even when you
+  list minor, non-OOS defects (those are advisories the driver should fix, not failures).
+  For EVERY issue you report, set "oos": true ONLY if that specific defect meets one of the OOS conditions
+  below; otherwise set "oos": false. Only mark oos=true for something you can actually SEE meets the threshold.
+
+  OOS conditions (these FAIL the vehicle):
+    - Tires: visibly flat / run-flat (deformed against the ground), tread or sidewall separation, a bulge from
+      ply/belt separation, exposed cords/belt/ply fabric, a sidewall cut or split deep enough to expose cords,
+      or a clearly bald patch where the tread is gone. (You cannot measure tread depth — never fail on a number.)
+    - Brakes / brake pads: lining or pad missing, cracked off, or worn down to the metal/rivets; broken brake
+      hardware. Even, adequate pad thickness is NOT OOS.
+    - Air lines (air brake system): an air line that is cut, broken, disconnected, or visibly/audibly leaking.
+    - Frame / chassis: a cracked, broken, or sagging frame member (surface rust or cosmetic dents are NOT OOS).
+    - Under the hood: a FUEL leak is OOS. An engine-oil drip or seep is NOT OOS.
+    - Lights: OOS only if a REQUIRED lamp is dead — e.g. no working brake (stop) lamps, or an inoperative
+      headlamp or turn signal. A single out/dirty marker or clearance lamp is an advisory, not OOS.
+
+  NEVER OOS (always oos=false — report as an advisory at most; the verdict stays PASS):
+    - Missing or expired fire extinguisher or warning triangle (regulatory item, not an OOS condition).
+    - Broken, missing, or cracked mirror.
+    - Low or unknown engine-oil level.
+    - Windshield stone chips or short cracks outside the swept driver view.
+    - Cosmetic damage, dirt, rust, mud, faded paint.
+
 Process:
   - Look across ALL frames before deciding — a defect visible in one frame is still a defect.
-  - Severity: NONE = all clear; MINOR = small problem, can drive; MAJOR = needs fixing soon; CRITICAL = unsafe, do not drive.
+  - Severity: CRITICAL = at least one OOS defect (vehicle FAILS — do not drive). With NO OOS defect, use NONE = all clear, or MINOR/MAJOR for advisory defects worth fixing that do NOT place the vehicle out of service.
   - VEHICLE IDENTIFICATION: Read visible unit numbers (painted on cab or trailer body) and license plates for the truck and trailer separately. Return one entry per distinct vehicle in "vehicles". If previous PTI history is provided, check whether prior issues are now fixed.
 
 Output rules — the driver reads this on a phone, so be brutally short:
   - Frames from a video are labeled "Video frame at M:SS". Plain photos are labeled "Photo N".
   - For any defect you spot in a video frame, prefix the issue with that frame's timestamp in parens, e.g. "(1:14)". If the same defect spans several frames, use the timestamp where it's clearest. For defects only seen in a Photo (not a video frame), do NOT add a timestamp prefix.
-  - Each issue is an OBJECT with two fields: "text" and "evidence".
+  - Each issue is an OBJECT with three fields: "text", "evidence", and "oos".
     "text" = ≤ 8 words plain English, then ONE CFR citation in parens. Format: "(M:SS) <short defect> (49 CFR <section>)" for video defects, or "<short defect> (49 CFR <section>)" for photo defects.
     Good text: "(1:14) Cracked steer rim (49 CFR 393.205(a))", "Trailer plate missing (49 CFR 393.17)".
     Bad text:  "Cracked rim on passenger side steer wheel (49 CFR 393.205(a), 396 Appendix G, Item 1.a.1)".
@@ -104,6 +130,7 @@ Output rules — the driver reads this on a phone, so be brutally short:
     "evidence" = a sentence (20–200 chars) describing WHAT YOU ACTUALLY SAW on the frame — specific location, shape, size, contrast. Do NOT restate the defect; describe the visual observation that proves it. If you cannot write a concrete evidence sentence with specific location and visual contrast, DO NOT include the issue.
     Good evidence: "Round dark cavity ~1cm wide on rightmost tread block of inner dual, recessed below surrounding rubber".
     Bad evidence (DO NOT produce): "Tire is worn", "Visible damage", "Severe wear visible", "Tread depth low", "Shoulder is smooth".
+    "oos" = true/false per the OOS conditions above — true ONLY if this defect places the vehicle out of service, otherwise false.
   - "checked_clean": list which of the 9 inspection areas you actually saw and verified are fine.
     Use ONLY these component labels (one per inspection area):
       "Brake pads", "Lights", "Fire extinguisher & triangle", "Tires", "Mirrors",
@@ -127,7 +154,8 @@ Respond ONLY with a raw JSON object — no markdown, no code fences:
   "issues": [
     {
       "text": "(M:SS) short defect (49 CFR ...)",
-      "evidence": "what you actually saw — location, shape, contrast, 20-200 chars"
+      "evidence": "what you actually saw — location, shape, contrast, 20-200 chars",
+      "oos": true or false
     }
   ],
   "checked_clean": ["Tires", "Lights", ...],

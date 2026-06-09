@@ -132,6 +132,34 @@ def _issue_evidence(item) -> str:
     return ""
 
 
+def _issue_is_oos(item) -> bool:
+    """True if the model flagged this defect as an Out-of-Service condition."""
+    return isinstance(item, dict) and bool(item.get("oos"))
+
+
+def apply_oos_verdict(data: dict) -> bool:
+    """Set PASS/FAIL per the FMCSA/CVSA Out-of-Service rule.
+
+    FAIL iff at least one remaining issue is an OOS defect; otherwise PASS, even
+    when non-OOS advisory issues are present. Call AFTER filter_hallucinated_issues
+    so dropped hallucinations don't drive the verdict. Returns True if OOS (FAIL).
+    """
+    issues = data.get("issues") or []
+    has_oos = any(_issue_is_oos(i) for i in issues)
+    if has_oos:
+        data["status"] = "FAIL"
+        data["severity"] = "CRITICAL"
+    else:
+        data["status"] = "PASS"
+        # Keep a meaningful severity for advisory-only results; never CRITICAL on a PASS.
+        if issues:
+            sev = (data.get("severity") or "").upper()
+            data["severity"] = sev if sev in ("MINOR", "MAJOR") else "MINOR"
+        else:
+            data["severity"] = "NONE"
+    return has_oos
+
+
 def filter_hallucinated_issues(data: dict) -> int:
     """Drop issues whose evidence is missing/too short or matches a banned conclusion phrase.
 
@@ -207,13 +235,22 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     if summary:
         lines.append(summary)
 
-    rendered_issues = [t for t in (_issue_text(i) for i in issues) if t]
-    if rendered_issues:
+    oos_issues = [t for t in (_issue_text(i) for i in issues if _issue_is_oos(i)) if t]
+    advisory_issues = [t for t in (_issue_text(i) for i in issues if not _issue_is_oos(i)) if t]
+    any_issues = bool(oos_issues or advisory_issues)
+
+    if oos_issues:
         lines.append("")
-        lines.extend(f"❌ {escape(t)}" for t in rendered_issues)
+        lines.append("🛑 <b>Out-of-service defects:</b>")
+        lines.extend(f"❌ {escape(t)}" for t in oos_issues)
+
+    if advisory_issues:
+        lines.append("")
+        lines.append("⚠️ <b>Advisories (not out-of-service):</b>")
+        lines.extend(f"• {escape(t)}" for t in advisory_issues)
 
     if clean:
-        if not rendered_issues:
+        if not any_issues:
             lines.append("")
         lines.extend(f"✅ {escape(str(c))}" for c in clean)
 
@@ -346,6 +383,7 @@ async def process_mixed_media(
         try:
             data = parse_result(response)
             filter_hallucinated_issues(data)
+            apply_oos_verdict(data)  # FAIL only on OOS defects; otherwise PASS
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}

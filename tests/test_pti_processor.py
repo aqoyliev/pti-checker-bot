@@ -83,18 +83,54 @@ def test_format_result_pass():
     assert "PTI Result: PASS" in text
 
 
-def test_format_result_fail_with_driver_and_issue():
-    data = {"status": "FAIL", "severity": "MAJOR",
-            "issues": [{"text": "Brake pad worn", "evidence": "x" * 30}]}
+def test_format_result_fail_with_driver_and_oos_issue():
+    data = {"status": "FAIL", "severity": "CRITICAL",
+            "issues": [{"text": "Exposed tire cords", "evidence": "x" * 30, "oos": True}]}
     text = pp.format_result(data, photos=1, videos=0, driver_name="John Doe")
     assert "PTI Result: FAIL" in text
     assert "John Doe" in text
-    assert "Brake pad worn" in text
+    assert "Out-of-service" in text
+    assert "Exposed tire cords" in text
     assert "📎 Checked: 1 photo" in text
 
 
+def test_format_result_pass_shows_advisory_for_non_oos_issue():
+    data = {"status": "PASS", "severity": "MINOR",
+            "issues": [{"text": "Mirror cracked", "evidence": "y" * 30, "oos": False}]}
+    text = pp.format_result(data)
+    assert "PTI Result: PASS" in text
+    assert "Advisories" in text
+    assert "Mirror cracked" in text
+    assert "Out-of-service" not in text
+
+
 def test_format_result_escapes_html():
-    data = {"status": "FAIL", "issues": [{"text": "Bad <tag> & stuff", "evidence": "y" * 30}]}
+    data = {"status": "FAIL", "issues": [{"text": "Bad <tag> & stuff", "evidence": "y" * 30, "oos": True}]}
     text = pp.format_result(data)
     assert "<tag>" not in text
     assert "&lt;tag&gt;" in text
+
+
+# ---------- apply_oos_verdict ----------
+
+def test_oos_verdict_fails_on_oos_issue():
+    data = {"status": "PASS", "severity": "NONE",
+            "issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}]}
+    assert pp.apply_oos_verdict(data) is True
+    assert data["status"] == "FAIL"
+    assert data["severity"] == "CRITICAL"
+
+
+def test_oos_verdict_passes_with_advisory_only():
+    data = {"status": "FAIL", "severity": "CRITICAL",
+            "issues": [{"text": "Mirror cracked", "evidence": "z" * 30, "oos": False}]}
+    assert pp.apply_oos_verdict(data) is False
+    assert data["status"] == "PASS"
+    assert data["severity"] == "MINOR"
+
+
+def test_oos_verdict_passes_clean():
+    data = {"status": "FAIL", "severity": "MAJOR", "issues": []}
+    assert pp.apply_oos_verdict(data) is False
+    assert data["status"] == "PASS"
+    assert data["severity"] == "NONE"
