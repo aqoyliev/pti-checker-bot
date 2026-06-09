@@ -26,7 +26,7 @@ def _is_service_overload(e: Exception) -> bool:
 
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
+from test_pti import extract_frames, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
 
 _GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
 
@@ -228,126 +228,6 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     return "\n".join(lines)
 
 
-async def process_video(file, reply_to: types.Message, history: list[dict] | None = None) -> tuple[str | None, dict | None]:
-    """Returns (formatted_text, raw_data) or (None, None) on failure."""
-    status_msg = await reply_to.answer("Analyzing video...")
-
-    tmp_path = None
-    frames = []
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        file_info = await file.get_file()
-        if config.LOCAL_SERVER_URL:
-            await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_path)
-        else:
-            await bot.download_file(file_info.file_path, destination=tmp_path)
-
-        try:
-            frames = await asyncio.to_thread(extract_frames, tmp_path)
-        except VideoTooLongError as e:
-            mins = int(e.duration) // 60
-            await status_msg.edit_text(
-                f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
-            )
-            return None, None
-        if not frames:
-            await status_msg.edit_text("Could not extract frames from the video.")
-            return None, None
-
-        await status_msg.edit_text(f"Analyzing {len(frames)} frame(s)...")
-
-        try:
-            response = await _call_gemini_with_retry(call_gemini, frames, history=history)
-        finally:
-            delete_frames(frames)
-            frames = []
-
-        try:
-            data = parse_result(response)
-            filter_hallucinated_issues(data)
-            text = format_result(data, photos=0, videos=1)
-        except (json.JSONDecodeError, KeyError):
-            data = {}
-            text = f"<b>PTI Result:</b>\n{response.text}"
-
-        await status_msg.edit_text(text, parse_mode="HTML")
-        return text, data
-
-    except (genai_errors.ServerError, genai_errors.ClientError) as e:
-        if not _is_service_overload(e):
-            logging.exception("PTI video processing error")
-            await status_msg.edit_text(f"An error occurred: {e}")
-            return None, None
-        logging.warning(f"Gemini overloaded after retries (video flow): {type(e).__name__}")
-        await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
-        return None, None
-    except Exception as e:
-        logging.exception("PTI video processing error")
-        await status_msg.edit_text(f"An error occurred: {e}")
-        return None, None
-    finally:
-        if frames:
-            delete_frames(frames)
-        if tmp_path:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-
-async def process_photos(photos: list[types.PhotoSize], reply_to: types.Message, history: list[dict] | None = None) -> tuple[str | None, dict | None]:
-    count = len(photos)
-    label = f"{count} photos" if count > 1 else "photo"
-    status_msg = await reply_to.answer(f"Analyzing {label}...")
-
-    tmp_paths: list[str] = []
-    try:
-        for photo in photos:
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_paths.append(tmp.name)
-            file_info = await photo.get_file()
-            if config.LOCAL_SERVER_URL:
-                await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_paths[-1])
-            else:
-                await bot.download_file(file_info.file_path, destination=tmp_paths[-1])
-
-        response = await _call_gemini_with_retry(
-            call_gemini_photos, [(p, "image/jpeg") for p in tmp_paths], history=history
-        )
-
-        try:
-            data = parse_result(response)
-            filter_hallucinated_issues(data)
-            text = format_result(data, photos=len(photos), videos=0)
-        except (json.JSONDecodeError, KeyError):
-            data = {}
-            text = f"<b>PTI Result:</b>\n{response.text}"
-
-        await status_msg.edit_text(text, parse_mode="HTML")
-        return text, data
-
-    except (genai_errors.ServerError, genai_errors.ClientError) as e:
-        if not _is_service_overload(e):
-            logging.exception("PTI photo processing error")
-            await status_msg.edit_text(f"An error occurred: {e}")
-            return None, None
-        logging.warning(f"Gemini overloaded after retries (photo flow): {type(e).__name__}")
-        await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
-        return None, None
-    except Exception as e:
-        logging.exception("PTI photo processing error")
-        await status_msg.edit_text(f"An error occurred: {e}")
-        return None, None
-    finally:
-        for path in tmp_paths:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
 async def process_mixed_media(
     items,
     reply_to: types.Message,
@@ -496,57 +376,6 @@ async def process_mixed_media(
         slot.release()
         if video_frames:
             delete_frames(video_frames)
-        for path in tmp_paths:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-async def process_image_docs(docs: list[types.Document], reply_to: types.Message, history: list[dict] | None = None) -> tuple[str | None, dict | None]:
-    count = len(docs)
-    label = f"{count} photos" if count > 1 else "photo"
-    status_msg = await reply_to.answer(f"Analyzing {label}...")
-
-    tmp_paths: list[str] = []
-    images: list[tuple[str, str]] = []
-    try:
-        for doc in docs:
-            with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tmp:
-                tmp_paths.append(tmp.name)
-            file_info = await doc.get_file()
-            if config.LOCAL_SERVER_URL:
-                await asyncio.to_thread(shutil.copy2, file_info.file_path, tmp_paths[-1])
-            else:
-                await bot.download_file(file_info.file_path, destination=tmp_paths[-1])
-            images.append((tmp_paths[-1], doc.mime_type))
-
-        response = await asyncio.to_thread(call_gemini_photos, images, history=history)
-
-        try:
-            data = parse_result(response)
-            filter_hallucinated_issues(data)
-            text = format_result(data, photos=len(docs), videos=0)
-        except (json.JSONDecodeError, KeyError):
-            data = {}
-            text = f"<b>PTI Result:</b>\n{response.text}"
-
-        await status_msg.edit_text(text, parse_mode="HTML")
-        return text, data
-
-    except (genai_errors.ServerError, genai_errors.ClientError) as e:
-        if not _is_service_overload(e):
-            logging.exception("PTI image doc processing error")
-            await status_msg.edit_text(f"An error occurred: {e}")
-            return None, None
-        logging.warning(f"Gemini overloaded (image doc flow): {type(e).__name__}")
-        await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
-        return None, None
-    except Exception as e:
-        logging.exception("PTI image doc processing error")
-        await status_msg.edit_text(f"An error occurred: {e}")
-        return None, None
-    finally:
         for path in tmp_paths:
             try:
                 os.remove(path)
