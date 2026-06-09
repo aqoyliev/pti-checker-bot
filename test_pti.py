@@ -189,7 +189,12 @@ def _build_history_text(history: list[dict]) -> str | None:
                 issues = parsed.get("issues", [])
             except Exception:
                 pass
-        issue_text = "; ".join(issues) if issues else "none"
+        issue_texts = [
+            (i.get("text") or "").strip() if isinstance(i, dict) else str(i).strip()
+            for i in issues
+        ]
+        issue_texts = [t for t in issue_texts if t]
+        issue_text = "; ".join(issue_texts) if issue_texts else "none"
         lines.append(f"  {i}. {date} — {status} ({severity}) on {unit}. Issues: {issue_text}")
     return "\n".join(lines)
 
