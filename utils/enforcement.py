@@ -15,7 +15,7 @@ from aiogram.utils.exceptions import (
 )
 
 from loader import bot
-from data.config import ADMINS
+from data.config import ADMINS, ENFORCEMENT_ENABLED
 from utils.db import (
     get_all_registered_groups, get_drivers,
     get_pti_count_this_week, get_last_pti,
@@ -158,6 +158,15 @@ async def run_compliance_check():
         for driver in drivers:
             user_id = driver["user_id"]
             name = driver["name"]
+
+            # Enforcement disabled: never mute and send no reminders; just lift any
+            # restriction left over from when it was on, so no driver stays stuck.
+            if not ENFORCEMENT_ENABLED:
+                if await unmute_driver(group_id, user_id) is RestrictOutcome.UNREACHABLE:
+                    await _deregister_group(group_id, "unreachable during unmute")
+                    break
+                continue
+
             compliant, reason = await check_driver_compliance(group_id, user_id)
 
             if compliant:

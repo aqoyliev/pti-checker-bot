@@ -16,3 +16,9 @@ DATABASE_URL = env.str("DATABASE_URL")
 # memory/disk, and trip Gemini rate limits. Excess submissions queue and wait
 # for a free slot instead of piling on. Tune up only if the host has headroom.
 PTI_MAX_CONCURRENCY = env.int("PTI_MAX_CONCURRENCY", default=3)
+
+# Compliance enforcement. When False (default), the hourly loop never mutes
+# drivers and sends no overdue reminders to the group or to admins — it only
+# lifts any restrictions left over from when enforcement was on. Set True to
+# re-enable muting + reminders.
+ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
