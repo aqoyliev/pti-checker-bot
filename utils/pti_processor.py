@@ -51,7 +51,8 @@ def _fmt_timestamp(seconds: float) -> str:
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
     last_exc = None
-    for attempt, delay in enumerate((0,) + _GEMINI_RETRY_DELAYS):
+    all_delays = (0,) + _GEMINI_RETRY_DELAYS
+    for attempt, delay in enumerate(all_delays):
         if delay:
             await asyncio.sleep(delay)
         try:
@@ -60,9 +61,11 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
             if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
                 raise
             last_exc = e
-            delay_next = _GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0
-            logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
-            continue
+            if attempt + 1 < len(all_delays):
+                delay_next = all_delays[attempt + 1]
+                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
+            else:
+                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); no more retries")
     raise last_exc
 
 
