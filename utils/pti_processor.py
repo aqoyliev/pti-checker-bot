@@ -60,8 +60,10 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
             if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
                 raise
             last_exc = e
-            delay_next = _GEMINI_RETRY_DELAYS[attempt] if attempt < len(_GEMINI_RETRY_DELAYS) else 0
-            logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
+            if attempt < len(_GEMINI_RETRY_DELAYS):
+                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {_GEMINI_RETRY_DELAYS[attempt]}s")
+            else:
+                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); giving up")
             continue
     raise last_exc
 
