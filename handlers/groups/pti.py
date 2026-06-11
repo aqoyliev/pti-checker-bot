@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 
@@ -156,6 +157,37 @@ def _truck_change_suspected(group: dict | None, data: dict) -> tuple[str, str | 
     return None
 
 
+async def _notify_vehicle_change(
+    message: types.Message,
+    old_truck_unit: str | None,
+    new_truck_unit: str,
+    new_truck_plate: str | None,
+    trailer_unit: str | None,
+    trailer_plate: str | None,
+):
+    """Post a short notice that the PTI is for a different truck than the
+    registered one, including the new truck and trailer unit/plate numbers.
+    """
+    old = html.escape(old_truck_unit) if old_truck_unit else "—"
+    truck_line = f"🚚 Truck: <b>{old} → {html.escape(new_truck_unit)}</b>"
+    if new_truck_plate:
+        truck_line += f" (plate {html.escape(new_truck_plate)})"
+
+    lines = ["🔁 <b>Vehicle change detected</b>", truck_line]
+    if trailer_unit or trailer_plate:
+        trailer_line = "🚛 Trailer:"
+        if trailer_unit:
+            trailer_line += f" unit <b>{html.escape(trailer_unit)}</b>"
+        if trailer_plate:
+            trailer_line += f" plate {html.escape(trailer_plate)}"
+        lines.append(trailer_line)
+
+    try:
+        await message.answer("\n".join(lines), parse_mode="HTML")
+    except Exception:
+        logging.exception("Failed to send vehicle-change notice")
+
+
 async def _reconcile_vehicles(
     message: types.Message,
     pti_log_id: int,
@@ -202,6 +234,10 @@ async def _reconcile_vehicles(
         await set_truck_unit(message.chat.id, truck_unit, truck_plate)
         if trailer_changed or (not stored_trailer_unit and trailer_unit):
             await set_trailer(message.chat.id, trailer_unit, trailer_plate)
+        await _notify_vehicle_change(
+            message, stored_truck_unit, truck_unit, truck_plate,
+            trailer_unit, trailer_plate,
+        )
         return
 
     if truck_changed:
