@@ -54,7 +54,7 @@ Analyze the supplied frames/photos from a pre-trip inspection (PTI) of a semi-tr
 
 Inspection scope — check ONLY these 9 areas. Do not flag anything outside this list:
   1. Brake pads — truck and trailer (look for severely worn pads, missing pads, broken hardware)
-  2. Lights — truck and trailer (headlights, marker, turn, brake, tail; flag only clearly broken / missing / non-functional)
+  2. Lights — truck and trailer (headlights, marker, turn, brake, tail; flag only clearly broken / missing / non-functional). Also: an illuminated ABS malfunction lamp (a warning indicator next to a stamped "ABS" label) — see the ABS rule below.
   3. Fire extinguisher and warning triangle (presence)
   4. Tires — tread depth and air pressure (truck and trailer)
   5. Side mirrors — 4 total, 2 on the hood (flag only clearly broken / missing / cracked)
@@ -85,6 +85,7 @@ Leniency rules — BE CONSERVATIVE. The default is PASS. It is FAR worse to fals
     - A tire is FINE unless you can clearly see one of: visibly flat (deformed against the ground), exposed cord/belt fabric, an unmistakable sidewall split or incision, a clear bulge, a puncture/hole/embedded object in the tread or sidewall, or clearly visible bald/smooth patches where the tread pattern is missing or severely faded compared to the rest of the tire or the adjacent dual. Otherwise treat it as PASS and add "Tires" to "checked_clean".
   - Air bags / air suspension bellows ("balloons"): these are NOT in scope. Do not flag them. A bag that looks intact is fine.
   - Lights: only flag if a light is obviously broken (visible shattered lens), missing from its housing, or clearly not illuminating when others around it are. Don't fail on dirt, reflections, or being turned off.
+  - **ABS malfunction lamp — this is a WARNING INDICATOR, so the logic is INVERTED from exterior lamps: here illuminated = DEFECT, off = good.** Trailers carry an external ABS malfunction lamp, identified by a stamped/painted "ABS" label right next to it. Flag it ONLY when BOTH are true in the same frame: (a) a legible "ABS" text label is clearly visible, AND (b) the lamp immediately adjacent to that label is lit/glowing. The spec'd lamp is amber, but treat any lit color (amber or red) as illuminated — judge by the lamp next to the "ABS" label, not by color. If you cannot read an "ABS" label, do NOT flag — a lit marker lamp, brake lamp, red reflector, or sun glint is NOT an ABS warning. This is NEVER out-of-service (see below): report it as an advisory, oos=false. Format: "(M:SS) ABS malfunction lamp on (49 CFR 393.55)".
   - Windshield: small stone chips outside the driver's line of sight are NOT a defect; only flag long/spreading cracks or chips in the swept area.
   - If you are unsure whether something is a defect, treat it as PASS and (if relevant) add it to "what_was_not_visible" rather than "issues".
 
@@ -109,6 +110,7 @@ PASS / FAIL rule — based on FMCSA / CVSA Out-of-Service (OOS) criteria:
 
   NEVER OOS (always oos=false — report as an advisory at most; the verdict stays PASS):
     - Missing or expired fire extinguisher or warning triangle (regulatory item, not an OOS condition).
+    - Illuminated ABS malfunction lamp (a citable 49 CFR 393.55 defect, but an ABS deficiency is NOT a CVSA OOS condition — advisory only).
     - Broken, missing, or cracked mirror.
     - Low or unknown engine-oil level.
     - Windshield stone chips or short cracks outside the swept driver view.
