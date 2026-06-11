@@ -11,13 +11,18 @@ from loader import dp
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
-    set_truck_plate, set_trailer, find_open_vehicle_change,
+    set_truck_plate, set_trailer, set_truck_unit, find_open_vehicle_change,
 )
 from utils.pti_processor import process_mixed_media
 from utils.enforcement import handle_pti_passed
 from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
+
+# TESTING TOGGLE: when False, a detected truck change is adopted silently
+# instead of holding the PTI for a 3-member vote. Flip back to True to
+# re-enable the confirmation flow.
+TRUCK_CHANGE_CONFIRMATION = False
 
 
 async def _group_ready(message: types.Message) -> bool:
@@ -192,6 +197,13 @@ async def _reconcile_vehicles(
         trailer_unit and trailer_unit != stored_trailer_unit
     )
 
+    if truck_changed and not TRUCK_CHANGE_CONFIRMATION:
+        # TESTING: skip the 3-member vote and just adopt the new truck.
+        await set_truck_unit(message.chat.id, truck_unit, truck_plate)
+        if trailer_changed or (not stored_trailer_unit and trailer_unit):
+            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
+        return
+
     if truck_changed:
         if await find_open_vehicle_change(message.chat.id, "truck"):
             return
@@ -355,7 +367,7 @@ async def handle_check_group(message: types.Message):
     if text is None or data is None or status_msg is None:
         return  # error path; process_mixed_media already edited the status message
 
-    truck_change = _truck_change_suspected(group, data)
+    truck_change = _truck_change_suspected(group, data) if TRUCK_CHANGE_CONFIRMATION else None
 
     if truck_change:
         new_unit, _ = truck_change
