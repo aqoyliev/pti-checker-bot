@@ -343,6 +343,21 @@ async def handle_check_group(message: types.Message):
     driver_row = next((d for d in drivers if d["user_id"] == driver_uid), None)
     driver_name = driver_row["name"] if driver_row else None
 
+    await _run_pti(message, reply, driver_uid, driver_name)
+
+
+async def _run_pti(
+    message: types.Message,
+    reply: types.Message,
+    driver_uid: int,
+    driver_name: str | None,
+):
+    """Run the PTI pipeline for the media in ``reply`` and post the result.
+
+    Shared by the ``/check`` command and the standalone-video auto-trigger.
+    Caller is responsible for resolving ``driver_uid``/``driver_name`` and for
+    the group-ready check.
+    """
     items = _items_from_reply(reply)
     if items is None:
         await message.answer("The replied message is not a video or photo.")
@@ -376,6 +391,7 @@ async def handle_check_group(message: types.Message):
             if cached["user_id"] == driver_uid:
                 await message.reply(cached["result_text"], parse_mode="HTML")
             else:
+                drivers = await get_drivers(message.chat.id)
                 original = next(
                     (d for d in drivers if d["user_id"] == cached["user_id"]),
                     None,
@@ -442,9 +458,34 @@ async def handle_group_photo(message: types.Message):
     buffer_message(message)
 
 
+# Auto-run a PTI only for a single standalone video — not photos, not albums.
+# video_note (round messages) and non-video documents are excluded.
+_AUTO_VIDEO_KINDS = ("video", "video_doc")
+
+
 @dp.message_handler(
     content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT],
     chat_type=GROUP_TYPES,
 )
 async def handle_group_video(message: types.Message):
     buffer_message(message)
+
+    # Auto-inspect a standalone video sent by a registered driver: no /check
+    # needed. Cheap guards first, DB lookups last. Stay silent (buffer only)
+    # on anything that isn't an eligible standalone video so random group
+    # media never triggers an inspection or an error reply.
+    if message.media_group_id:
+        return  # part of an album — needs an explicit /check
+    items = _items_from_reply(message)
+    if not items or items[0]["kind"] not in _AUTO_VIDEO_KINDS:
+        return
+    if not await _group_ready(message):
+        return
+    uid = message.from_user.id if message.from_user else None
+    if not uid or not await is_registered_driver(message.chat.id, uid):
+        return
+
+    drivers = await get_drivers(message.chat.id)
+    driver_row = next((d for d in drivers if d["user_id"] == uid), None)
+    driver_name = driver_row["name"] if driver_row else None
+    await _run_pti(message, message, uid, driver_name)
