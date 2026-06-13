@@ -206,6 +206,8 @@ async def run_compliance_check():
 
 async def handle_pti_passed(group_id: int, user_id: int, driver_name: str):
     """Call after any PTI is logged to re-evaluate compliance and unmute if eligible."""
+    if not ENFORCEMENT_ENABLED:
+        return
     compliant, _ = await check_driver_compliance(group_id, user_id)
     if compliant:
         await unmute_driver(group_id, user_id)
