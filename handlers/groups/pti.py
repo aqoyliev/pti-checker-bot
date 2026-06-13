@@ -25,6 +25,14 @@ GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 # re-enable the confirmation flow.
 TRUCK_CHANGE_CONFIRMATION = False
 
+# TESTING TOGGLE: when True, ANY group member (not just registered drivers) can
+# run a PTI — both via /check and by sending a standalone video. Used while a
+# group is being used to test the bot. Flip back to False to restore the
+# registered-drivers-only rule. Non-registered submitters are still logged, but
+# the compliance loop only ever tracks/mutes registered drivers, so they aren't
+# subject to enforcement.
+ALLOW_ALL_MEMBERS = True
+
 
 async def _group_ready(message: types.Message) -> bool:
     group = await get_group(message.chat.id)
@@ -335,6 +343,9 @@ async def handle_check_group(message: types.Message):
         driver_uid = direct_uid
     elif forward_uid and await is_registered_driver(message.chat.id, forward_uid):
         driver_uid = forward_uid
+    if driver_uid is None and ALLOW_ALL_MEMBERS:
+        # Testing: attribute the PTI to whoever sent the replied media.
+        driver_uid = direct_uid or forward_uid
     if driver_uid is None:
         await message.answer("That message isn't from a registered driver.")
         return
@@ -342,6 +353,9 @@ async def handle_check_group(message: types.Message):
     drivers = await get_drivers(message.chat.id)
     driver_row = next((d for d in drivers if d["user_id"] == driver_uid), None)
     driver_name = driver_row["name"] if driver_row else None
+    if not driver_name and ALLOW_ALL_MEMBERS:
+        src = reply.forward_from if forward_uid == driver_uid else reply.from_user
+        driver_name = src.full_name if src else None
 
     await _run_pti(message, reply, driver_uid, driver_name)
 
@@ -482,10 +496,14 @@ async def handle_group_video(message: types.Message):
     if not await _group_ready(message):
         return
     uid = message.from_user.id if message.from_user else None
-    if not uid or not await is_registered_driver(message.chat.id, uid):
+    if not uid:
+        return
+    if not ALLOW_ALL_MEMBERS and not await is_registered_driver(message.chat.id, uid):
         return
 
     drivers = await get_drivers(message.chat.id)
     driver_row = next((d for d in drivers if d["user_id"] == uid), None)
-    driver_name = driver_row["name"] if driver_row else None
+    driver_name = driver_row["name"] if driver_row else (
+        message.from_user.full_name if message.from_user else None
+    )
     await _run_pti(message, message, uid, driver_name)
