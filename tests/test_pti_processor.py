@@ -134,3 +134,69 @@ def test_oos_verdict_passes_clean():
     assert pp.apply_oos_verdict(data) is False
     assert data["status"] == "PASS"
     assert data["severity"] == "NONE"
+
+
+# ---------- apply_completeness_verdict ----------
+
+def test_completeness_fails_when_required_area_missing():
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires", "Lights"],
+            "missing_areas": ["Brake pads", "Fire extinguisher & triangle"]}
+    assert pp.apply_completeness_verdict(data) is True
+    assert data["status"] == "FAIL"
+    assert data["severity"] == "MAJOR"
+    assert data["missing_areas"] == ["Brake pads", "Fire extinguisher & triangle"]
+    assert "/check" in data["advice"]
+
+
+def test_completeness_passes_when_nothing_missing():
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": []}
+    assert pp.apply_completeness_verdict(data) is False
+    assert data["status"] == "PASS"
+    assert data["missing_areas"] == []
+
+
+def test_completeness_ignores_unknown_and_clean_labels():
+    # Junk labels and anything already marked clean must not count as missing.
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires"],
+            "missing_areas": ["Tires", "Engine bay", "tires", "Frame"]}
+    assert pp.apply_completeness_verdict(data) is True
+    assert data["missing_areas"] == ["Frame"]
+
+
+def test_completeness_safety_net_from_not_visible():
+    # Even if the model leaves missing_areas empty, a canonical label in
+    # what_was_not_visible still triggers the incomplete FAIL.
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": [],
+            "what_was_not_visible": ["Brake pads", "Spare fuse"]}
+    assert pp.apply_completeness_verdict(data) is True
+    assert data["status"] == "FAIL"
+    assert data["missing_areas"] == ["Brake pads"]
+
+
+def test_completeness_keeps_critical_severity_on_oos_fail():
+    # An OOS fail that is also incomplete stays CRITICAL, not downgraded to MAJOR.
+    data = {"status": "FAIL", "severity": "CRITICAL", "advice": "Fix brakes.",
+            "missing_areas": ["Air lines"]}
+    assert pp.apply_completeness_verdict(data) is True
+    assert data["status"] == "FAIL"
+    assert data["severity"] == "CRITICAL"
+    assert data["advice"] == "Fix brakes."
+
+
+def test_format_result_shows_incomplete_section():
+    data = {"status": "FAIL", "severity": "MAJOR", "issues": [],
+            "checked_clean": ["Tires"], "missing_areas": ["Brake pads"]}
+    text = pp.format_result(data)
+    assert "PTI Result: FAIL" in text
+    assert "Incomplete" in text
+    assert "Brake pads" in text
+
+
+def test_format_result_does_not_repeat_missing_in_not_visible():
+    data = {"status": "FAIL", "severity": "MAJOR", "issues": [],
+            "missing_areas": ["Brake pads"],
+            "what_was_not_visible": ["Brake pads", "Spare fuse"]}
+    text = pp.format_result(data)
+    # "Brake pads" appears once (the Incomplete section), not in the Not visible line.
+    assert "Not visible:</b> Spare fuse" in text
+    assert text.count("Brake pads") == 1

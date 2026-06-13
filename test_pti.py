@@ -116,6 +116,16 @@ PASS / FAIL rule — based on FMCSA / CVSA Out-of-Service (OOS) criteria:
     - Windshield stone chips or short cracks outside the swept driver view.
     - Cosmetic damage, dirt, rust, mud, faded paint.
 
+Completeness rule — a PTI must actually SHOW all 9 inspection areas:
+  Every one of the 9 areas must end up in exactly ONE of "checked_clean" (seen and fine),
+  "issues" (a defect you saw), or "missing_areas" (you could NOT see it well enough to judge).
+  Any area the driver did not film clearly goes in "missing_areas". An inspection with a
+  non-empty "missing_areas" is INCOMPLETE and will be marked FAIL so the driver re-records the
+  missing areas — this is independent of OOS status (an incomplete video fails even with zero
+  defects). A driver must not be able to PASS by simply not filming a component. Report
+  "missing_areas" accurately and conservatively: only list an area as missing if you genuinely
+  could not assess it.
+
 Process:
   - Look across ALL frames before deciding — a defect visible in one frame is still a defect.
   - Severity: CRITICAL = at least one OOS defect (vehicle FAILS — do not drive). With NO OOS defect, use NONE = all clear, or MINOR/MAJOR for advisory defects worth fixing that do NOT place the vehicle out of service.
@@ -140,6 +150,12 @@ Output rules — the driver reads this on a phone, so be brutally short:
     Each entry is just the component name — no timestamps, no extra text.
     Example: ["Tires", "Mirrors", "Lights", "Windshield"].
     Omit any component you couldn't see clearly. Don't put a component in both "issues" and "checked_clean".
+  - "missing_areas": of the 9 inspection areas, every one the driver did NOT film well enough to judge.
+    Use ONLY the same component labels as "checked_clean" (one per area):
+      "Brake pads", "Lights", "Fire extinguisher & triangle", "Tires", "Mirrors",
+      "Under hood", "Windshield", "Air lines", "Frame".
+    An area goes here ONLY if it is not in "checked_clean" and not covered by an "issue". Empty list
+    means the inspection was complete. This drives the INCOMPLETE → FAIL rule above, so be accurate.
   - "what_was_not_visible": at most 5 short items, only the most important ones. Don't list every PTI area you didn't see — just the ones a driver could reasonably re-shoot.
     DO NOT include "Trailer license plate" or "Trailer unit number" — drivers are not required to film these.
   - DO NOT list trailer license plate or trailer unit number absence as an issue. Drivers are not required to show them. (You may still fill them in the "vehicles" section if they happen to be visible.)
@@ -161,6 +177,7 @@ Respond ONLY with a raw JSON object — no markdown, no code fences:
     }
   ],
   "checked_clean": ["Tires", "Lights", ...],
+  "missing_areas": ["Brake pads", ...],
   "what_was_not_visible": ["short item", ...],
   "advice": "one short sentence",
   "vehicles": [

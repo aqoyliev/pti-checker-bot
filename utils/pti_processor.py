@@ -163,6 +163,64 @@ def apply_oos_verdict(data: dict) -> bool:
     return has_oos
 
 
+# The 9 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
+# A complete inspection must show every one of these. Drivers are NOT required to
+# film the trailer plate or unit number, so those are not areas here.
+REQUIRED_AREAS = (
+    "Brake pads",
+    "Lights",
+    "Fire extinguisher & triangle",
+    "Tires",
+    "Mirrors",
+    "Under hood",
+    "Windshield",
+    "Air lines",
+    "Frame",
+)
+_REQUIRED_AREAS_BY_KEY = {a.lower(): a for a in REQUIRED_AREAS}
+
+
+def _missing_required_areas(data: dict) -> list[str]:
+    """Required inspection areas the driver did not adequately film.
+
+    Reads the model's structured ``missing_areas`` field, restricted to the known
+    9-area vocabulary (so free-text noise can't trip the verdict) and de-duped
+    against anything the model already marked clean. As a safety net, a
+    ``what_was_not_visible`` entry that exactly matches a canonical area label also
+    counts — so the rule still fires if the model under-populates ``missing_areas``.
+    """
+    clean = {str(c).strip().lower() for c in (data.get("checked_clean") or [])}
+    seen: set[str] = set()
+    missing: list[str] = []
+    candidates = list(data.get("missing_areas") or []) + list(data.get("what_was_not_visible") or [])
+    for item in candidates:
+        key = str(item).strip().lower()
+        canon = _REQUIRED_AREAS_BY_KEY.get(key)
+        if canon and key not in clean and canon not in seen:
+            seen.add(canon)
+            missing.append(canon)
+    return missing
+
+
+def apply_completeness_verdict(data: dict) -> bool:
+    """FAIL an inspection that didn't film every required area.
+
+    A driver must not be able to PASS by simply not filming a component (e.g. the
+    trailer ABS lamp area). Call AFTER apply_oos_verdict so an already-OOS FAIL
+    keeps its CRITICAL severity. Stores the normalized list back on
+    ``data["missing_areas"]``. Returns True if the inspection was incomplete.
+    """
+    missing = _missing_required_areas(data)
+    data["missing_areas"] = missing
+    if not missing:
+        return False
+    data["status"] = "FAIL"
+    if (data.get("severity") or "").upper() != "CRITICAL":  # don't downgrade an OOS fail
+        data["severity"] = "MAJOR"
+        data["advice"] = "Re-record showing every inspection area, then run /check again."
+    return True
+
+
 def filter_hallucinated_issues(data: dict) -> int:
     """Drop issues whose evidence is missing/too short or matches a banned conclusion phrase.
 
@@ -217,6 +275,7 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     image_quality = data.get("image_quality", "") or ""
     issues = data.get("issues", []) or []
     clean = data.get("checked_clean", []) or []
+    missing_areas = data.get("missing_areas", []) or []
     not_visible = data.get("what_was_not_visible", []) or []
     advice = (data.get("advice") or "").strip()
 
@@ -240,7 +299,7 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
 
     oos_issues = [t for t in (_issue_text(i) for i in issues if _issue_is_oos(i)) if t]
     advisory_issues = [t for t in (_issue_text(i) for i in issues if not _issue_is_oos(i)) if t]
-    any_issues = bool(oos_issues or advisory_issues)
+    any_problems = bool(oos_issues or advisory_issues or missing_areas)
 
     if oos_issues:
         lines.append("")
@@ -252,11 +311,19 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
         lines.append("⚠️ <b>Advisories (not out-of-service):</b>")
         lines.extend(f"• {escape(t)}" for t in advisory_issues)
 
+    if missing_areas:
+        lines.append("")
+        lines.append("🚧 <b>Incomplete — these required areas weren't filmed:</b>")
+        lines.extend(f"❌ {escape(str(a))}" for a in missing_areas)
+
     if clean:
-        if not any_issues:
+        if not any_problems:
             lines.append("")
         lines.extend(f"✅ {escape(str(c))}" for c in clean)
 
+    # Don't repeat missing areas in the free-text "Not visible" line.
+    missing_keys = {str(a).strip().lower() for a in missing_areas}
+    not_visible = [n for n in not_visible if str(n).strip().lower() not in missing_keys]
     if not_visible:
         lines.append("")
         lines.append(f"👁 <b>Not visible:</b> {escape(', '.join(str(n) for n in not_visible))}")
@@ -386,7 +453,8 @@ async def process_mixed_media(
         try:
             data = parse_result(response)
             filter_hallucinated_issues(data)
-            apply_oos_verdict(data)  # FAIL only on OOS defects; otherwise PASS
+            apply_oos_verdict(data)  # FAIL on OOS defects; otherwise PASS
+            apply_completeness_verdict(data)  # also FAIL if a required area wasn't filmed
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}
