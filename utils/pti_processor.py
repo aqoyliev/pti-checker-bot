@@ -140,27 +140,16 @@ def _issue_is_oos(item) -> bool:
     return isinstance(item, dict) and bool(item.get("oos"))
 
 
-def apply_oos_verdict(data: dict) -> bool:
-    """Set PASS/FAIL per the FMCSA/CVSA Out-of-Service rule.
+def has_oos_defect(data: dict) -> bool:
+    """True if any reported issue is an out-of-service defect.
 
-    FAIL iff at least one remaining issue is an OOS defect; otherwise PASS, even
-    when non-OOS advisory issues are present. Call AFTER filter_hallucinated_issues
-    so dropped hallucinations don't drive the verdict. Returns True if OOS (FAIL).
+    OOS is a REPORTING label only — it does NOT decide PASS/FAIL (that is purely
+    completeness, see apply_completeness_verdict). format_result still lists OOS
+    issues under their own "Out-of-service defects" heading so the driver sees
+    them flagged. Call AFTER filter_hallucinated_issues so dropped hallucinations
+    don't count.
     """
-    issues = data.get("issues") or []
-    has_oos = any(_issue_is_oos(i) for i in issues)
-    if has_oos:
-        data["status"] = "FAIL"
-        data["severity"] = "CRITICAL"
-    else:
-        data["status"] = "PASS"
-        # Keep a meaningful severity for advisory-only results; never CRITICAL on a PASS.
-        if issues:
-            sev = (data.get("severity") or "").upper()
-            data["severity"] = sev if sev in ("MINOR", "MAJOR") else "MINOR"
-        else:
-            data["severity"] = "NONE"
-    return has_oos
+    return any(_issue_is_oos(i) for i in (data.get("issues") or []))
 
 
 # The 9 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
@@ -203,22 +192,33 @@ def _missing_required_areas(data: dict) -> list[str]:
 
 
 def apply_completeness_verdict(data: dict) -> bool:
-    """FAIL an inspection that didn't film every required area.
+    """Set PASS/FAIL — based ONLY on completeness, never on OOS or any defect.
 
-    A driver must not be able to PASS by simply not filming a component (e.g. the
-    trailer ABS lamp area). Call AFTER apply_oos_verdict so an already-OOS FAIL
-    keeps its CRITICAL severity. Stores the normalized list back on
-    ``data["missing_areas"]``. Returns True if the inspection was incomplete.
+    The inspection FAILs iff a required area was never filmed (incomplete), so a
+    driver can't pass by simply not filming a component. Defects — including
+    out-of-service ones like an illuminated ABS lamp — are still reported and
+    labeled, but they do NOT change the verdict. Severity rates the worst defect
+    for the driver's awareness and is independent of PASS/FAIL. Stores the
+    normalized list back on ``data["missing_areas"]``. Returns True if incomplete
+    (FAIL). Call AFTER filter_hallucinated_issues.
     """
     missing = _missing_required_areas(data)
     data["missing_areas"] = missing
-    if not missing:
-        return False
-    data["status"] = "FAIL"
-    if (data.get("severity") or "").upper() != "CRITICAL":  # don't downgrade an OOS fail
-        data["severity"] = "MAJOR"
+    issues = data.get("issues") or []
+    if missing:
+        data["status"] = "FAIL"
+        data["severity"] = "CRITICAL" if has_oos_defect(data) else "MAJOR"
         data["advice"] = "Re-record showing every inspection area, then run /check again."
-    return True
+        return True
+    data["status"] = "PASS"
+    if has_oos_defect(data):
+        data["severity"] = "CRITICAL"
+    elif issues:
+        sev = (data.get("severity") or "").upper()
+        data["severity"] = sev if sev in ("MINOR", "MAJOR") else "MINOR"
+    else:
+        data["severity"] = "NONE"
+    return False
 
 
 def filter_hallucinated_issues(data: dict) -> int:
@@ -453,8 +453,9 @@ async def process_mixed_media(
         try:
             data = parse_result(response)
             filter_hallucinated_issues(data)
-            apply_oos_verdict(data)  # FAIL on OOS defects; otherwise PASS
-            apply_completeness_verdict(data)  # also FAIL if a required area wasn't filmed
+            # PASS/FAIL depends ONLY on completeness; OOS defects are reported but
+            # never fail the inspection.
+            apply_completeness_verdict(data)
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}

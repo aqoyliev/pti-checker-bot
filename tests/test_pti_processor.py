@@ -111,27 +111,31 @@ def test_format_result_escapes_html():
     assert "&lt;tag&gt;" in text
 
 
-# ---------- apply_oos_verdict ----------
+# ---------- has_oos_defect (label only, never fails the verdict) ----------
 
-def test_oos_verdict_fails_on_oos_issue():
-    data = {"status": "PASS", "severity": "NONE",
+def test_has_oos_defect_true_when_oos_issue_present():
+    data = {"issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}]}
+    assert pp.has_oos_defect(data) is True
+
+
+def test_has_oos_defect_false_for_advisory_only():
+    data = {"issues": [{"text": "Mirror cracked", "evidence": "z" * 30, "oos": False}]}
+    assert pp.has_oos_defect(data) is False
+
+
+def test_oos_defect_does_not_fail_a_complete_inspection():
+    # OOS no longer drives the verdict: a complete inspection PASSES even with an
+    # out-of-service defect. The defect is still reported; severity stays CRITICAL.
+    data = {"status": "FAIL", "severity": "NONE", "missing_areas": [],
             "issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}]}
-    assert pp.apply_oos_verdict(data) is True
-    assert data["status"] == "FAIL"
+    assert pp.apply_completeness_verdict(data) is False
+    assert data["status"] == "PASS"
     assert data["severity"] == "CRITICAL"
 
 
-def test_oos_verdict_passes_with_advisory_only():
-    data = {"status": "FAIL", "severity": "CRITICAL",
-            "issues": [{"text": "Mirror cracked", "evidence": "z" * 30, "oos": False}]}
-    assert pp.apply_oos_verdict(data) is False
-    assert data["status"] == "PASS"
-    assert data["severity"] == "MINOR"
-
-
-def test_oos_verdict_passes_clean():
-    data = {"status": "FAIL", "severity": "MAJOR", "issues": []}
-    assert pp.apply_oos_verdict(data) is False
+def test_complete_clean_inspection_passes():
+    data = {"status": "FAIL", "severity": "MAJOR", "issues": [], "missing_areas": []}
+    assert pp.apply_completeness_verdict(data) is False
     assert data["status"] == "PASS"
     assert data["severity"] == "NONE"
 
@@ -173,14 +177,16 @@ def test_completeness_safety_net_from_not_visible():
     assert data["missing_areas"] == ["Brake pads"]
 
 
-def test_completeness_keeps_critical_severity_on_oos_fail():
-    # An OOS fail that is also incomplete stays CRITICAL, not downgraded to MAJOR.
-    data = {"status": "FAIL", "severity": "CRITICAL", "advice": "Fix brakes.",
+def test_completeness_incomplete_with_oos_is_critical_fail():
+    # Incomplete + an OOS defect → FAIL at CRITICAL severity. The FAIL is from
+    # incompleteness; the OOS defect only raises the severity for awareness.
+    data = {"status": "PASS", "severity": "NONE",
+            "issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}],
             "missing_areas": ["Air lines"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
     assert data["severity"] == "CRITICAL"
-    assert data["advice"] == "Fix brakes."
+    assert "/check" in data["advice"]
 
 
 def test_format_result_shows_incomplete_section():
