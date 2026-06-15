@@ -19,7 +19,7 @@ load_dotenv()
 PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "1"))
 MAX_VIDEO_DURATION = 900   # 15 minutes — reject anything longer
 MAX_FRAMES = 900           # safety cap so we never exceed Gemini's token limit
-FILE_API_THRESHOLD = 300   # frames above this count are uploaded via File API instead of sent inline
+FILE_API_THRESHOLD = 50    # frames above this count are uploaded via File API instead of sent inline
 
 
 class VideoTooLongError(Exception):
