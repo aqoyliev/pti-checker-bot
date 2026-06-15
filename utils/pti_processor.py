@@ -152,8 +152,9 @@ def has_oos_defect(data: dict) -> bool:
     return any(_issue_is_oos(i) for i in (data.get("issues") or []))
 
 
-# The 9 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
-# A complete inspection must show every one of these. Drivers are NOT required to
+# The 10 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
+# A complete inspection must show every one of these (the trailer ABS lamp included
+# — it must be filmed even though it is normally OFF). Drivers are NOT required to
 # film the trailer plate or unit number, so those are not areas here.
 REQUIRED_AREAS = (
     "Brake pads",
@@ -165,6 +166,7 @@ REQUIRED_AREAS = (
     "Windshield",
     "Air lines",
     "Frame",
+    "ABS lamp",
 )
 _REQUIRED_AREAS_BY_KEY = {a.lower(): a for a in REQUIRED_AREAS}
 
@@ -173,10 +175,15 @@ def _missing_required_areas(data: dict) -> list[str]:
     """Required inspection areas the driver did not adequately film.
 
     Reads the model's structured ``missing_areas`` field, restricted to the known
-    9-area vocabulary (so free-text noise can't trip the verdict) and de-duped
+    10-area vocabulary (so free-text noise can't trip the verdict) and de-duped
     against anything the model already marked clean. As a safety net, a
     ``what_was_not_visible`` entry that exactly matches a canonical area label also
     counts — so the rule still fires if the model under-populates ``missing_areas``.
+
+    The ABS lamp is enforced harder: it must be positively accounted for — filmed
+    and off (in ``checked_clean``), filmed and on (reported as an ABS issue), or
+    else it counts as missing. This way a driver can't pass by simply omitting the
+    ABS lamp from the footage (it isn't enough for the model to just not mention it).
     """
     clean = {str(c).strip().lower() for c in (data.get("checked_clean") or [])}
     seen: set[str] = set()
@@ -188,6 +195,13 @@ def _missing_required_areas(data: dict) -> list[str]:
         if canon and key not in clean and canon not in seen:
             seen.add(canon)
             missing.append(canon)
+
+    # ABS-lamp safety net: require it to be accounted for, not merely unmentioned.
+    if "ABS lamp" not in seen and "abs lamp" not in clean:
+        abs_in_issue = any("abs" in _issue_text(i).lower() for i in (data.get("issues") or []))
+        if not abs_in_issue:
+            missing.append("ABS lamp")
+
     return missing
 
 

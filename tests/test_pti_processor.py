@@ -127,6 +127,7 @@ def test_oos_defect_does_not_fail_a_complete_inspection():
     # OOS no longer drives the verdict: a complete inspection PASSES even with an
     # out-of-service defect. The defect is still reported; severity stays CRITICAL.
     data = {"status": "FAIL", "severity": "NONE", "missing_areas": [],
+            "checked_clean": ["ABS lamp"],
             "issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}]}
     assert pp.apply_completeness_verdict(data) is False
     assert data["status"] == "PASS"
@@ -134,7 +135,8 @@ def test_oos_defect_does_not_fail_a_complete_inspection():
 
 
 def test_complete_clean_inspection_passes():
-    data = {"status": "FAIL", "severity": "MAJOR", "issues": [], "missing_areas": []}
+    data = {"status": "FAIL", "severity": "MAJOR", "issues": [], "missing_areas": [],
+            "checked_clean": ["ABS lamp"]}
     assert pp.apply_completeness_verdict(data) is False
     assert data["status"] == "PASS"
     assert data["severity"] == "NONE"
@@ -143,7 +145,7 @@ def test_complete_clean_inspection_passes():
 # ---------- apply_completeness_verdict ----------
 
 def test_completeness_fails_when_required_area_missing():
-    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires", "Lights"],
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires", "Lights", "ABS lamp"],
             "missing_areas": ["Brake pads", "Fire extinguisher & triangle"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
@@ -153,7 +155,7 @@ def test_completeness_fails_when_required_area_missing():
 
 
 def test_completeness_passes_when_nothing_missing():
-    data = {"status": "PASS", "severity": "NONE", "missing_areas": []}
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": [], "checked_clean": ["ABS lamp"]}
     assert pp.apply_completeness_verdict(data) is False
     assert data["status"] == "PASS"
     assert data["missing_areas"] == []
@@ -161,7 +163,7 @@ def test_completeness_passes_when_nothing_missing():
 
 def test_completeness_ignores_unknown_and_clean_labels():
     # Junk labels and anything already marked clean must not count as missing.
-    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires"],
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires", "ABS lamp"],
             "missing_areas": ["Tires", "Engine bay", "tires", "Frame"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["missing_areas"] == ["Frame"]
@@ -171,6 +173,7 @@ def test_completeness_safety_net_from_not_visible():
     # Even if the model leaves missing_areas empty, a canonical label in
     # what_was_not_visible still triggers the incomplete FAIL.
     data = {"status": "PASS", "severity": "NONE", "missing_areas": [],
+            "checked_clean": ["ABS lamp"],
             "what_was_not_visible": ["Brake pads", "Spare fuse"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
@@ -180,12 +183,41 @@ def test_completeness_safety_net_from_not_visible():
 def test_completeness_incomplete_with_oos_is_critical_fail():
     # Incomplete + an OOS defect → FAIL at CRITICAL severity. The FAIL is from
     # incompleteness; the OOS defect only raises the severity for awareness.
-    data = {"status": "PASS", "severity": "NONE",
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["ABS lamp"],
             "issues": [{"text": "Flat tire", "evidence": "z" * 30, "oos": True}],
             "missing_areas": ["Air lines"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
     assert data["severity"] == "CRITICAL"
+
+
+# ---------- ABS lamp is a required area ----------
+
+def test_abs_lamp_not_filmed_fails_as_incomplete():
+    # ABS lamp neither in checked_clean nor mentioned in an issue → required area
+    # missing → FAIL, even though the model didn't list it in missing_areas.
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": [],
+            "checked_clean": ["Tires", "Lights", "Brake pads"]}
+    assert pp.apply_completeness_verdict(data) is True
+    assert data["status"] == "FAIL"
+    assert "ABS lamp" in data["missing_areas"]
+
+
+def test_abs_lamp_filmed_off_passes():
+    # ABS lamp filmed and off → in checked_clean → not missing.
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": [],
+            "checked_clean": ["ABS lamp"]}
+    assert pp.apply_completeness_verdict(data) is False
+    assert "ABS lamp" not in data["missing_areas"]
+
+
+def test_abs_lamp_on_as_issue_is_not_missing():
+    # ABS lamp filmed and lit → reported as an issue → counts as accounted-for.
+    data = {"status": "PASS", "severity": "NONE", "missing_areas": [],
+            "issues": [{"text": "(1:58) ABS malfunction lamp on (49 CFR 393.55)",
+                        "evidence": "z" * 30, "oos": True}]}
+    assert pp.apply_completeness_verdict(data) is False
+    assert "ABS lamp" not in data["missing_areas"]
     assert data["advice"] == ""
 
 
