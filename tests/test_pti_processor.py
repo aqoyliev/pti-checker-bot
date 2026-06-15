@@ -149,7 +149,7 @@ def test_completeness_fails_when_required_area_missing():
     assert data["status"] == "FAIL"
     assert data["severity"] == "MAJOR"
     assert data["missing_areas"] == ["Brake pads", "Fire extinguisher & triangle"]
-    assert "/check" in data["advice"]
+    assert data["advice"] == ""
 
 
 def test_completeness_passes_when_nothing_missing():
@@ -186,7 +186,7 @@ def test_completeness_incomplete_with_oos_is_critical_fail():
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
     assert data["severity"] == "CRITICAL"
-    assert "/check" in data["advice"]
+    assert data["advice"] == ""
 
 
 def test_format_result_shows_incomplete_section():

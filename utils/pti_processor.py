@@ -208,7 +208,8 @@ def apply_completeness_verdict(data: dict) -> bool:
     if missing:
         data["status"] = "FAIL"
         data["severity"] = "CRITICAL" if has_oos_defect(data) else "MAJOR"
-        data["advice"] = "Re-record showing every inspection area, then run /check again."
+        # The "Incomplete" section already lists the un-filmed areas; no extra advice line.
+        data["advice"] = ""
         return True
     data["status"] = "PASS"
     if has_oos_defect(data):
