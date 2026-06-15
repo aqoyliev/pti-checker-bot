@@ -233,6 +233,7 @@ def apply_completeness_verdict(data: dict) -> bool:
         data["severity"] = sev if sev in ("MINOR", "MAJOR") else "MINOR"
     else:
         data["severity"] = "NONE"
+    data.setdefault("advice", "")
     return False
 
 
