@@ -33,6 +33,13 @@ TRUCK_CHANGE_CONFIRMATION = False
 # subject to enforcement.
 ALLOW_ALL_MEMBERS = True
 
+# TESTING TOGGLE: when False, PTI runs are NOT persisted — no row is written via
+# log_pti and the dedup-cache lookup is skipped. Used while testing so repeat
+# runs on the same media aren't blocked ("already attributed to …") and test
+# runs don't count toward quotas or pollute history. Flip back to True for
+# production. Vehicle reconciliation still runs so truck/trailer detection works.
+SAVE_PTI_LOGS = False
+
 
 async def _group_ready(message: types.Message) -> bool:
     group = await get_group(message.chat.id)
@@ -299,20 +306,22 @@ async def _handle_pti_result(
     passed = data.get("status") == "PASS"
     vehicles = _extract_vehicles(data)
     primary_unit, primary_plate = _truck_log_fields(vehicles)
-    pti_log_id = await log_pti(
-        group_id=message.chat.id,
-        user_id=driver_user_id,
-        passed=passed,
-        severity=data.get("severity", ""),
-        unit_number=primary_unit,
-        plate=primary_plate,
-        result_json=json.dumps(data),
-        result_text=text,
-        replied_message_id=replied_message_id,
-        media_signature=media_signature,
-        driver_name=driver_name,
-        content_signature=content_signature,
-    )
+    pti_log_id = None
+    if SAVE_PTI_LOGS:
+        pti_log_id = await log_pti(
+            group_id=message.chat.id,
+            user_id=driver_user_id,
+            passed=passed,
+            severity=data.get("severity", ""),
+            unit_number=primary_unit,
+            plate=primary_plate,
+            result_json=json.dumps(data),
+            result_text=text,
+            replied_message_id=replied_message_id,
+            media_signature=media_signature,
+            driver_name=driver_name,
+            content_signature=content_signature,
+        )
     await _reconcile_vehicles(message, pti_log_id, data, result_message_id)
     if not truck_change_pending:
         await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
@@ -399,7 +408,7 @@ async def _run_pti(
 
     signature = _signature_from_items(items)
     content_sig = _content_signature_from_items(items)
-    if signature or content_sig:
+    if SAVE_PTI_LOGS and (signature or content_sig):
         cached = await get_cached_check(message.chat.id, signature, content_sig)
         if cached:
             if cached["user_id"] == driver_uid:
