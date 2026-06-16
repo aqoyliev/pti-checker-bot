@@ -20,6 +20,12 @@ PTI_FRAME_INTERVAL = float(os.getenv("PTI_FRAME_INTERVAL", "1"))
 MAX_VIDEO_DURATION = 900   # 15 minutes — reject anything longer
 MAX_FRAMES = 900           # safety cap so we never exceed Gemini's token limit
 FILE_API_THRESHOLD = 50    # frames above this count are uploaded via File API instead of sent inline
+# KNOWN ISSUE (deploy-watchdog, 2026-06-16): long videos still trigger Gemini 429s here,
+# now on the File API *upload* endpoint — _upload_one() fires with 8 parallel workers
+# and a single video can produce up to MAX_FRAMES uploads in one burst. Lowering
+# FILE_API_THRESHOLD (PR #12) and extending retry backoff (PR #13) did not fix this;
+# the 429 recurs immediately on every retry, suggesting a per-minute quota on this
+# Gemini API key rather than an insufficient backoff window. See PR for log evidence.
 
 
 class VideoTooLongError(Exception):
