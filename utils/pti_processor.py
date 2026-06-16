@@ -28,7 +28,7 @@ from data import config
 from loader import bot
 from test_pti import extract_frames, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
 
-_GEMINI_RETRY_DELAYS = (5, 10, 20)  # seconds; 3 retries after the initial attempt
+_GEMINI_RETRY_DELAYS = (15, 30, 60)  # seconds; 3 retries after the initial attempt
 
 # Global cap on concurrent PTI analyses (frame extraction + Gemini). Bounds CPU,
 # memory, disk, thread-pool, and Gemini-quota pressure when submissions arrive in
