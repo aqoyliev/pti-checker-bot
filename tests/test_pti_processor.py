@@ -146,12 +146,22 @@ def test_complete_clean_inspection_passes():
 
 def test_completeness_fails_when_required_area_missing():
     data = {"status": "PASS", "severity": "NONE", "checked_clean": ["Tires", "Lights", "ABS lamp"],
-            "missing_areas": ["Brake pads", "Fire extinguisher & triangle"]}
+            "missing_areas": ["Brake pads", "Air lines"]}
     assert pp.apply_completeness_verdict(data) is True
     assert data["status"] == "FAIL"
     assert data["severity"] == "MAJOR"
-    assert data["missing_areas"] == ["Brake pads", "Fire extinguisher & triangle"]
+    assert data["missing_areas"] == ["Brake pads", "Air lines"]
     assert data["advice"] == ""
+
+
+def test_completeness_ignores_fire_extinguisher_as_missing_area():
+    # Fire extinguisher & triangle is no longer a required/completeness area —
+    # an un-filmed report for it must not trigger an incomplete FAIL.
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": ["ABS lamp"],
+            "missing_areas": ["Fire extinguisher & triangle"]}
+    assert pp.apply_completeness_verdict(data) is False
+    assert data["status"] == "PASS"
+    assert data["missing_areas"] == []
 
 
 def test_completeness_passes_when_nothing_missing():
@@ -227,7 +237,7 @@ def test_format_result_shows_incomplete_section():
     text = pp.format_result(data)
     assert "PTI Result: FAIL" in text
     assert "Incomplete" in text
-    assert "Brake pads" in text
+    assert "❌ Brake pads" in text
 
 
 def test_format_result_does_not_repeat_missing_in_not_visible():
@@ -235,6 +245,60 @@ def test_format_result_does_not_repeat_missing_in_not_visible():
             "missing_areas": ["Brake pads"],
             "what_was_not_visible": ["Brake pads", "Spare fuse"]}
     text = pp.format_result(data)
-    # "Brake pads" appears once (the Incomplete section), not in the Not visible line.
+    # "Brake pads" appears once (the components checklist), not in the Not visible line.
     assert "Not visible:</b> Spare fuse" in text
     assert text.count("Brake pads") == 1
+
+
+# ---------- components checklist ----------
+
+def test_format_result_shows_full_components_checklist():
+    from html import escape
+    data = {"status": "PASS", "severity": "NONE", "issues": [],
+            "checked_clean": list(pp.REQUIRED_AREAS)}
+    text = pp.format_result(data)
+    assert "Components inspected" in text
+    for area in pp.REQUIRED_AREAS:
+        assert f"✅ {escape(area)}" in text
+
+
+def test_format_result_checklist_marks_missing_and_flagged():
+    data = {"status": "FAIL", "severity": "MAJOR",
+            "issues": [{"text": "Tires", "evidence": "x" * 30, "oos": False}],
+            "checked_clean": ["Lights"],
+            "missing_areas": ["Brake pads"]}
+    text = pp.format_result(data)
+    assert "❌ Brake pads" in text
+    assert "✅ Lights" in text
+    # "Tires" was neither in checked_clean nor missing_areas (it has a defect instead).
+    assert "⚠️ Tires" in text
+
+
+def test_format_result_checklist_excludes_fire_extinguisher():
+    # Fire extinguisher & triangle is no longer a completeness area, so it must
+    # not appear in the canonical components checklist.
+    data = {"status": "PASS", "severity": "NONE", "checked_clean": list(pp.REQUIRED_AREAS)}
+    text = pp.format_result(data)
+    assert "Fire extinguisher" not in text
+
+
+# ---------- fire extinguisher reminder (advisory only, not completeness) ----------
+
+def test_format_result_reminds_when_fire_extinguisher_not_shown():
+    data = {"status": "PASS", "severity": "NONE", "issues": [], "fire_extinguisher_shown": False}
+    text = pp.format_result(data)
+    assert "Reminder" in text
+    assert "fire extinguisher" in text.lower()
+
+
+def test_format_result_no_reminder_when_fire_extinguisher_shown():
+    data = {"status": "PASS", "severity": "NONE", "issues": [], "fire_extinguisher_shown": True}
+    text = pp.format_result(data)
+    assert "Reminder" not in text
+
+
+def test_format_result_no_reminder_when_field_absent():
+    # Legacy/missing field must not trigger a false reminder.
+    data = {"status": "PASS", "severity": "NONE", "issues": []}
+    text = pp.format_result(data)
+    assert "Reminder" not in text

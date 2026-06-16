@@ -152,14 +152,15 @@ def has_oos_defect(data: dict) -> bool:
     return any(_issue_is_oos(i) for i in (data.get("issues") or []))
 
 
-# The 10 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
+# The 9 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
 # A complete inspection must show every one of these (the trailer ABS lamp included
 # — it must be filmed even though it is normally OFF). Drivers are NOT required to
-# film the trailer plate or unit number, so those are not areas here.
+# film the trailer plate or unit number, so those are not areas here. The fire
+# extinguisher & triangle are checked separately (see "fire_extinguisher_shown" in
+# format_result) as an advisory reminder — they no longer affect completeness/PASS-FAIL.
 REQUIRED_AREAS = (
     "Brake pads",
     "Lights",
-    "Fire extinguisher & triangle",
     "Tires",
     "Mirrors",
     "Under hood",
@@ -175,7 +176,7 @@ def _missing_required_areas(data: dict) -> list[str]:
     """Required inspection areas the driver did not adequately film.
 
     Reads the model's structured ``missing_areas`` field, restricted to the known
-    10-area vocabulary (so free-text noise can't trip the verdict) and de-duped
+    9-area vocabulary (so free-text noise can't trip the verdict) and de-duped
     against anything the model already marked clean. As a safety net, a
     ``what_was_not_visible`` entry that exactly matches a canonical area label also
     counts — so the rule still fires if the model under-populates ``missing_areas``.
@@ -294,6 +295,7 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     missing_areas = data.get("missing_areas", []) or []
     not_visible = data.get("what_was_not_visible", []) or []
     advice = (data.get("advice") or "").strip()
+    fire_extinguisher_shown = data.get("fire_extinguisher_shown")
 
     status_icon = "✅" if status == "PASS" else "❌"
     lines = [f"{status_icon} <b>PTI Result: {escape(status)}</b>"]
@@ -315,7 +317,6 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
 
     oos_issues = [t for t in (_issue_text(i) for i in issues if _issue_is_oos(i)) if t]
     advisory_issues = [t for t in (_issue_text(i) for i in issues if not _issue_is_oos(i)) if t]
-    any_problems = bool(oos_issues or advisory_issues or missing_areas)
 
     if oos_issues:
         lines.append("")
@@ -327,18 +328,30 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
         lines.append("⚠️ <b>Advisories (not out-of-service):</b>")
         lines.extend(f"• {escape(t)}" for t in advisory_issues)
 
+    missing_keys = {str(a).strip().lower() for a in missing_areas}
     if missing_areas:
         lines.append("")
-        lines.append("🚧 <b>Incomplete — these required areas weren't filmed:</b>")
-        lines.extend(f"❌ {escape(str(a))}" for a in missing_areas)
+        n = len(missing_areas)
+        lines.append(f"🚧 <b>Incomplete — {n} required area{'s' if n != 1 else ''} weren't filmed</b> (see ❌ below):")
 
-    if clean:
-        if not any_problems:
-            lines.append("")
-        lines.extend(f"✅ {escape(str(c))}" for c in clean)
+    # Always show the full checklist of required components, not just the ones
+    # the model happened to mention — so the driver/admin can see at a glance
+    # which areas were verified clean, flagged, or never filmed.
+    clean_keys = {str(c).strip().lower() for c in clean}
+    lines.append("")
+    lines.append("📋 <b>Components inspected:</b>")
+    for area in REQUIRED_AREAS:
+        key = area.lower()
+        icon = "❌" if key in missing_keys else "✅" if key in clean_keys else "⚠️"
+        lines.append(f"{icon} {escape(area)}")
+
+    # Fire extinguisher & triangle are advisory-only — not a required area, so they
+    # never affect completeness/PASS-FAIL. Just remind the driver if never filmed.
+    if fire_extinguisher_shown is False:
+        lines.append("")
+        lines.append("🧯 <b>Reminder:</b> film the fire extinguisher & warning triangle next time.")
 
     # Don't repeat missing areas in the free-text "Not visible" line.
-    missing_keys = {str(a).strip().lower() for a in missing_areas}
     not_visible = [n for n in not_visible if str(n).strip().lower() not in missing_keys]
     if not_visible:
         lines.append("")
