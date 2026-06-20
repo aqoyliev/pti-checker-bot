@@ -152,7 +152,7 @@ def has_oos_defect(data: dict) -> bool:
     return any(_issue_is_oos(i) for i in (data.get("issues") or []))
 
 
-# The 9 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
+# The 8 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
 # A complete inspection must show every one of these (the trailer ABS lamp included
 # — it must be filmed even though it is normally OFF). Drivers are NOT required to
 # film the trailer plate or unit number, so those are not areas here. The fire
@@ -163,7 +163,6 @@ REQUIRED_AREAS = (
     "Lights",
     "Tires",
     "Mirrors",
-    "Under hood",
     "Windshield",
     "Air lines",
     "Frame",
@@ -176,7 +175,7 @@ def _missing_required_areas(data: dict) -> list[str]:
     """Required inspection areas the driver did not adequately film.
 
     Reads the model's structured ``missing_areas`` field, restricted to the known
-    9-area vocabulary (so free-text noise can't trip the verdict) and de-duped
+    8-area vocabulary (so free-text noise can't trip the verdict) and de-duped
     against anything the model already marked clean. As a safety net, a
     ``what_was_not_visible`` entry that exactly matches a canonical area label also
     counts — so the rule still fires if the model under-populates ``missing_areas``.
