@@ -245,8 +245,12 @@ def apply_completeness_verdict(data: dict) -> bool:
     if missing:
         data["status"] = "FAIL"
         data["severity"] = "CRITICAL" if has_oos_defect(data) else "MAJOR"
-        # The "Incomplete" section already lists the un-filmed areas; no extra advice line.
-        data["advice"] = ""
+        # format_result adds the "re-film" prompt from missing_areas, so an incomplete
+        # PTI needs no model advice — EXCEPT keep a "do not drive" when there's also an
+        # OOS defect, since the verdict stays PASS-on-OOS and that line is the only
+        # strong signal the driver gets.
+        if not has_oos_defect(data):
+            data["advice"] = ""
         return True
     data["status"] = "PASS"
     if has_oos_defect(data):
@@ -386,7 +390,6 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     missing_areas = data.get("missing_areas", []) or []
     not_visible = data.get("what_was_not_visible", []) or []
     advice = (data.get("advice") or "").strip()
-    fire_extinguisher_shown = data.get("fire_extinguisher_shown")
 
     status_icon = "✅" if status == "PASS" else "❌"
     lines = [f"{status_icon} <b>PTI Result: {escape(status)}</b>"]
@@ -406,62 +409,45 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     if summary:
         lines.append(summary)
 
+    clean_keys = {str(c).strip().lower() for c in clean}
+    missing_keys = {str(a).strip().lower() for a in missing_areas}
     oos_issues = [t for t in (_issue_text(i) for i in issues if _issue_is_oos(i)) if t]
     advisory_issues = [t for t in (_issue_text(i) for i in issues if not _issue_is_oos(i)) if t]
 
-    if oos_issues:
+    # One flat inspection list: defects first (❌ out-of-service, then ⚠️ advisory),
+    # then the components verified clean (✅). Un-filmed areas are NOT shown here —
+    # they go in the "Not visible" line below — keeping the list short and scannable.
+    body: list[str] = []
+    body.extend(f"❌ <b>{escape(t)}</b>" for t in oos_issues)
+    body.extend(f"⚠️ {escape(t)}" for t in advisory_issues)
+    body.extend(f"✅ {escape(area)}" for area in CHECKLIST_AREAS if area.lower() in clean_keys)
+    if body:
         lines.append("")
-        lines.append("🛑 <b>Out-of-service defects:</b>")
-        lines.extend(f"❌ {escape(t)}" for t in oos_issues)
+        lines.extend(body)
 
-    if advisory_issues:
+    # Everything not filmed / not confirmed, in one line: required areas the driver
+    # skipped (the FAIL reason for an incomplete PTI) plus any free-text notes, de-duped.
+    not_seen: list[str] = list(missing_areas)
+    seen = set(missing_keys)
+    for n in not_visible:
+        key = str(n).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            not_seen.append(str(n))
+    if not_seen:
         lines.append("")
-        lines.append("⚠️ <b>Advisories (not out-of-service):</b>")
-        lines.extend(f"• {escape(t)}" for t in advisory_issues)
+        lines.append(f"👁 <b>Not visible:</b> {escape(', '.join(not_seen))}")
 
-    missing_keys = {str(a).strip().lower() for a in missing_areas}
-    if missing_areas:
-        lines.append("")
-        n = len(missing_areas)
-        lines.append(f"🚧 <b>Incomplete — {n} required area{'s' if n != 1 else ''} weren't filmed</b> (see ❌ below):")
-
-    # Always show the full checklist of required components, not just the ones
-    # the model happened to mention — so the driver/admin can see at a glance
-    # which areas were verified clean, flagged, or never filmed.
-    clean_keys = {str(c).strip().lower() for c in clean}
-    lines.append("")
-    lines.append("📋 <b>Components inspected:</b>")
-    for area in CHECKLIST_AREAS:
-        key = area.lower()
-        optional = key in _OPTIONAL_AREAS_BY_KEY
-        if key in clean_keys:
-            icon = "✅"
-        elif optional:
-            # Optional areas never count as "missing" — an un-filmed/unconfirmed one
-            # is a neutral note, not a ❌ that implies the inspection is incomplete.
-            icon = "➖"
-        elif key in missing_keys:
-            icon = "❌"
-        else:
-            icon = "⚠️"
-        label = f"{area} (optional)" if optional else area
-        lines.append(f"{icon} {escape(label)}")
-
-    # Fire extinguisher & triangle are advisory-only — not a required area, so they
-    # never affect completeness/PASS-FAIL. Just remind the driver if never filmed.
-    if fire_extinguisher_shown is False:
-        lines.append("")
-        lines.append("🧯 <b>Reminder:</b> film the fire extinguisher & warning triangle next time.")
-
-    # Don't repeat missing areas in the free-text "Not visible" line.
-    not_visible = [n for n in not_visible if str(n).strip().lower() not in missing_keys]
-    if not_visible:
-        lines.append("")
-        lines.append(f"👁 <b>Not visible:</b> {escape(', '.join(str(n) for n in not_visible))}")
-
+    # One advice line. Keep the model's advice (e.g. "Do not drive…") AND, when footage
+    # is missing, the re-film prompt — so an incomplete + out-of-service result shows both.
+    advice_parts: list[str] = []
     if advice:
+        advice_parts.append(advice)
+    if missing_areas and not any("film" in p.lower() for p in advice_parts):
+        advice_parts.append("Re-film the missing areas to finish the PTI.")
+    if advice_parts:
         lines.append("")
-        lines.append(f"💡 {escape(advice)}")
+        lines.append(f"💡 {escape(' '.join(advice_parts))}")
 
     return "\n".join(lines)
 

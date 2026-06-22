@@ -102,8 +102,7 @@ def test_format_result_fail_with_driver_and_oos_issue():
     text = pp.format_result(data, photos=1, videos=0, driver_name="John Doe")
     assert "PTI Result: FAIL" in text
     assert "John Doe" in text
-    assert "Out-of-service" in text
-    assert "Exposed tire cords" in text
+    assert "❌ <b>Exposed tire cords</b>" in text    # OOS defect rendered inline, bold, with ❌
     assert "📎 Checked: 1 photo" in text
 
 
@@ -112,9 +111,8 @@ def test_format_result_pass_shows_advisory_for_non_oos_issue():
             "issues": [{"text": "Mirror cracked", "evidence": "y" * 30, "oos": False}]}
     text = pp.format_result(data)
     assert "PTI Result: PASS" in text
-    assert "Advisories" in text
-    assert "Mirror cracked" in text
-    assert "Out-of-service" not in text
+    assert "⚠️ Mirror cracked" in text              # advisory rendered inline with ⚠️
+    assert "❌ Mirror cracked" not in text           # not flagged out-of-service
 
 
 def test_format_result_escapes_html():
@@ -244,47 +242,63 @@ def test_abs_lamp_on_as_issue_is_not_missing():
     assert data["advice"] == ""
 
 
-def test_format_result_shows_incomplete_section():
+def test_format_result_unfilmed_areas_go_to_not_visible():
     data = {"status": "FAIL", "severity": "MAJOR", "issues": [],
             "checked_clean": ["Tires"], "missing_areas": ["Brake pads"]}
     text = pp.format_result(data)
     assert "PTI Result: FAIL" in text
-    assert "Incomplete" in text
-    assert "❌ Brake pads" in text
+    assert "✅ Tires" in text                        # clean area shown inline
+    assert "❌ Brake pads" not in text               # not a ❌ row anymore
+    assert "Not visible:</b> Brake pads" in text     # folded into the one line
+    assert "💡" in text                              # re-film advice present
 
 
-def test_format_result_does_not_repeat_missing_in_not_visible():
+def test_format_result_incomplete_with_oos_keeps_do_not_drive_and_refilm():
+    # PASS-on-OOS means the advice line is the only strong signal, so an incomplete +
+    # out-of-service result must show BOTH the do-not-drive warning and the re-film prompt.
+    data = {"status": "PASS", "severity": "NONE",
+            "checked_clean": ["Lights"],
+            "issues": [{"text": "(0:55) ABS lamp on", "evidence": "z" * 30, "oos": True}],
+            "missing_areas": ["Brake pads"],
+            "advice": "Do not drive — out-of-service defect."}
+    pp.apply_completeness_verdict(data)
+    assert data["status"] == "FAIL"
+    text = pp.format_result(data)
+    assert "Do not drive" in text
+    assert "Re-film the missing areas" in text
+
+
+def test_format_result_missing_and_not_visible_merge_deduped():
     data = {"status": "FAIL", "severity": "MAJOR", "issues": [],
             "missing_areas": ["Brake pads"],
             "what_was_not_visible": ["Brake pads", "Spare fuse"]}
     text = pp.format_result(data)
-    # "Brake pads" appears once (the components checklist), not in the Not visible line.
-    assert "Not visible:</b> Spare fuse" in text
+    # Missing required areas + free-text notes share one line, with no duplicate.
+    assert "Not visible:</b> Brake pads, Spare fuse" in text
     assert text.count("Brake pads") == 1
 
 
 # ---------- components checklist ----------
 
-def test_format_result_shows_full_components_checklist():
+def test_format_result_lists_clean_areas_inline():
     from html import escape
     data = {"status": "PASS", "severity": "NONE", "issues": [],
             "checked_clean": list(pp.REQUIRED_AREAS)}
     text = pp.format_result(data)
-    assert "Components inspected" in text
     for area in pp.REQUIRED_AREAS:
         assert f"✅ {escape(area)}" in text
 
 
-def test_format_result_checklist_marks_missing_and_flagged():
+def test_format_result_defect_and_clean_and_missing_render_distinctly():
     data = {"status": "FAIL", "severity": "MAJOR",
             "issues": [{"text": "Tires", "evidence": "x" * 30, "oos": False}],
             "checked_clean": ["Lights"],
             "missing_areas": ["Brake pads"]}
     text = pp.format_result(data)
-    assert "❌ Brake pads" in text
-    assert "✅ Lights" in text
-    # "Tires" was neither in checked_clean nor missing_areas (it has a defect instead).
-    assert "⚠️ Tires" in text
+    assert "✅ Lights" in text                        # clean
+    assert "⚠️ Tires" in text                         # advisory defect
+    assert "Not visible:</b> Brake pads" in text      # unfilmed
+    assert "❌ Brake pads" not in text
 
 
 def test_format_result_checklist_excludes_fire_extinguisher():
@@ -309,36 +323,16 @@ def test_under_hood_is_optional_not_required():
     assert data["missing_areas"] == []
 
 
-def test_format_result_under_hood_shown_as_optional():
-    # Under hood appears in the checklist tagged "(optional)" and is never rendered
-    # as a ❌ (missing-required) marker, even when it wasn't filmed.
-    data = {"status": "PASS", "severity": "NONE", "issues": [],
-            "checked_clean": list(pp.REQUIRED_AREAS), "missing_areas": []}
-    text = pp.format_result(data)
-    assert "Under hood (optional)" in text
-    assert "❌ Under hood" not in text
-
-
-# ---------- fire extinguisher reminder (advisory only, not completeness) ----------
-
-def test_format_result_reminds_when_fire_extinguisher_not_shown():
-    data = {"status": "PASS", "severity": "NONE", "issues": [], "fire_extinguisher_shown": False}
-    text = pp.format_result(data)
-    assert "Reminder" in text
-    assert "fire extinguisher" in text.lower()
-
-
-def test_format_result_no_reminder_when_fire_extinguisher_shown():
-    data = {"status": "PASS", "severity": "NONE", "issues": [], "fire_extinguisher_shown": True}
-    text = pp.format_result(data)
-    assert "Reminder" not in text
-
-
-def test_format_result_no_reminder_when_field_absent():
-    # Legacy/missing field must not trigger a false reminder.
-    data = {"status": "PASS", "severity": "NONE", "issues": []}
-    text = pp.format_result(data)
-    assert "Reminder" not in text
+def test_format_result_optional_area_shown_only_when_clean():
+    # An optional area (Under hood) shows as ✅ when filmed clean, is omitted when not,
+    # and is never rendered as a ❌.
+    clean = pp.format_result({"status": "PASS", "severity": "NONE", "issues": [],
+                              "checked_clean": list(pp.REQUIRED_AREAS) + ["Under hood"]})
+    assert "✅ Under hood" in clean
+    not_filmed = pp.format_result({"status": "PASS", "severity": "NONE", "issues": [],
+                                   "checked_clean": list(pp.REQUIRED_AREAS)})
+    assert "Under hood" not in not_filmed
+    assert "❌ Under hood" not in not_filmed
 
 
 # ---------- merge_tire_pass (focused tire-only second pass) ----------
