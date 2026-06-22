@@ -61,6 +61,19 @@ def test_filter_drops_banned_phrase():
     assert data["issues"] == []
 
 
+def test_filter_banned_phrase_checks_evidence_not_title():
+    # A concrete worn-tire finding whose TITLE reads "Worn trailer tire tread" (a banned
+    # phrase) must survive when the EVIDENCE is a concrete observation — the gate judges
+    # evidence, not the title. Regression: such findings were being wrongly dropped.
+    data = {"status": "FAIL", "severity": "MINOR", "issues": [_issue(
+        "(2:40) Worn trailer tire tread",
+        "The center tread grooves on the outer trailer dual are almost completely smooth, "
+        "while the adjacent inner dual still shows deep grooves.")]}
+    dropped = pp.filter_hallucinated_issues(data)
+    assert dropped == 0
+    assert len(data["issues"]) == 1
+
+
 def test_filter_flips_to_pass_when_all_dropped():
     data = {
         "status": "FAIL",
@@ -389,3 +402,33 @@ def test_merge_tire_pass_no_double_report():
             "checked_clean": []}
     assert pp.merge_tire_pass(data, {"tire_defect": True, "issues": [_tire_issue()]}) == 0
     assert len(data["issues"]) == 1
+
+
+# ---------- finalize_result (filter -> merge -> filter -> verdict ordering) ----------
+
+def test_finalize_promotes_tire_when_broad_tire_issue_is_hallucinated():
+    # Regression: the broad pass emits a VAGUE tire issue (mentions "tire", so it would
+    # trip merge's no-double-report guard) that the evidence gate drops. Filtering must
+    # happen BEFORE the merge so the real tire-pass finding still gets promoted — i.e.
+    # the worn tire must survive to the driver, not vanish.
+    data = {
+        "status": "PASS", "severity": "NONE",
+        "issues": [{"text": "Drive tires show wear", "evidence": "worn tires"}],  # banned -> dropped
+        "checked_clean": ["Tires"], "missing_areas": [],
+    }
+    tire = {"tire_defect": True, "issues": [_tire_issue(oos=False)]}
+    promoted = pp.finalize_result(data, tire)
+    assert promoted == 1
+    texts = " ".join(i["text"] for i in data["issues"]).lower()
+    assert "worn smooth" in texts          # the real tire-pass finding survived
+    assert "show wear" not in texts        # the hallucinated broad issue was dropped
+    assert all(i["oos"] is False for i in data["issues"])
+    assert "Tires" not in data["checked_clean"]
+
+
+def test_finalize_no_tire_pass_is_noop_filter_and_verdict():
+    data = {"status": "FAIL", "issues": [], "checked_clean": ["Tires"],
+            "missing_areas": ["Brake pads"]}
+    assert pp.finalize_result(data, None) == 0
+    assert data["status"] == "FAIL"        # still incomplete -> FAIL
+    assert "Brake pads" in data["missing_areas"]

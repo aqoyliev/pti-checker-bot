@@ -335,8 +335,11 @@ def filter_hallucinated_issues(data: dict) -> int:
             dropped += 1
             logging.info(f"Filtered issue '{text}': evidence too short ({len(evidence)} chars) — {evidence!r}")
             continue
-        haystack = (text + " " + evidence).lower()
-        matched = next((p for p in _BANNED_EVIDENCE_PHRASES if p in haystack), None)
+        # Match banned phrases against the EVIDENCE only, not the title. A concrete
+        # finding's short title naturally uses words like "worn trailer tire", which
+        # would wrongly nuke it if matched — the gate's job is to reject vague
+        # *evidence*, so judge the evidence. (Vague phrasing in evidence still drops.)
+        matched = next((p for p in _BANNED_EVIDENCE_PHRASES if p in evidence.lower()), None)
         if matched:
             dropped += 1
             logging.info(f"Filtered issue '{text}': banned phrase '{matched}' in evidence — {evidence!r}")
@@ -350,6 +353,25 @@ def filter_hallucinated_issues(data: dict) -> int:
         # Drop the now-misleading advice and let format_result render a clean PASS
         data["advice"] = ""
     return dropped
+
+
+def finalize_result(data: dict, tire_data: dict | None = None) -> int:
+    """Assemble the final result from the broad pass + optional tire-only pass.
+
+    Order matters: filter the broad pass's issues FIRST, so a vague broad-pass tire
+    issue (which the gate drops) can't trip merge_tire_pass's no-double-report guard
+    and suppress a real tire-pass finding. Then merge the worn-tire findings, filter
+    AGAIN so the promoted issues face the same evidence gate, and finally set the
+    completeness verdict. Returns the number of tire findings promoted.
+    """
+    filter_hallucinated_issues(data)
+    promoted = merge_tire_pass(data, tire_data)
+    if promoted:
+        filter_hallucinated_issues(data)
+    # PASS/FAIL depends ONLY on completeness; OOS/advisory defects are reported but
+    # never fail the inspection.
+    apply_completeness_verdict(data)
+    return promoted
 
 
 def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str | None = None) -> str:
@@ -572,13 +594,9 @@ async def process_mixed_media(
 
         try:
             data = parse_result(response)
-            promoted = merge_tire_pass(data, tire_data)
+            promoted = finalize_result(data, tire_data)
             if promoted:
-                logging.info(f"Tire pass promoted {promoted} OOS tire issue(s) the broad pass missed")
-            filter_hallucinated_issues(data)
-            # PASS/FAIL depends ONLY on completeness; OOS defects are reported but
-            # never fail the inspection.
-            apply_completeness_verdict(data)
+                logging.info(f"Tire pass promoted {promoted} worn-tire advisory(ies) the broad pass missed")
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}
