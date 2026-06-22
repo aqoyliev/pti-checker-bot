@@ -282,6 +282,30 @@ def test_format_result_checklist_excludes_fire_extinguisher():
     assert "Fire extinguisher" not in text
 
 
+def test_under_hood_is_optional_not_required():
+    # "Under hood" must never gate completeness: even if the model marks it missing,
+    # the inspection still PASSes and it is dropped from the normalized missing list.
+    assert "Under hood" not in pp.REQUIRED_AREAS
+    assert "Under hood" in pp.OPTIONAL_AREAS
+    data = {"status": "PASS", "severity": "NONE", "issues": [],
+            "checked_clean": [a for a in pp.REQUIRED_AREAS],
+            "missing_areas": ["Under hood"]}
+    incomplete = pp.apply_completeness_verdict(data)
+    assert incomplete is False
+    assert data["status"] == "PASS"
+    assert data["missing_areas"] == []
+
+
+def test_format_result_under_hood_shown_as_optional():
+    # Under hood appears in the checklist tagged "(optional)" and is never rendered
+    # as a ❌ (missing-required) marker, even when it wasn't filmed.
+    data = {"status": "PASS", "severity": "NONE", "issues": [],
+            "checked_clean": list(pp.REQUIRED_AREAS), "missing_areas": []}
+    text = pp.format_result(data)
+    assert "Under hood (optional)" in text
+    assert "❌ Under hood" not in text
+
+
 # ---------- fire extinguisher reminder (advisory only, not completeness) ----------
 
 def test_format_result_reminds_when_fire_extinguisher_not_shown():

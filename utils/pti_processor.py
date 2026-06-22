@@ -152,7 +152,7 @@ def has_oos_defect(data: dict) -> bool:
     return any(_issue_is_oos(i) for i in (data.get("issues") or []))
 
 
-# The 8 in-scope PTI inspection areas, by their canonical "checked_clean" labels.
+# The 8 REQUIRED PTI inspection areas, by their canonical "checked_clean" labels.
 # A complete inspection must show every one of these (the trailer ABS lamp included
 # — it must be filmed even though it is normally OFF). Drivers are NOT required to
 # film the trailer plate or unit number, so those are not areas here. The fire
@@ -168,7 +168,17 @@ REQUIRED_AREAS = (
     "Frame",
     "ABS lamp",
 )
+# OPTIONAL areas are inspected and shown in the checklist, but NOT filming them never
+# fails the inspection — they are deliberately kept out of REQUIRED_AREAS so they do
+# not gate completeness. "Under hood" is inspected for leaks (a fuel leak is still
+# reported as an OOS issue) but the engine bay is awkward/unsafe to film on every trip.
+OPTIONAL_AREAS = (
+    "Under hood",
+)
+# Order shown in the "Components inspected" checklist: required first, then optional.
+CHECKLIST_AREAS = REQUIRED_AREAS + OPTIONAL_AREAS
 _REQUIRED_AREAS_BY_KEY = {a.lower(): a for a in REQUIRED_AREAS}
+_OPTIONAL_AREAS_BY_KEY = {a.lower(): a for a in OPTIONAL_AREAS}
 
 
 def _missing_required_areas(data: dict) -> list[str]:
@@ -339,10 +349,21 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     clean_keys = {str(c).strip().lower() for c in clean}
     lines.append("")
     lines.append("📋 <b>Components inspected:</b>")
-    for area in REQUIRED_AREAS:
+    for area in CHECKLIST_AREAS:
         key = area.lower()
-        icon = "❌" if key in missing_keys else "✅" if key in clean_keys else "⚠️"
-        lines.append(f"{icon} {escape(area)}")
+        optional = key in _OPTIONAL_AREAS_BY_KEY
+        if key in clean_keys:
+            icon = "✅"
+        elif optional:
+            # Optional areas never count as "missing" — an un-filmed/unconfirmed one
+            # is a neutral note, not a ❌ that implies the inspection is incomplete.
+            icon = "➖"
+        elif key in missing_keys:
+            icon = "❌"
+        else:
+            icon = "⚠️"
+        label = f"{area} (optional)" if optional else area
+        lines.append(f"{icon} {escape(label)}")
 
     # Fire extinguisher & triangle are advisory-only — not a required area, so they
     # never affect completeness/PASS-FAIL. Just remind the driver if never filmed.
