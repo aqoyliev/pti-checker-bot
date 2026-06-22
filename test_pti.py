@@ -114,8 +114,9 @@ PASS / FAIL rule — based ONLY on completeness, NOT on defects:
 
   OOS conditions (label these oos=true):
     - Tires: visibly flat / run-flat (deformed against the ground), tread or sidewall separation, a bulge from
-      ply/belt separation, exposed cords/belt/ply fabric, a sidewall cut or split deep enough to expose cords,
-      or a clearly bald patch where the tread is gone. (You cannot measure tread depth — never fail on a number.)
+      ply/belt separation, exposed cords/belt/ply fabric, or a sidewall cut or split deep enough to expose cords.
+      A worn-smooth or BALD tread (grooves worn away) with NO exposed cords/separation is an ADVISORY, not OOS
+      — see the NEVER-OOS list. (You cannot measure tread depth — never fail on a number.)
     - Brakes / brake pads: lining or pad missing, cracked off, or worn down to the metal/rivets; broken brake
       hardware. Even, adequate pad thickness is NOT OOS.
     - Air lines (air brake system): an air line that is cut, broken, disconnected, or visibly/audibly leaking.
@@ -130,6 +131,10 @@ PASS / FAIL rule — based ONLY on completeness, NOT on defects:
       widespread corrosion. These ARE reportable violations (report them as issues), but per company policy a
       wheel/rim finding is NEVER out-of-service — even though FMCSA / CVSA criteria may treat a cracked wheel
       as OOS. Always oos=false.
+    - Tires (tread wear): a worn-smooth or bald tread — the center tread grooves worn away, with no exposed
+      cords, separation, or bulge. You MUST still report a clearly worn-out tire (it needs replacing), but per
+      company policy worn/bald tread is an ADVISORY, never OOS. Always oos=false. (Exposed cords or separation
+      are different — those stay OOS per the list above.)
     - Missing or expired fire extinguisher or warning triangle (regulatory item, not an OOS condition).
     - Broken, missing, or cracked mirror.
     - Low or unknown engine-oil level.
@@ -374,10 +379,18 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
             _delete_files_background(client, uploaded_files)
 
 
-def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
+def call_gemini_photos(
+    images: list[tuple],
+    history: list[dict] | None = None,
+    system_prompt: str | None = None,
+    closing: str | None = None,
+):
     """images: list of (file_path, mime_type) or (file_path, mime_type, label).
     Label is shown to Gemini after each image — e.g. "Video frame at 1:14" or "Photo 2".
     Above FILE_API_THRESHOLD images, files are uploaded via the File API instead of sent inline.
+
+    ``system_prompt``/``closing`` override the default full-PTI instructions — used by
+    ``call_gemini_tires`` to run a narrow, single-purpose pass over the same images.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your-gemini-key-here":
@@ -420,12 +433,12 @@ def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
         history_text = _build_history_text(history or [])
         if history_text:
             parts.append(history_text)
-        parts.append(f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
+        parts.append(closing or f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
 
         response = client.models.generate_content(
             model="gemini-2.5-pro",
             config=genai_types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt or SYSTEM_PROMPT,
                 temperature=0,
                 response_mime_type="application/json",
             ),
@@ -435,6 +448,68 @@ def call_gemini_photos(images: list[tuple], history: list[dict] | None = None):
     finally:
         if uploaded_files:
             _delete_files_background(client, uploaded_files)
+
+
+# A narrow, single-purpose system prompt for a SECOND Gemini pass that looks at the
+# SAME frames but judges ONLY dual-tire tread wear. The broad PTI pass juggles 8
+# areas across ~150+ frames and reliably overlooks a single worn tire (attention
+# dilution); given the one job, the model attends to every tire and catches it.
+# Evidence must be CONCRETE (smooth/featureless center, grooves absent, contrast vs
+# the adjacent dual) and avoid vague conclusions, so promoted issues survive
+# utils.pti_processor.filter_hallucinated_issues unchanged.
+TIRE_SYSTEM_PROMPT = """You are a commercial-truck TIRE inspector. You are given frames from a \
+pre-trip inspection (PTI) walkaround. Your ONLY job is to judge DUAL-TIRE TREAD WEAR. Ignore \
+everything else (lights, brakes, frame, leaks, mirrors, ABS, etc.) — never report anything that is \
+not tire tread wear.
+
+Examine EVERY frame. The same tires appear in many frames from slightly different angles; a defect \
+that is clear in even ONE good frame is a real defect — do not let it average out across the others.
+
+Report a tire ONLY when it is CLEARLY worn out: the CENTER tread (NOT the shoulder) of ONE dual is \
+smooth/featureless/bald — grooves worn away or barely visible — while the ADJACENT dual in the SAME frame \
+still shows clear grooves. That contrast against the neighbouring dual is what makes it certain. Do NOT \
+report borderline cases ("a bit smoother", "slightly more worn"); only tires that are plainly worn out.
+
+DO NOT report (these are NOT defects):
+ - the outer SHOULDER being smoother than the center (normal tire anatomy),
+ - mixed tread PATTERNS (two different tire models on one axle is normal),
+ - same-tire comparisons (center vs shoulder, or left vs right of one tire).
+Never quote a tread-depth number or "wear bars". Be conservative: when in doubt, do not report.
+
+For each defect, write "evidence" as a CONCRETE visual observation — e.g. "center tread of the inner \
+dual is smooth and featureless with no visible grooves, while the adjacent outer dual still shows deep \
+grooves". Do NOT use vague conclusions like "worn", "severe wear", "tread is low", or "tire is worn".
+
+CLASSIFICATION — per company policy, worn/bald tread is an ADVISORY, never out-of-service: set "oos": \
+false on EVERY tire-wear finding. (Exposed cords, tread/sidewall separation, a bulge, or a flat would be \
+out-of-service, but those are out of scope here — report tread WEAR only.) The driver must still see the \
+worn tire so they replace it — finding it matters; it is just not OOS.
+
+Return ONLY this JSON (no prose):
+{
+  "tire_defect": true/false,
+  "issues": [
+    {"text": "(M:SS) <which tire, e.g. trailer driver-side rear inner dual>: center tread worn smooth (49 CFR 393.75)",
+     "evidence": "<concrete visual observation, >=20 chars>",
+     "oos": false}
+  ],
+  "tires_fully_shown": true/false
+}"""
+
+
+def call_gemini_tires(images: list[tuple], history: list[dict] | None = None):
+    """Focused second pass: judge ONLY dual-tire tread wear over the same images.
+
+    Returns the raw Gemini response (JSON shaped per TIRE_SYSTEM_PROMPT). Callers
+    merge its OOS findings into the main result; see utils.pti_processor.merge_tire_pass.
+    """
+    n = len(images)
+    return call_gemini_photos(
+        images,
+        history=history,
+        system_prompt=TIRE_SYSTEM_PROMPT,
+        closing=f"Examine all {n} image(s) above for dual-tire tread wear ONLY and return the tire JSON result.",
+    )
 
 
 def delete_frames(frames: list[tuple[float, str]]) -> None:
