@@ -135,3 +135,12 @@ docker-compose.override.yml
 
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json
+
+# Test/sample inspection media — large binaries that must never land in git
+# (a 35 MB IMG_*.MOV was committed by accident once; keep them out for good).
+*.mov
+*.MOV
+*.mp4
+IMG_*
+_tg_capture/
+_frametest/

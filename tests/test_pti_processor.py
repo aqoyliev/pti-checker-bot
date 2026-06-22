@@ -326,3 +326,66 @@ def test_format_result_no_reminder_when_field_absent():
     data = {"status": "PASS", "severity": "NONE", "issues": []}
     text = pp.format_result(data)
     assert "Reminder" not in text
+
+
+# ---------- merge_tire_pass (focused tire-only second pass) ----------
+
+def _tire_issue(oos=False):
+    return {
+        "text": "(2:18) Trailer driver-side rear inner dual: center tread worn smooth (49 CFR 393.75)",
+        "evidence": "Inner dual center tread is smooth and featureless with no visible "
+                    "grooves, while the adjacent outer dual still shows deep grooves.",
+        "oos": oos,
+    }
+
+
+def test_merge_tire_pass_promotes_worn_tire_as_advisory():
+    # The broad pass marked Tires clean; the focused pass found a clearly worn tire.
+    # It MUST be surfaced (driver replaces it) but as an advisory, never OOS.
+    data = {"issues": [], "checked_clean": ["Lights", "Tires"], "missing_areas": []}
+    tire = {"tire_defect": True, "issues": [_tire_issue(oos=False)]}
+    assert pp.merge_tire_pass(data, tire) == 1
+    assert "Tires" not in data["checked_clean"]          # no longer "clean"
+    assert "Tires" not in data.get("missing_areas", [])  # nor counted "missing"
+    promoted = data["issues"][-1]
+    assert promoted["oos"] is False                      # advisory, not OOS
+    # Survives the evidence gate; a complete inspection with only an advisory is a
+    # non-critical PASS (worn tire shown, but not out-of-service).
+    assert pp.filter_hallucinated_issues(data) == 0
+    pp.apply_completeness_verdict(data)
+    assert pp.has_oos_defect(data) is False
+    assert data["severity"] != "CRITICAL"
+
+
+def test_merge_tire_pass_forces_advisory_even_if_model_says_oos():
+    # Company policy: worn/bald tread is never OOS. A model-labelled oos=True finding
+    # must be downgraded on promotion.
+    data = {"issues": [], "checked_clean": ["Tires"]}
+    assert pp.merge_tire_pass(data, {"tire_defect": True, "issues": [_tire_issue(oos=True)]}) == 1
+    assert data["issues"][-1]["oos"] is False
+
+
+def test_merge_tire_pass_noop_when_no_defect():
+    data = {"issues": [], "checked_clean": ["Tires"]}
+    assert pp.merge_tire_pass(data, {"tire_defect": False, "issues": []}) == 0
+    assert pp.merge_tire_pass(data, None) == 0
+    assert "Tires" in data["checked_clean"]
+
+
+def test_merge_tire_pass_caps_to_avoid_flooding():
+    data = {"issues": [], "checked_clean": ["Tires"]}
+    many = {"tire_defect": True, "issues": [
+        {"text": f"({i}:00) inner dual worn smooth", "evidence": "z" * 30, "oos": False}
+        for i in range(6)
+    ]}
+    promoted = pp.merge_tire_pass(data, many)
+    assert promoted == pp._MAX_TIRE_PROMOTE
+    assert len(data["issues"]) == pp._MAX_TIRE_PROMOTE
+
+
+def test_merge_tire_pass_no_double_report():
+    # If the broad pass already flagged a tire, don't add a second tire issue.
+    data = {"issues": [{"text": "(1:00) Trailer tire flat", "evidence": "y" * 30, "oos": True}],
+            "checked_clean": []}
+    assert pp.merge_tire_pass(data, {"tire_defect": True, "issues": [_tire_issue()]}) == 0
+    assert len(data["issues"]) == 1

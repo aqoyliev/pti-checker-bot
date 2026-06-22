@@ -26,7 +26,7 @@ def _is_service_overload(e: Exception) -> bool:
 
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini_photos, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
+from test_pti import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
 
 _GEMINI_RETRY_DELAYS = (15, 30, 60)  # seconds; 3 retries after the initial attempt
 
@@ -67,6 +67,19 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
             else:
                 logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); no more retries")
     raise last_exc
+
+
+async def _run_tire_pass(all_images) -> dict | None:
+    """Best-effort focused tire-only pass. Never raises — it is a safety net, so a
+    failure (API error, bad JSON) must not sink the inspection; we just skip the
+    merge and keep the broad pass's result. Returns the parsed tire dict or None."""
+    try:
+        resp = await _call_gemini_with_retry(call_gemini_tires, all_images)
+        td = parse_result(resp)
+        return td if isinstance(td, dict) else None
+    except Exception:
+        logging.warning("Tire-only pass failed; continuing with the main result only", exc_info=True)
+        return None
 
 
 def _media_summary(photos: int, videos: int) -> str | None:
@@ -245,6 +258,53 @@ def apply_completeness_verdict(data: dict) -> bool:
         data["severity"] = "NONE"
     data.setdefault("advice", "")
     return False
+
+
+# Cap how many worn-tire findings the focused pass can add, so a sensitive pass can
+# never flood the report (drivers want the worn tire surfaced, not a wall of tires).
+_MAX_TIRE_PROMOTE = 3
+
+
+def merge_tire_pass(data: dict, tire_data: dict | None) -> int:
+    """Fold a focused tire-only pass (test_pti.call_gemini_tires) into the main result.
+
+    The broad PTI pass juggles 8 areas over 150+ frames and reliably overlooks a
+    single worn tire (attention dilution); a narrow tire-only pass over the same
+    frames catches it. The driver MUST see a clearly worn-out tire so they replace
+    it — but per company policy worn/bald tread is an ADVISORY, never out-of-service,
+    so every promoted finding is forced to oos=false. We promote only when the broad
+    pass didn't already flag a tire, and cap the count, so the more-sensitive pass
+    can't flood the report. Promoted issues are appended BEFORE
+    filter_hallucinated_issues so they pass the same evidence gate. Returns how many
+    issues were promoted.
+    """
+    if not tire_data or not tire_data.get("tire_defect"):
+        return 0
+    # Don't double-report if the broad pass already mentioned a tire/dual.
+    if any("tire" in _issue_text(i).lower() or "dual" in _issue_text(i).lower()
+           for i in (data.get("issues") or [])):
+        return 0
+    promote = [
+        i for i in (tire_data.get("issues") or [])
+        if _issue_text(i) and len(_issue_evidence(i)) >= _MIN_EVIDENCE_CHARS
+    ][:_MAX_TIRE_PROMOTE]
+    if not promote:
+        return 0
+    for issue in promote:
+        # Company policy: tire tread wear is advisory, not OOS — enforce it here even
+        # if the model labelled it otherwise.
+        issue["oos"] = False
+    data.setdefault("issues", []).extend(promote)
+    # A reported tire defect means tires WERE filmed: drop "Tires" from clean and
+    # from any missing/not-visible list so the area is accounted for by the issue
+    # alone (see _missing_required_areas) — no contradictory "clean"/"missing" Tires.
+    data["checked_clean"] = [c for c in (data.get("checked_clean") or [])
+                             if str(c).strip().lower() != "tires"]
+    for key in ("missing_areas", "what_was_not_visible"):
+        vals = data.get(key)
+        if vals:
+            data[key] = [v for v in vals if str(v).strip().lower() != "tires"]
+    return len(promote)
 
 
 def filter_hallucinated_issues(data: dict) -> int:
@@ -497,10 +557,24 @@ async def process_mixed_media(
         if video_count:
             parts.append(f"{video_count} video{'s' if video_count != 1 else ''}")
         await status_msg.edit_text(f"Analyzing {' and '.join(parts) or 'media'}...")
-        response = await _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
+        # Run the broad PTI pass and a focused tire-only pass concurrently over the
+        # same images. The tire pass is a best-effort safety net for worn tires the
+        # broad pass overlooks; it never raises, so only a main-pass failure here
+        # propagates to the error handling below.
+        if config.PTI_TIRE_PASS:
+            response, tire_data = await asyncio.gather(
+                _call_gemini_with_retry(call_gemini_photos, all_images, history=history),
+                _run_tire_pass(all_images),
+            )
+        else:
+            response = await _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
+            tire_data = None
 
         try:
             data = parse_result(response)
+            promoted = merge_tire_pass(data, tire_data)
+            if promoted:
+                logging.info(f"Tire pass promoted {promoted} OOS tire issue(s) the broad pass missed")
             filter_hallucinated_issues(data)
             # PASS/FAIL depends ONLY on completeness; OOS defects are reported but
             # never fail the inspection.

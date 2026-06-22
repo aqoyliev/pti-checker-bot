@@ -17,6 +17,13 @@ DATABASE_URL = env.str("DATABASE_URL")
 # for a free slot instead of piling on. Tune up only if the host has headroom.
 PTI_MAX_CONCURRENCY = env.int("PTI_MAX_CONCURRENCY", default=3)
 
+# Run a second, tire-only Gemini pass over the same frames and merge any
+# out-of-service (bald/tread-gone) tire it finds into the result. The broad PTI
+# pass juggles 8 areas over 150+ frames and reliably overlooks a single worn
+# tire (attention dilution); a focused pass catches it. Costs one extra Gemini
+# call per inspection — set False if Gemini quota is tight.
+PTI_TIRE_PASS = env.bool("PTI_TIRE_PASS", default=True)
+
 # Compliance enforcement. When False (default), the hourly loop never mutes
 # drivers and sends no overdue reminders to the group or to admins — it only
 # lifts any restrictions left over from when enforcement was on. Set True to
