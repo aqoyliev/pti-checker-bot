@@ -21,6 +21,33 @@ MAX_VIDEO_DURATION = 900   # 15 minutes — reject anything longer
 MAX_FRAMES = 900           # safety cap so we never exceed Gemini's token limit
 FILE_API_THRESHOLD = 50    # frames above this count are uploaded via File API instead of sent inline
 
+# The vision model used for every PTI pass. Admins switch this at runtime from the
+# /admin panel (set_active_model), and the choice is persisted in the DB and
+# reloaded on startup. "pro" is the most accurate; "flash"/"flash-lite" are faster
+# and cheaper. Keep DEFAULT first so a blank/unknown stored value falls back to it.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+AVAILABLE_GEMINI_MODELS = (
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+)
+_active_model = DEFAULT_GEMINI_MODEL
+
+
+def get_active_model() -> str:
+    """The Gemini model id currently used for inspections."""
+    return _active_model
+
+
+def set_active_model(model: str) -> bool:
+    """Switch the active model. Returns False (and changes nothing) if `model` is
+    not one of AVAILABLE_GEMINI_MODELS, so a bad value can't silently break calls."""
+    global _active_model
+    if model not in AVAILABLE_GEMINI_MODELS:
+        return False
+    _active_model = model
+    return True
+
 
 class VideoTooLongError(Exception):
     def __init__(self, duration: float):
@@ -365,7 +392,7 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
         parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
 
         response = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model=_active_model,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0,
@@ -436,7 +463,7 @@ def call_gemini_photos(
         parts.append(closing or f"Analyze all {n} image(s) above as a single PTI inspection and return the JSON result.")
 
         response = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model=_active_model,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt or SYSTEM_PROMPT,
                 temperature=0,

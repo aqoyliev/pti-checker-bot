@@ -35,8 +35,10 @@ from utils.db import (
     remove_driver,
     set_group_active,
     set_group_unit,
+    set_setting,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, check_driver_compliance
+from test_pti import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 
 PAGE_SIZE = 8
 MENU_TEXT = "<b>🛠 PTI Admin Panel</b>\n\nChoose a section:"
@@ -65,6 +67,7 @@ def _menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📊 Stats", callback_data="adm:stats"),
     )
     kb.add(InlineKeyboardButton("📣 Broadcast", callback_data="adm:bcast"))
+    kb.add(InlineKeyboardButton("🤖 AI Model", callback_data="adm:model"))
     kb.add(InlineKeyboardButton("✖️ Close", callback_data="adm:close"))
     return kb
 
@@ -273,6 +276,31 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
     return text, _back_kb("adm:menu", "« Menu")
 
 
+# Short, admin-facing hint shown next to each model id. Keep the actual id as the
+# stored/selected value; these are just to remind which is which at a glance.
+_MODEL_HINTS = {
+    "gemini-2.5-pro": "most accurate, slowest",
+    "gemini-2.5-flash": "faster, cheaper",
+    "gemini-2.5-flash-lite": "fastest, cheapest",
+}
+
+
+async def _render_model() -> tuple[str, InlineKeyboardMarkup]:
+    active = get_active_model()
+    kb = InlineKeyboardMarkup(row_width=1)
+    for model in AVAILABLE_GEMINI_MODELS:
+        mark = "✅ " if model == active else ""
+        kb.add(InlineKeyboardButton(f"{mark}{model}", callback_data=f"adm:setmodel:{model}"))
+    kb.add(InlineKeyboardButton("« Menu", callback_data="adm:menu"))
+
+    lines = ["<b>🤖 AI Model</b>\n", f"Active: <code>{escape(active)}</code>\n"]
+    for model in AVAILABLE_GEMINI_MODELS:
+        hint = _MODEL_HINTS.get(model, "")
+        lines.append(f"• <code>{escape(model)}</code>" + (f" — {hint}" if hint else ""))
+    lines.append("\nTap a model to switch. Applies to the next inspection.")
+    return "\n".join(lines), kb
+
+
 # ---------- command entrypoints ----------
 
 @dp.message_handler(commands=["admin"], chat_type=PRIVATE, state="*")
@@ -362,6 +390,23 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
     if action == "stats":
         await query.answer("Computing…")
         text, kb = await _render_stats()
+        await _edit(query, text, kb)
+        return
+
+    if action == "model":
+        text, kb = await _render_model()
+        await _edit(query, text, kb)
+        return
+
+    if action == "setmodel":
+        model = parts[2] if len(parts) > 2 else ""
+        if not set_active_model(model):
+            await query.answer("Unknown model.", show_alert=True)
+            return
+        await set_setting("gemini_model", model)  # persist across restarts
+        await query.answer(f"Model set to {model}.")
+        logging.info("Admin %s switched Gemini model to %s", query.from_user.id, model)
+        text, kb = await _render_model()
         await _edit(query, text, kb)
         return
 

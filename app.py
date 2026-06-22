@@ -6,13 +6,17 @@ from loader import dp
 import middlewares, filters, handlers
 from utils.notify_admins import on_startup_notify
 from utils.set_bot_commands import set_default_commands
-from utils.db import init_db
+from utils.db import init_db, get_setting
 from utils.scheduler import compliance_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
+from test_pti import set_active_model
 
 
 async def on_startup(dispatcher):
     await init_db()
+    stored_model = await get_setting("gemini_model")
+    if stored_model:
+        set_active_model(stored_model)  # ignored if it's not a known model id
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)
     asyncio.create_task(compliance_loop())
