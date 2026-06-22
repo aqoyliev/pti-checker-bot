@@ -279,9 +279,14 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
 # Short, admin-facing hint shown next to each model id. Keep the actual id as the
 # stored/selected value; these are just to remind which is which at a glance.
 _MODEL_HINTS = {
-    "gemini-2.5-pro": "most accurate, slowest",
-    "gemini-2.5-flash": "faster, cheaper",
-    "gemini-2.5-flash-lite": "fastest, cheapest",
+    "gemini-2.5-pro": "2.5 — most accurate, slowest",
+    "gemini-2.5-flash": "2.5 — faster, cheaper",
+    "gemini-2.5-flash-lite": "2.5 — fastest, cheapest",
+    "gemini-3-pro-preview": "3.0 Pro (preview)",
+    "gemini-3-flash-preview": "3.0 Flash (preview)",
+    "gemini-3.1-pro-preview": "3.1 Pro (preview)",
+    "gemini-3.1-flash-lite": "3.1 Flash-Lite",
+    "gemini-3.5-flash": "3.5 Flash — newest, lots of capacity",
 }
 
 
