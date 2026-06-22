@@ -78,6 +78,12 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS content_signature TEXT;
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
         """)
 
 
@@ -85,6 +91,24 @@ def _pool_check() -> asyncpg.Pool:
     if _pool is None:
         raise RuntimeError("DB pool not initialized")
     return _pool
+
+
+# ---------- app settings (generic key/value) ----------
+
+async def get_setting(key: str) -> str | None:
+    row = await _pool_check().fetchrow(
+        "SELECT value FROM app_settings WHERE key = $1", key
+    )
+    return row["value"] if row else None
+
+
+async def set_setting(key: str, value: str) -> None:
+    await _pool_check().execute(
+        """INSERT INTO app_settings (key, value, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
+        key, value,
+    )
 
 
 # ---------- groups ----------
