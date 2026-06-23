@@ -24,6 +24,21 @@ PTI_MAX_CONCURRENCY = env.int("PTI_MAX_CONCURRENCY", default=3)
 # call per inspection — set False if Gemini quota is tight.
 PTI_TIRE_PASS = env.bool("PTI_TIRE_PASS", default=True)
 
+# Split a single inspection's frames across multiple Gemini API keys and analyze
+# the chunks in parallel (e.g. 210 frames over 3 keys = 70 each), then merge the
+# per-chunk results into one verdict. Only kicks in when GEMINI_API_KEYS has more
+# than one key and there are enough frames; otherwise it's a single whole-footage
+# call. NOTE: each chunk sees only part of the walkaround, so completeness is
+# rebuilt at merge time (an area filmed in ANY chunk counts as filmed). Set False
+# to always send the whole inspection in one call. (default: true)
+PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
+
+# Minimum number of images (photos + video frames) before splitting is worth it.
+# Below this, the whole inspection goes in a single call to the first key (failover
+# still covers it); at or above it — and with >1 key — the frames are split. Keeps
+# short clips as one sharp call instead of tiny per-key chunks. (default: 30)
+PTI_SPLIT_MIN_FRAMES = env.int("PTI_SPLIT_MIN_FRAMES", default=30)
+
 # Compliance enforcement. When False (default), the hourly loop never mutes
 # drivers and sends no overdue reminders to the group or to admins — it only
 # lifts any restrictions left over from when enforcement was on. Set True to

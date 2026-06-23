@@ -48,6 +48,34 @@ def _fmt_timestamp(seconds: float) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+def _should_split(num_images: int, num_keys: int) -> bool:
+    """Whether to split this inspection's frames across keys instead of one whole call.
+
+    Split only when it's enabled, there's more than one key, and the footage is long
+    enough to be worth chunking (>= PTI_SPLIT_MIN_FRAMES). Short clips stay a single
+    sharp call to the first key; failover still backs them up.
+    """
+    return (
+        config.PTI_SPLIT_FRAMES
+        and num_keys > 1
+        and num_images >= config.PTI_SPLIT_MIN_FRAMES
+    )
+
+
+def _split_strided(items: list, n: int) -> list[list]:
+    """Split `items` into at most `n` near-equal chunks, STRIDED not contiguous: chunk
+    i gets items[i::n] (210 frames over 3 keys -> indices 0,3,6… / 1,4,7… / 2,5,8…).
+
+    Strided so each chunk is a thin sample spanning the WHOLE walkaround, not one
+    contiguous third of it. That keeps every chunk seeing a bit of every area (lights,
+    tires, ABS lamp, …), so the merged completeness verdict stays close to a single
+    whole-video pass — contiguous chunks each saw only a third and under-reported areas
+    as un-filmed. Never returns more chunks than items, so empty chunks can't happen.
+    """
+    n = max(1, min(n, len(items)))
+    return [items[i::n] for i in range(n)]
+
+
 async def _call_gemini_with_retry(fn, *args, **kwargs):
     """Run a Gemini call with API-key failover.
 
@@ -87,6 +115,51 @@ async def _run_tire_pass(all_images) -> dict | None:
     except Exception:
         logging.warning("Tire-only pass failed; continuing with the main result only", exc_info=True)
         return None
+
+
+async def _run_split_passes(all_images: list, keys: list[str], history: list[dict] | None) -> dict:
+    """Split frames across keys and analyze the chunks in parallel, one key each, then
+    merge into a single result dict (see merge_frame_passes).
+
+    Each chunk gets its own API key, so the load is spread across keys/projects. A
+    chunk that overloads (503/429/transient) or returns unparseable JSON is dropped and
+    we proceed on the survivors — a partial inspection beats no inspection. If a chunk
+    fails with a non-overload error (bad request/auth) that's a real bug, so it
+    propagates. If EVERY chunk fails we re-raise an overload so the caller shows the
+    friendly 'overloaded' message.
+    """
+    chunks = _split_strided(all_images, len(keys))
+    logging.info(
+        f"PTI split: {len(all_images)} image(s) strided across {len(chunks)} key(s) "
+        f"({', '.join(str(len(c)) for c in chunks)} per key)"
+    )
+    results = await asyncio.gather(
+        *[asyncio.to_thread(call_gemini_photos, chunk, history=history, api_key=key)
+          for chunk, key in zip(chunks, keys)],
+        return_exceptions=True,
+    )
+
+    passes: list[dict] = []
+    overload_exc: Exception | None = None
+    for r in results:
+        if isinstance(r, Exception):
+            if not (isinstance(r, _TRANSIENT_NET_ERRORS) or _is_service_overload(r)):
+                raise r
+            overload_exc = r
+            continue
+        try:
+            passes.append(parse_result(r))
+        except Exception:
+            logging.warning("Split chunk returned unusable JSON; dropping it", exc_info=True)
+
+    if not passes:
+        raise overload_exc or ValueError("All split passes returned unusable responses")
+    if len(passes) < len(chunks):
+        logging.warning(
+            f"Split: only {len(passes)}/{len(chunks)} chunks succeeded; merging survivors "
+            f"(some areas may show as not-filmed)"
+        )
+    return merge_frame_passes(passes)
 
 
 def _media_summary(photos: int, videos: int) -> str | None:
@@ -382,6 +455,67 @@ def filter_hallucinated_issues(data: dict) -> int:
     return dropped
 
 
+def merge_frame_passes(passes: list[dict]) -> dict:
+    """Combine the per-chunk results of a split-frame inspection into one data dict.
+
+    When frames are split across keys (see _run_split_passes), each chunk pass sees
+    only a SLICE of the walkaround, so its own completeness verdict is meaningless on
+    its own. We rebuild a single result and let finalize_result set the verdict:
+      - checked_clean: UNION — an area filmed-clean in ANY chunk was filmed and is fine.
+      - issues: concatenated — a defect seen in any chunk is real (dedup/filter later).
+      - missing_areas: INTERSECTION — an area is only "not filmed" if EVERY chunk that
+        judged it agrees it's missing; the chunk that actually saw the area (clean or
+        as an issue) won't list it missing, so it drops out of the intersection. This
+        is what stops a perfectly-filmed truck from FAILing just because no single
+        70-frame slice contained all 8 areas.
+    status/severity/advice are intentionally omitted — finalize_result recomputes them.
+    """
+    passes = [p for p in passes if isinstance(p, dict)]
+    clean: list[str] = []
+    seen: set[str] = set()
+    issues: list = []
+    missing_sets: list[set[str]] = []
+    not_visible_sets: list[set[str]] = []
+    fire: bool | None = None
+    confidences: list[str] = []
+    qualities: list[str] = []
+    for p in passes:
+        for c in p.get("checked_clean") or []:
+            k = str(c).strip().lower()
+            if k and k not in seen:
+                seen.add(k)
+                clean.append(str(c).strip())
+        issues.extend(p.get("issues") or [])
+        missing_sets.append({str(a).strip().lower() for a in (p.get("missing_areas") or [])})
+        not_visible_sets.append({str(a).strip().lower() for a in (p.get("what_was_not_visible") or [])})
+        fe = p.get("fire_extinguisher_shown")
+        if fe is True:
+            fire = True
+        elif fe is False and fire is None:
+            fire = False
+        if p.get("confidence"):
+            confidences.append(p["confidence"])
+        if p.get("image_quality"):
+            qualities.append(p["image_quality"])
+
+    common_missing = set.intersection(*missing_sets) if missing_sets else set()
+    common_not_visible = set.intersection(*not_visible_sets) if not_visible_sets else set()
+    clean_keys = {c.lower() for c in clean}
+    missing = [_REQUIRED_AREAS_BY_KEY[k] for k in _REQUIRED_AREAS_BY_KEY
+               if k in common_missing and k not in clean_keys]
+
+    return {
+        "checked_clean": clean,
+        "issues": issues,
+        "missing_areas": missing,
+        "what_was_not_visible": sorted(common_not_visible - clean_keys),
+        "fire_extinguisher_shown": fire,
+        # Cosmetic meta — keep the first reported value; the verdict doesn't depend on it.
+        "confidence": confidences[0] if confidences else "",
+        "image_quality": qualities[0] if qualities else "",
+    }
+
+
 def finalize_result(data: dict, tire_data: dict | None = None) -> int:
     """Assemble the final result from the broad pass + optional tire-only pass.
 
@@ -593,28 +727,37 @@ async def process_mixed_media(
         if video_count:
             parts.append(f"{video_count} video{'s' if video_count != 1 else ''}")
         await status_msg.edit_text(f"Analyzing {' and '.join(parts) or 'media'}...")
-        # Run the broad PTI pass and a focused tire-only pass concurrently over the
-        # same images. The tire pass is a best-effort safety net for worn tires the
-        # broad pass overlooks; it never raises, so only a main-pass failure here
-        # propagates to the error handling below.
+        # Decide the broad PTI pass: either one whole-footage call, or — when several
+        # API keys are configured and there are enough frames — split the frames across
+        # the keys and analyze the chunks in parallel (_run_split_passes merges them).
+        # The tire-only pass is a best-effort safety net for worn tires the broad pass
+        # overlooks; it runs over ALL frames and never raises, so only a broad-pass
+        # failure here propagates to the error handling below.
+        keys = get_api_keys()
+        use_split = _should_split(len(all_images), len(keys))
+        broad_coro = (
+            _run_split_passes(all_images, keys, history) if use_split
+            else _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
+        )
+
         if config.PTI_TIRE_PASS:
-            response, tire_data = await asyncio.gather(
-                _call_gemini_with_retry(call_gemini_photos, all_images, history=history),
-                _run_tire_pass(all_images),
-            )
+            broad_result, tire_data = await asyncio.gather(broad_coro, _run_tire_pass(all_images))
         else:
-            response = await _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
+            broad_result = await broad_coro
             tire_data = None
+        # Split passes return an already-merged data dict; the single call returns a
+        # raw Gemini response that still needs parsing.
+        response = None if use_split else broad_result
 
         try:
-            data = parse_result(response)
+            data = broad_result if use_split else parse_result(response)
             promoted = finalize_result(data, tire_data)
             if promoted:
                 logging.info(f"Tire pass promoted {promoted} worn-tire advisory(ies) the broad pass missed")
             text = format_result(data, photos=photo_count, videos=video_count, driver_name=driver_name)
         except (json.JSONDecodeError, KeyError):
             data = {}
-            text = f"<b>PTI Result:</b>\n{response.text}"
+            text = f"<b>PTI Result:</b>\n{response.text if response else ''}"
 
         return text, data, status_msg
 
