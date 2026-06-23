@@ -54,6 +54,38 @@ def set_active_model(model: str) -> bool:
     return True
 
 
+_GEMINI_KEY_PLACEHOLDER = "your-gemini-key-here"
+
+
+def get_api_keys() -> list[str]:
+    """All usable Gemini API keys, in priority order.
+
+    Reads ``GEMINI_API_KEYS`` (comma-separated) first, falling back to the single
+    ``GEMINI_API_KEY``. Blanks, the placeholder, and duplicates are dropped. Callers
+    (utils.pti_processor._call_gemini_with_retry) try keys in order and fail over to
+    the next one on a 503/429/transient error, so a busy key doesn't sink the call."""
+    raw = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or ""
+    seen: set[str] = set()
+    keys: list[str] = []
+    for k in raw.split(","):
+        k = k.strip()
+        if k and k != _GEMINI_KEY_PLACEHOLDER and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
+
+
+def _resolve_api_key(api_key: str | None) -> str:
+    """The key to use for one call: an explicit `api_key` (from the failover loop),
+    else the first configured key. Raises if none is set."""
+    if api_key:
+        return api_key
+    keys = get_api_keys()
+    if not keys:
+        raise ValueError("No Gemini API key set (GEMINI_API_KEYS or GEMINI_API_KEY)")
+    return keys[0]
+
+
 class VideoTooLongError(Exception):
     def __init__(self, duration: float):
         self.duration = duration
@@ -374,12 +406,8 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
     return saved
 
 
-def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None):
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "your-gemini-key-here":
-        raise ValueError("GEMINI_API_KEY is not set in .env")
-
-    client = genai.Client(api_key=api_key)
+def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None, api_key: str | None = None):
+    client = genai.Client(api_key=_resolve_api_key(api_key))
     n = len(frames)
     use_file_api = n > FILE_API_THRESHOLD
     uploaded_files = []
@@ -430,6 +458,7 @@ def call_gemini_photos(
     history: list[dict] | None = None,
     system_prompt: str | None = None,
     closing: str | None = None,
+    api_key: str | None = None,
 ):
     """images: list of (file_path, mime_type) or (file_path, mime_type, label).
     Label is shown to Gemini after each image — e.g. "Video frame at 1:14" or "Photo 2".
@@ -437,12 +466,9 @@ def call_gemini_photos(
 
     ``system_prompt``/``closing`` override the default full-PTI instructions — used by
     ``call_gemini_tires`` to run a narrow, single-purpose pass over the same images.
+    ``api_key`` selects which key to use (the failover loop passes each in turn).
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "your-gemini-key-here":
-        raise ValueError("GEMINI_API_KEY is not set in .env")
-
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=_resolve_api_key(api_key))
     n = len(images)
     use_file_api = n > FILE_API_THRESHOLD
     uploaded_files = []
@@ -543,7 +569,7 @@ Return ONLY this JSON (no prose):
 }"""
 
 
-def call_gemini_tires(images: list[tuple], history: list[dict] | None = None):
+def call_gemini_tires(images: list[tuple], history: list[dict] | None = None, api_key: str | None = None):
     """Focused second pass: judge ONLY dual-tire tread wear over the same images.
 
     Returns the raw Gemini response (JSON shaped per TIRE_SYSTEM_PROMPT). Callers
@@ -555,6 +581,7 @@ def call_gemini_tires(images: list[tuple], history: list[dict] | None = None):
         history=history,
         system_prompt=TIRE_SYSTEM_PROMPT,
         closing=f"Examine all {n} image(s) above for dual-tire tread wear ONLY and return the tire JSON result.",
+        api_key=api_key,
     )
 
 

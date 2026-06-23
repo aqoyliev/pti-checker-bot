@@ -27,13 +27,7 @@ def _is_service_overload(e: Exception) -> bool:
 
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, VideoTooLongError, MAX_FRAMES
-
-# Retry backoff between Gemini attempts, in seconds. EMPTY = retries disabled: a
-# single attempt, and a transient 5xx/429 fails fast so the driver gets the
-# "overloaded, try again" message immediately instead of waiting out the backoff.
-# To re-enable, restore e.g. (15, 30, 60).
-_GEMINI_RETRY_DELAYS: tuple[int, ...] = ()
+from test_pti import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, get_api_keys, VideoTooLongError, MAX_FRAMES
 
 # Global cap on concurrent PTI analyses (frame extraction + Gemini). Bounds CPU,
 # memory, disk, thread-pool, and Gemini-quota pressure when submissions arrive in
@@ -55,22 +49,30 @@ def _fmt_timestamp(seconds: float) -> str:
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
-    last_exc = None
-    all_delays = (0,) + _GEMINI_RETRY_DELAYS
-    for attempt, delay in enumerate(all_delays):
-        if delay:
-            await asyncio.sleep(delay)
+    """Run a Gemini call with API-key failover.
+
+    Tries each key from get_api_keys() in order; the moment a key returns a service
+    overload (5xx/429) or transient network error, the SAME request is retried on the
+    next key — so one busy/throttled key (Gemini's "high demand" 503) doesn't sink the
+    inspection. A non-transient error (bad request, auth) propagates immediately. With
+    a single key this is one attempt (fail fast). Raises the last error if every key is
+    exhausted; the caller then shows the "overloaded" message.
+    """
+    keys = get_api_keys()
+    if not keys:
+        raise ValueError("No Gemini API key set (GEMINI_API_KEYS or GEMINI_API_KEY)")
+    last_exc: Exception | None = None
+    for i, key in enumerate(keys):
         try:
-            return await asyncio.to_thread(fn, *args, **kwargs)
+            return await asyncio.to_thread(fn, *args, api_key=key, **kwargs)
         except Exception as e:
             if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
                 raise
             last_exc = e
-            if attempt + 1 < len(all_delays):
-                delay_next = all_delays[attempt + 1]
-                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); retrying in {delay_next}s")
+            if i + 1 < len(keys):
+                logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); failing over to next key")
             else:
-                logging.warning(f"Gemini transient error on attempt {attempt + 1} ({type(e).__name__}); no more retries")
+                logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); no keys left")
     raise last_exc
 
 
