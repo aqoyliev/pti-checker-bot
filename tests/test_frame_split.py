@@ -31,23 +31,33 @@ def test_should_split_respects_disable_flag(monkeypatch):
     assert pp._should_split(210, 3) is False
 
 
-# ---------- _split_evenly ----------
+# ---------- _split_strided ----------
 
-def test_split_evenly_exact():
-    chunks = pp._split_evenly(list(range(210)), 3)
+def test_split_strided_exact():
+    chunks = pp._split_strided(list(range(210)), 3)
     assert [len(c) for c in chunks] == [70, 70, 70]
-    # contiguous and lossless
-    assert chunks[0][0] == 0 and chunks[2][-1] == 209
-    assert sum((c for c in chunks), []) == list(range(210))
+    # strided (interleaved), not contiguous: chunk 0 = 0,3,6…
+    assert chunks[0][:3] == [0, 3, 6]
+    assert chunks[1][:3] == [1, 4, 7]
+    # lossless and no overlap — every frame used exactly once
+    assert sorted(sum((c for c in chunks), [])) == list(range(210))
 
 
-def test_split_evenly_remainder_goes_to_front():
-    chunks = pp._split_evenly(list(range(211)), 3)
+def test_split_strided_spans_whole_timeline():
+    # Each chunk must reach both the start and the end of the video (that's the point
+    # of striding — every chunk sees the full walkaround, not one third of it).
+    chunks = pp._split_strided(list(range(210)), 3)
+    for c in chunks:
+        assert c[0] < 3 and c[-1] >= 207
+
+
+def test_split_strided_remainder():
+    chunks = pp._split_strided(list(range(211)), 3)
     assert [len(c) for c in chunks] == [71, 70, 70]
 
 
-def test_split_evenly_more_keys_than_frames():
-    chunks = pp._split_evenly([1, 2], 3)
+def test_split_strided_more_keys_than_frames():
+    chunks = pp._split_strided([1, 2], 3)
     # never more chunks than items, never empty chunks
     assert [len(c) for c in chunks] == [1, 1]
 

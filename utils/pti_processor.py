@@ -62,19 +62,18 @@ def _should_split(num_images: int, num_keys: int) -> bool:
     )
 
 
-def _split_evenly(items: list, n: int) -> list[list]:
-    """Split `items` into at most `n` contiguous, near-equal chunks (210 frames over
-    3 keys -> [70, 70, 70]; 211 -> [71, 70, 70]). Contiguous so each chunk is one
-    stretch of the walkaround rather than scattered frames. Never returns more chunks
-    than items, so empty chunks can't happen."""
+def _split_strided(items: list, n: int) -> list[list]:
+    """Split `items` into at most `n` near-equal chunks, STRIDED not contiguous: chunk
+    i gets items[i::n] (210 frames over 3 keys -> indices 0,3,6… / 1,4,7… / 2,5,8…).
+
+    Strided so each chunk is a thin sample spanning the WHOLE walkaround, not one
+    contiguous third of it. That keeps every chunk seeing a bit of every area (lights,
+    tires, ABS lamp, …), so the merged completeness verdict stays close to a single
+    whole-video pass — contiguous chunks each saw only a third and under-reported areas
+    as un-filmed. Never returns more chunks than items, so empty chunks can't happen.
+    """
     n = max(1, min(n, len(items)))
-    base, extra = divmod(len(items), n)
-    out, start = [], 0
-    for i in range(n):
-        size = base + (1 if i < extra else 0)
-        out.append(items[start:start + size])
-        start += size
-    return out
+    return [items[i::n] for i in range(n)]
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
@@ -129,9 +128,9 @@ async def _run_split_passes(all_images: list, keys: list[str], history: list[dic
     propagates. If EVERY chunk fails we re-raise an overload so the caller shows the
     friendly 'overloaded' message.
     """
-    chunks = _split_evenly(all_images, len(keys))
+    chunks = _split_strided(all_images, len(keys))
     logging.info(
-        f"PTI split: {len(all_images)} image(s) across {len(chunks)} key(s) "
+        f"PTI split: {len(all_images)} image(s) strided across {len(chunks)} key(s) "
         f"({', '.join(str(len(c)) for c in chunks)} per key)"
     )
     results = await asyncio.gather(
