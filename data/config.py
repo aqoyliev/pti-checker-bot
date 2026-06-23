@@ -36,8 +36,8 @@ PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
 # Minimum number of images (photos + video frames) before splitting is worth it.
 # Below this, the whole inspection goes in a single call to the first key (failover
 # still covers it); at or above it — and with >1 key — the frames are split. Keeps
-# short clips as one sharp call instead of tiny per-key chunks. (default: 60)
-PTI_SPLIT_MIN_FRAMES = env.int("PTI_SPLIT_MIN_FRAMES", default=60)
+# short clips as one sharp call instead of tiny per-key chunks. (default: 30)
+PTI_SPLIT_MIN_FRAMES = env.int("PTI_SPLIT_MIN_FRAMES", default=30)
 
 # Compliance enforcement. When False (default), the hourly loop never mutes
 # drivers and sends no overdue reminders to the group or to admins — it only
