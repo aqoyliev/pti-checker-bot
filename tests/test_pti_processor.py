@@ -106,6 +106,17 @@ def test_format_result_fail_with_driver_and_oos_issue():
     assert "📎 Checked: 1 photo" in text
 
 
+def test_format_result_oos_timestamp_unbold_and_tagged():
+    # The leading "(M:SS)" video-moment marker stays plain (outside the bold span);
+    # only the defect text is bold, and an OOS defect gets a trailing "🚫 OOS" tag.
+    data = {"status": "FAIL", "severity": "CRITICAL",
+            "issues": [{"text": "(0:00) ABS malfunction lamp on (49 CFR 393.55)",
+                        "evidence": "x" * 30, "oos": True}]}
+    text = pp.format_result(data)
+    assert "❌ (0:00) <b>ABS malfunction lamp on (49 CFR 393.55)</b> 🚫 OOS" in text
+    assert "<b>(0:00)" not in text                   # timestamp is not inside the bold span
+
+
 def test_format_result_pass_shows_advisory_for_non_oos_issue():
     data = {"status": "PASS", "severity": "MINOR",
             "issues": [{"text": "Mirror cracked", "evidence": "y" * 30, "oos": False}]}

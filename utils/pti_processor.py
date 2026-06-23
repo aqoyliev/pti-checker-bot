@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -138,6 +139,22 @@ _BANNED_EVIDENCE_PHRASES = (
     "mismatched tire",
 )
 _MIN_EVIDENCE_CHARS = 20
+
+
+_TIMESTAMP_RE = re.compile(r"^(\(\d+:\d{2}\))\s*")
+
+
+def _split_timestamp(text: str) -> tuple[str, str]:
+    """Split a leading "(M:SS)" video-moment marker off an issue text.
+
+    Returns ``(timestamp, rest)`` where ``timestamp`` is "(M:SS)" (or "" if the
+    text has none) and ``rest`` is the remaining defect text. Used so the marker
+    can be rendered plain (un-bold) while the defect itself is emphasised.
+    """
+    m = _TIMESTAMP_RE.match(text)
+    if m:
+        return m.group(1), text[m.end():]
+    return "", text
 
 
 def _issue_text(item) -> str:
@@ -421,8 +438,13 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     # One flat inspection list: defects first (❌ out-of-service, then ⚠️ advisory),
     # then the components verified clean (✅). Un-filmed areas are NOT shown here —
     # they go in the "Not visible" line below — keeping the list short and scannable.
+    # The leading "(M:SS)" video-moment marker stays plain; only the defect text is
+    # bold. OOS defects get a trailing "🚫 OOS" tag so the driver sees the severity.
     body: list[str] = []
-    body.extend(f"❌ <b>{escape(t)}</b>" for t in oos_issues)
+    for t in oos_issues:
+        ts, rest = _split_timestamp(t)
+        prefix = f"{escape(ts)} " if ts else ""
+        body.append(f"❌ {prefix}<b>{escape(rest)}</b> 🚫 OOS")
     body.extend(f"⚠️ {escape(t)}" for t in advisory_issues)
     body.extend(f"✅ {escape(area)}" for area in CHECKLIST_AREAS if area.lower() in clean_keys)
     if body:
