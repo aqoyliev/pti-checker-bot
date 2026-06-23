@@ -5,7 +5,30 @@ frames are spread across multiple API keys — the split, and the merge that reb
 single verdict so a fully-filmed truck doesn't FAIL just because no single chunk saw
 all 8 areas.
 """
+from data import config
 from utils import pti_processor as pp
+
+
+# ---------- _should_split (threshold gate) ----------
+
+def test_should_split_below_threshold_is_single_call(monkeypatch):
+    monkeypatch.setattr(config, "PTI_SPLIT_FRAMES", True)
+    monkeypatch.setattr(config, "PTI_SPLIT_MIN_FRAMES", 60)
+    assert pp._should_split(59, 3) is False   # short clip -> first key only
+    assert pp._should_split(60, 3) is True    # at threshold -> split
+    assert pp._should_split(210, 3) is True
+
+
+def test_should_split_needs_more_than_one_key(monkeypatch):
+    monkeypatch.setattr(config, "PTI_SPLIT_FRAMES", True)
+    monkeypatch.setattr(config, "PTI_SPLIT_MIN_FRAMES", 60)
+    assert pp._should_split(210, 1) is False  # one key -> nothing to split across
+
+
+def test_should_split_respects_disable_flag(monkeypatch):
+    monkeypatch.setattr(config, "PTI_SPLIT_FRAMES", False)
+    monkeypatch.setattr(config, "PTI_SPLIT_MIN_FRAMES", 60)
+    assert pp._should_split(210, 3) is False
 
 
 # ---------- _split_evenly ----------

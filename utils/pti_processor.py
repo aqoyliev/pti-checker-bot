@@ -48,6 +48,20 @@ def _fmt_timestamp(seconds: float) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+def _should_split(num_images: int, num_keys: int) -> bool:
+    """Whether to split this inspection's frames across keys instead of one whole call.
+
+    Split only when it's enabled, there's more than one key, and the footage is long
+    enough to be worth chunking (>= PTI_SPLIT_MIN_FRAMES). Short clips stay a single
+    sharp call to the first key; failover still backs them up.
+    """
+    return (
+        config.PTI_SPLIT_FRAMES
+        and num_keys > 1
+        and num_images >= config.PTI_SPLIT_MIN_FRAMES
+    )
+
+
 def _split_evenly(items: list, n: int) -> list[list]:
     """Split `items` into at most `n` contiguous, near-equal chunks (210 frames over
     3 keys -> [70, 70, 70]; 211 -> [71, 70, 70]). Contiguous so each chunk is one
@@ -721,7 +735,7 @@ async def process_mixed_media(
         # overlooks; it runs over ALL frames and never raises, so only a broad-pass
         # failure here propagates to the error handling below.
         keys = get_api_keys()
-        use_split = config.PTI_SPLIT_FRAMES and len(keys) > 1 and len(all_images) >= 2 * len(keys)
+        use_split = _should_split(len(all_images), len(keys))
         broad_coro = (
             _run_split_passes(all_images, keys, history) if use_split
             else _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
