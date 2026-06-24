@@ -26,12 +26,13 @@ GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 # (see _reconcile_vehicles).
 TRUCK_CHANGE_CONFIRMATION = True
 
-# When True, ANY group member (not just registered drivers) can run a PTI via
-# /check (#6). Note: the *automatic* standalone-video inspection is intentionally
-# restricted to registered drivers regardless of this flag (#4) — see
-# handle_group_video. Non-registered /check submitters are logged but the
-# compliance/reminder loops only ever track registered drivers.
-ALLOW_ALL_MEMBERS = True
+# When True, /check accepts media from ANYONE and attributes the PTI to whoever
+# sent it. When False (current), /check only runs on a registered driver's media
+# and otherwise replies that the video isn't from a registered driver. Either
+# way, anyone may *type* /check — the flag only governs whose media is accepted.
+# The *automatic* standalone-video inspection is always restricted to registered
+# drivers regardless of this flag (#4) — see handle_group_video.
+ALLOW_ALL_MEMBERS = False
 
 # When True, PTI runs are persisted via log_pti and the dedup cache is active.
 # Required for the reminder engine (#8/#9) to know who submitted when, and for
@@ -356,7 +357,12 @@ async def handle_check_group(message: types.Message):
         # Testing: attribute the PTI to whoever sent the replied media.
         driver_uid = direct_uid or forward_uid
     if driver_uid is None:
-        await message.answer("That message isn't from a registered driver.")
+        await message.answer(
+            "⚠️ This video isn't from a registered driver, so it can't be checked.\n"
+            "Reply <code>/check</code> to a <b>registered driver's</b> video, or add the "
+            "driver first with <code>/adddriver Driver Name</code>.",
+            parse_mode="HTML",
+        )
         return
 
     drivers = await get_drivers(message.chat.id)
@@ -495,6 +501,29 @@ async def handle_group_photo(message: types.Message):
 _AUTO_VIDEO_KINDS = ("video", "video_doc")
 
 
+def _is_forwarded_from_other(message: types.Message, sender_uid: int) -> bool:
+    """True if this message was forwarded from someone other than its sender.
+
+    A PTI must be the driver's own fresh recording, so a forwarded clip — e.g. a
+    driver forwarding another person's video — should be ignored by the
+    auto-inspector. A driver forwarding their *own* earlier message still counts
+    as their video and is allowed. When the original sender hid their account or
+    it was forwarded from a channel/chat, the origin can't be attributed to the
+    driver, so it's treated as "from someone else".
+    """
+    forwarded = bool(
+        message.forward_date
+        or message.forward_from
+        or message.forward_from_chat
+        or message.forward_sender_name
+    )
+    if not forwarded:
+        return False
+    if message.forward_from is not None:
+        return message.forward_from.id != sender_uid
+    return True
+
+
 @dp.message_handler(
     content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT],
     chat_type=GROUP_TYPES,
@@ -515,6 +544,12 @@ async def handle_group_video(message: types.Message):
         return
     uid = message.from_user.id if message.from_user else None
     if not uid:
+        return
+    # A forwarded video isn't the driver's own fresh recording — e.g. a driver
+    # forwarding someone else's clip. Don't auto-inspect it and don't reply; stay
+    # silent (buffer only). A driver forwarding their *own* earlier message still
+    # counts. TEST groups keep the old behavior and inspect forwards too.
+    if message.chat.id not in TEST_GROUP_IDS and _is_forwarded_from_other(message, uid):
         return
     # #4: the bot only AUTO-checks a registered driver's video. Anyone else must
     # use /check explicitly (#6). This holds even when ALLOW_ALL_MEMBERS is on —
