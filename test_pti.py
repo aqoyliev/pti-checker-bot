@@ -557,6 +557,14 @@ merely shallow) — while the ADJACENT dual in the SAME frame still shows clear 
 the neighbouring dual is what makes it certain. Do NOT \
 report borderline cases ("a bit smoother", "slightly more worn"); only tires that are plainly worn out.
 
+REQUIRED VIEW — judge a tire ONLY from a CLOSE, roughly HEAD-ON shot. Flag a worn dual ONLY when that tire is \
+shown in a CLOSE-UP where its tread FACE fills a large part of the frame and you can see the FULL WIDTH of its \
+center tread band clearly and in focus — the kind of frame a driver gets when they deliberately film a problem \
+tire up close. If the tire is small or distant in the frame, seen side-on along the length of the trailer, or \
+the inner dual is only a foreshortened edge / a shadow tucked behind the outer dual, you CANNOT judge its \
+center tread — do NOT flag it (a worn-looking edge at a distance is viewing angle, not proof of wear). A \
+genuinely worn tire that matters WILL be shown up close; never infer wear from a far, oblique walkaround frame.
+
 DO NOT report (these are NOT defects):
  - the outer SHOULDER being smoother than the center (normal tire anatomy),
  - mixed tread PATTERNS (two different tire models on one axle is normal),

@@ -21,14 +21,14 @@ PTI_MAX_CONCURRENCY = env.int("PTI_MAX_CONCURRENCY", default=3)
 # out-of-service (bald/tread-gone) tire it finds into the result. The broad PTI
 # pass juggles 8 areas over 150+ frames and can overlook a single worn tire
 # (attention dilution); a focused pass catches it.
-# DISABLED by default: in practice the focused pass over-flags INNER duals —
-# filmed from the side, an inner dual is foreshortened/shadowed behind the outer
-# and reads as "worn smooth" even when fine. This produced repeated false
-# positives on good tires that no prompt rule could separate from real wear
-# (the model perceives the artifact as genuine), so the broad pass alone (which
-# still catches clearly worn/damaged tires) is the better tradeoff for trust.
-# Set True to re-enable the backstop if you accept the inner-dual false positives.
-PTI_TIRE_PASS = env.bool("PTI_TIRE_PASS", default=False)
+# The focused pass used to over-flag INNER duals seen side-on in wide walkaround
+# frames (foreshortened/shadowed behind the outer dual, reading as falsely bald).
+# Mitigated by a CLOSE-UP / head-on requirement in test_pti.TIRE_SYSTEM_PROMPT:
+# it now only flags a worn dual whose center tread face is clearly visible in a
+# close, roughly head-on shot (as when a driver films a problem tire up close) —
+# the real worn tires show up that way, the false positives were distant/oblique.
+# Set False to skip it if Gemini quota is tight.
+PTI_TIRE_PASS = env.bool("PTI_TIRE_PASS", default=True)
 
 # Split a single inspection's frames across multiple Gemini API keys and analyze
 # the chunks in parallel (e.g. 210 frames over 3 keys = 70 each), then merge the
