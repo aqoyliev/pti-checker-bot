@@ -27,13 +27,18 @@ from aiogram.utils.exceptions import MessageNotModified
 from data.config import ADMINS
 from loader import bot, dp
 from utils.db import (
+    add_admin,
     get_active_group_ids,
+    get_admin,
+    get_admins,
     get_all_groups,
     get_drivers,
     get_group,
     get_recent_ptis,
+    remove_admin,
     remove_driver,
     set_group_active,
+    set_group_notifications,
     set_group_unit,
     set_setting,
 )
@@ -52,15 +57,30 @@ PRIVATE = types.ChatType.PRIVATE
 class AdminSG(StatesGroup):
     set_unit = State()
     broadcast = State()
+    add_admin_id = State()
 
 
-def _is_admin(user_id: int) -> bool:
-    return str(user_id) in _ADMIN_IDS
+async def _admin_row(user_id: int) -> dict | None:
+    """Resolve an admin. env ADMINS are always treated as super-admins (and are
+    also seeded into the admins table at startup); everyone else is looked up in
+    the DB-backed admins table (#10)."""
+    if str(user_id) in _ADMIN_IDS:
+        return {"user_id": user_id, "is_super_admin": True}
+    return await get_admin(user_id)
+
+
+async def _is_admin(user_id: int) -> bool:
+    return await _admin_row(user_id) is not None
+
+
+async def _is_super(user_id: int) -> bool:
+    row = await _admin_row(user_id)
+    return bool(row and row.get("is_super_admin"))
 
 
 # ---------- keyboards ----------
 
-def _menu_kb() -> InlineKeyboardMarkup:
+def _menu_kb(is_super: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📋 Groups", callback_data="adm:groups:0"),
@@ -68,6 +88,8 @@ def _menu_kb() -> InlineKeyboardMarkup:
     )
     kb.add(InlineKeyboardButton("📣 Broadcast", callback_data="adm:bcast"))
     kb.add(InlineKeyboardButton("🤖 AI Model", callback_data="adm:model"))
+    if is_super:
+        kb.add(InlineKeyboardButton("🛡 Admins", callback_data="adm:admins"))
     kb.add(InlineKeyboardButton("✖️ Close", callback_data="adm:close"))
     return kb
 
@@ -152,6 +174,7 @@ async def _render_group(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
     title = escape(await _chat_title(group_id))
     drivers = await get_drivers(group_id)
     active = g.get("is_active", True)
+    notif_off = g.get("notifications_disabled")
 
     unit = escape(g.get("unit_number") or "—")
     truck_plate = g.get("truck_plate")
@@ -186,7 +209,8 @@ async def _render_group(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"Unit: <b>{unit_line}</b>\n"
         f"Trailer: {trailer_line}\n"
         f"Drivers: {driver_line}\n"
-        f"Last PTI: {last_line}"
+        f"Last PTI: {last_line}\n"
+        f"Notifications: {'🔕 disabled' if notif_off else '🔔 on'}"
     )
 
     kb = InlineKeyboardMarkup(row_width=2)
@@ -195,6 +219,10 @@ async def _render_group(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(f"👤 Drivers ({len(drivers)})", callback_data=f"adm:dr:{group_id}"),
     )
     kb.add(InlineKeyboardButton("📊 PTI log", callback_data=f"adm:plog:{group_id}"))
+    kb.add(InlineKeyboardButton(
+        "🔔 Enable notifications" if notif_off else "🔕 Disable notifications",
+        callback_data=f"adm:notif:{group_id}",
+    ))
     if active:
         kb.add(InlineKeyboardButton("🚫 Deactivate", callback_data=f"adm:tog:{group_id}"))
     else:
@@ -276,6 +304,29 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
     return text, _back_kb("adm:menu", "« Menu")
 
 
+async def _render_admins() -> tuple[str, InlineKeyboardMarkup]:
+    admins = await get_admins()
+    kb = InlineKeyboardMarkup(row_width=1)
+    lines = ["<b>🛡 Admins</b>\n"]
+    if admins:
+        for a in admins:
+            tag = "★ super-admin" if a.get("is_super_admin") else "admin"
+            lines.append(f"• <code>{a['user_id']}</code> — {tag}")
+            if not a.get("is_super_admin"):
+                kb.add(InlineKeyboardButton(
+                    f"❌ Remove {a['user_id']}", callback_data=f"adm:rmadmin:{a['user_id']}"
+                ))
+    else:
+        lines.append("No admins yet.")
+    lines.append(
+        "\nRegular admins can open this panel and disable a group's notifications. "
+        "Only super-admins manage admins."
+    )
+    kb.add(InlineKeyboardButton("➕ Add admin", callback_data="adm:addadmin"))
+    kb.add(InlineKeyboardButton("« Menu", callback_data="adm:menu"))
+    return "\n".join(lines), kb
+
+
 # Short, admin-facing hint shown next to each model id. Keep the actual id as the
 # stored/selected value; these are just to remind which is which at a glance.
 _MODEL_HINTS = {
@@ -310,27 +361,27 @@ async def _render_model() -> tuple[str, InlineKeyboardMarkup]:
 
 @dp.message_handler(commands=["admin"], chat_type=PRIVATE, state="*")
 async def cmd_admin(message: types.Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         return  # stay silent so the panel isn't discoverable by non-admins
     await state.finish()
-    await message.answer(MENU_TEXT, reply_markup=_menu_kb())
+    await message.answer(MENU_TEXT, reply_markup=_menu_kb(await _is_super(message.from_user.id)))
 
 
 @dp.message_handler(commands=["cancel"], chat_type=PRIVATE, state="*")
 async def cmd_cancel(message: types.Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         return
     if await state.get_state() is None:
         return
     await state.finish()
-    await message.answer("Cancelled.", reply_markup=_menu_kb())
+    await message.answer("Cancelled.", reply_markup=_menu_kb(await _is_super(message.from_user.id)))
 
 
 # ---------- callback router ----------
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("adm:"), state="*")
 async def admin_cb(query: types.CallbackQuery, state: FSMContext):
-    if not _is_admin(query.from_user.id):
+    if not await _is_admin(query.from_user.id):
         await query.answer("Not authorized.", show_alert=True)
         return
 
@@ -342,7 +393,38 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
         await state.finish()
 
     if action == "menu":
-        await _edit(query, MENU_TEXT, _menu_kb())
+        await _edit(query, MENU_TEXT, _menu_kb(await _is_super(query.from_user.id)))
+        return
+
+    if action == "notif":
+        gid = int(parts[2])
+        g = await get_group(gid)
+        new_disabled = not (g.get("notifications_disabled") if g else False)
+        await set_group_notifications(gid, new_disabled)
+        await query.answer("Notifications disabled." if new_disabled else "Notifications enabled.")
+        text, kb = await _render_group(gid)
+        await _edit(query, text, kb)
+        return
+
+    if action in ("admins", "addadmin", "rmadmin"):
+        if not await _is_super(query.from_user.id):
+            await query.answer("Super-admins only.", show_alert=True)
+            return
+        if action == "rmadmin":
+            await remove_admin(int(parts[2]))
+            await query.answer("Admin removed.")
+        elif action == "addadmin":
+            await AdminSG.add_admin_id.set()
+            await _edit(
+                query,
+                "Send the numeric Telegram user id to add as a regular admin.\n\n"
+                "Tip: forward a message from them to @userinfobot to get their id. "
+                "/cancel to abort.",
+                _back_kb("adm:admins", "« Cancel"),
+            )
+            return
+        text, kb = await _render_admins()
+        await _edit(query, text, kb)
         return
 
     if action == "close":
@@ -464,7 +546,7 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
 
 @dp.message_handler(state=AdminSG.set_unit, chat_type=PRIVATE)
 async def admin_set_unit_input(message: types.Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         return
     unit = (message.text or "").strip()
     data = await state.get_data()
@@ -481,7 +563,7 @@ async def admin_set_unit_input(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=AdminSG.broadcast, chat_type=PRIVATE, content_types=ContentType.TEXT)
 async def admin_broadcast_input(message: types.Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         return
     text = (message.text or "").strip()
     if not text:
@@ -496,3 +578,21 @@ async def admin_broadcast_input(message: types.Message, state: FSMContext):
         f"<b>Preview</b>\n\n{escape(text)}\n\nSend to <b>{len(targets)}</b> active groups?",
         reply_markup=kb,
     )
+
+
+@dp.message_handler(state=AdminSG.add_admin_id, chat_type=PRIVATE)
+async def admin_add_admin_input(message: types.Message, state: FSMContext):
+    if not await _is_super(message.from_user.id):
+        await state.finish()
+        return
+    raw = (message.text or "").strip()
+    await state.finish()
+    try:
+        uid = int(raw)
+    except ValueError:
+        await message.answer("That's not a numeric user id. Cancelled.", reply_markup=_menu_kb(True))
+        return
+    await add_admin(uid, is_super_admin=False)
+    await message.answer(f"✅ Added <code>{escape(str(uid))}</code> as a regular admin.")
+    text, kb = await _render_admins()
+    await message.answer(text, reply_markup=kb)
