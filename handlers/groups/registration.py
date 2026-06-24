@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from html import escape
 
 from aiogram import types
@@ -10,7 +9,6 @@ from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
 )
-from utils.group_info_parser import extract_unit_and_names
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
@@ -36,44 +34,10 @@ async def on_bot_added(message: types.Message):
 
     await upsert_group(message.chat.id)
 
+    # #1/#2: the bot does NOT read the group's name or bio. Setup is fully manual
+    # — anyone runs /adddriver and /setunit.
     await message.answer(INTRO_MESSAGE, parse_mode="HTML")
-
-    try:
-        chat = await bot.get_chat(message.chat.id)
-        title = chat.title or message.chat.title or ""
-        description = chat.description or ""
-    except Exception:
-        logging.exception("Failed to fetch chat for auto-extract")
-        title = message.chat.title or ""
-        description = ""
-
-    unit, drivers = extract_unit_and_names(title, description)
-
-    if not unit and not drivers:
-        await message.answer(MANUAL_SETUP_MESSAGE, parse_mode="HTML")
-        return
-
-    lines = ["I read this group's name and bio:"]
-    if unit:
-        await set_group_unit(message.chat.id, unit)
-        lines.append(f"🚛 Unit <b>{escape(unit)}</b> — saved.")
-        lines.append("   <i>To change it, use <code>/setunit &lt;unit_number&gt;</code>.</i>")
-    else:
-        lines.append("🚛 Unit — not found. Set it with <code>/setunit &lt;unit_number&gt;</code>.")
-
-    if drivers:
-        names_html = " / ".join(f"<b>{escape(d)}</b>" for d in drivers)
-        lines.append(f"👤 Detected driver(s): {names_html}")
-        lines.append("")
-        lines.append(
-            "To register each driver, have them send any message in this group, then "
-            "anyone reply with:\n<code>/adddriver Driver Name</code>"
-        )
-    else:
-        lines.append("👤 Drivers — not detected. Have each driver send a message, then reply with "
-                     "<code>/adddriver Driver Name</code>.")
-
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer(MANUAL_SETUP_MESSAGE, parse_mode="HTML")
 
 
 @dp.message_handler(commands=["adddriver"], chat_type=GROUP_TYPES)
@@ -169,11 +133,7 @@ async def cmd_set_unit(message: types.Message):
 
 @dp.message_handler(commands=["removedriver"], chat_type=GROUP_TYPES)
 async def cmd_remove_driver(message: types.Message):
-    admin = await message.chat.get_member(message.from_user.id)
-    if admin.status not in ("administrator", "creator"):
-        await message.reply("Only group administrators can remove drivers.")
-        return
-
+    # #3/#6: anyone can add or remove drivers — no admin check, no confirmation.
     reply = message.reply_to_message
     if not reply or not reply.from_user:
         drivers = await get_drivers(message.chat.id)
