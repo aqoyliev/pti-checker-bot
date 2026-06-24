@@ -38,6 +38,11 @@ ALLOW_ALL_MEMBERS = True
 # quotas/history. (Vehicle reconciliation runs regardless.)
 SAVE_PTI_LOGS = True
 
+# Hardcoded TEST groups: the bot behaves "as before" in these — it auto-inspects
+# EVERYONE's video (not just registered drivers) and skips the recycled-video
+# dedup so the same clip can be re-sent while testing.
+TEST_GROUP_IDS = {-1004376739828, -1003755811659}
+
 
 async def _group_ready(message: types.Message) -> bool:
     group = await get_group(message.chat.id)
@@ -403,7 +408,7 @@ async def _run_pti(
 
     signature = _signature_from_items(items)
     content_sig = _content_signature_from_items(items)
-    if SAVE_PTI_LOGS and (signature or content_sig):
+    if SAVE_PTI_LOGS and message.chat.id not in TEST_GROUP_IDS and (signature or content_sig):
         # Dedup by (file_size, duration) — an old video re-uploaded keeps the same
         # size+length even though Telegram assigns it a fresh file id. A match is
         # rejected here BEFORE any inspection runs, so a recycled PTI never counts
@@ -512,8 +517,9 @@ async def handle_group_video(message: types.Message):
     if not uid:
         return
     # #4: the bot only AUTO-checks a registered driver's video. Anyone else must
-    # use /check explicitly (#6). This holds even when ALLOW_ALL_MEMBERS is on.
-    if not await is_registered_driver(message.chat.id, uid):
+    # use /check explicitly (#6). This holds even when ALLOW_ALL_MEMBERS is on —
+    # except in the hardcoded TEST groups, where any member's video auto-checks.
+    if message.chat.id not in TEST_GROUP_IDS and not await is_registered_driver(message.chat.id, uid):
         return
 
     drivers = await get_drivers(message.chat.id)
