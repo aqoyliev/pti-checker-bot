@@ -84,6 +84,27 @@ async def init_db():
                 value      TEXT NOT NULL,
                 updated_at TIMESTAMP DEFAULT NOW()
             );
+
+            -- Bot admins (separate from group admins). is_super_admin can manage
+            -- other admins; every admin can open the panel and disable a group's
+            -- notifications.
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id        BIGINT PRIMARY KEY,
+                is_super_admin BOOLEAN DEFAULT FALSE,
+                added_at       TIMESTAMP DEFAULT NOW()
+            );
+
+            -- Per-group kill-switch for all bot reminders (#10). When TRUE the
+            -- reminder engine skips the group entirely.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS notifications_disabled BOOLEAN DEFAULT FALSE;
+
+            -- Reminder-engine bookkeeping (utils/reminders.py).
+            -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
+            -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
+            -- last_escalation_at: when the last every-3-hours escalation notice went out (#9).
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
         """)
 
 
@@ -109,6 +130,48 @@ async def set_setting(key: str, value: str) -> None:
            ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
         key, value,
     )
+
+
+# ---------- admins ----------
+
+async def seed_super_admins(user_ids: list[int]) -> None:
+    """Ensure each id is an admin with is_super_admin=TRUE (run at startup from
+    config.ADMINS). Never demotes — promoting an existing row to super is safe."""
+    for uid in user_ids:
+        await _pool_check().execute(
+            """INSERT INTO admins (user_id, is_super_admin) VALUES ($1, TRUE)
+               ON CONFLICT (user_id) DO UPDATE SET is_super_admin = TRUE""",
+            int(uid),
+        )
+
+
+async def get_admin(user_id: int) -> dict | None:
+    row = await _pool_check().fetchrow(
+        "SELECT * FROM admins WHERE user_id = $1", user_id
+    )
+    return dict(row) if row else None
+
+
+async def get_admins() -> list[dict]:
+    rows = await _pool_check().fetch(
+        "SELECT * FROM admins ORDER BY is_super_admin DESC, added_at ASC"
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_admin(user_id: int, is_super_admin: bool = False) -> None:
+    await _pool_check().execute(
+        """INSERT INTO admins (user_id, is_super_admin) VALUES ($1, $2)
+           ON CONFLICT (user_id) DO UPDATE SET is_super_admin = $2""",
+        int(user_id), is_super_admin,
+    )
+
+
+async def remove_admin(user_id: int) -> bool:
+    res = await _pool_check().execute(
+        "DELETE FROM admins WHERE user_id = $1 AND is_super_admin = FALSE", int(user_id)
+    )
+    return res.endswith("1")
 
 
 # ---------- groups ----------
@@ -395,6 +458,70 @@ async def get_active_group_ids() -> list[int]:
 async def set_group_active(group_id: int, active: bool):
     await _pool_check().execute(
         "UPDATE groups SET is_active = $1 WHERE group_id = $2", active, group_id,
+    )
+
+
+# ---------- reminders / notifications (#8/#9/#10) ----------
+
+async def set_group_notifications(group_id: int, disabled: bool) -> None:
+    """Toggle the per-group reminder kill-switch (#10)."""
+    await _pool_check().execute(
+        "UPDATE groups SET notifications_disabled = $1 WHERE group_id = $2",
+        disabled, group_id,
+    )
+
+
+async def get_groups_for_reminders() -> list[dict]:
+    """Active, fully-configured groups whose notifications are NOT disabled —
+    the candidate set for the reminder engine."""
+    rows = await _pool_check().fetch(
+        """SELECT * FROM groups
+           WHERE setup_complete = TRUE
+             AND COALESCE(is_active, TRUE) = TRUE
+             AND COALESCE(notifications_disabled, FALSE) = FALSE"""
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_last_pti_for_group(group_id: int) -> dict | None:
+    """Most recent PTI in the group, across all its drivers (for overdue checks)."""
+    row = await _pool_check().fetchrow(
+        """SELECT * FROM pti_log WHERE group_id = $1
+           ORDER BY submitted_at DESC LIMIT 1""",
+        group_id,
+    )
+    return dict(row) if row else None
+
+
+async def mark_weekly_reminder(group_id: int, on_date) -> None:
+    await _pool_check().execute(
+        "UPDATE groups SET last_weekly_reminder_on = $1 WHERE group_id = $2",
+        on_date, group_id,
+    )
+
+
+async def mark_overdue_reminded(group_id: int, at) -> None:
+    await _pool_check().execute(
+        "UPDATE groups SET overdue_reminded_at = $1 WHERE group_id = $2",
+        at, group_id,
+    )
+
+
+async def mark_escalation_reminded(group_id: int, at) -> None:
+    await _pool_check().execute(
+        "UPDATE groups SET last_escalation_at = $1 WHERE group_id = $2",
+        at, group_id,
+    )
+
+
+async def reset_group_reminders(group_id: int) -> None:
+    """Clear overdue/escalation state — called when a fresh PTI lands so the
+    every-3-hours nags stop immediately instead of waiting for the next pass."""
+    await _pool_check().execute(
+        """UPDATE groups
+           SET overdue_reminded_at = NULL, last_escalation_at = NULL
+           WHERE group_id = $1""",
+        group_id,
     )
 
 
