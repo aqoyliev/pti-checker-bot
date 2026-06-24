@@ -137,6 +137,7 @@ Leniency rules — BE CONSERVATIVE. The default is PASS. It is FAR worse to fals
       **The outer SHOULDER of a tire — the curved edge where the tread meets the sidewall — is naturally smoother and less aggressively treaded than the center tread by design.** That is normal tire anatomy on every commercial tire and NEVER a defect. Do NOT flag "shoulder is smooth", "shoulder bald", or "outer edge worn" — those are not real issues. Comparing the center of a tire to its own shoulder is invalid because the two areas are SUPPOSED to look different.
       You MAY flag wear when the CENTER tread (not the shoulder) of ONE dual tire is clearly smoother or more worn than the ADJACENT dual visible in the same frame — whether the worn area is a localized bald patch OR the entire center tread face is smooth/featureless (grooves absent or barely visible). A tire whose whole center tread is smooth/featureless while its adjacent dual still shows clear grooves is an obvious defect and MUST be flagged. Your issue text MUST include both (a) which dual (inner vs outer) and (b) the contrast specifically against the OTHER dual visible in the same frame. Same-tire comparisons (center vs shoulder, left vs right side of one tire) do NOT count as evidence. When in doubt on borderline cases, PASS.
       **Mixed tread patterns are NOT a defect.** Trucks often run two different tire models on the same dual axle (e.g., a block-pattern tread next to a lug-pattern tread) because one tire was replaced and the other wasn't. Different brand, different tread design, different wear age — all NORMAL. Do NOT flag tires just because the two duals look different from each other. The contrast that matters for wear is "smooth/featureless tread on one vs visible grooves on the other", NOT "different shaped tread blocks".
+      **Rib-pattern trailer/steer tires are SHALLOW by design — do NOT read a normal rib tire as "worn smooth."** Highway trailer and steer tires use a shallow circumferential RIB tread (a few straight grooves running around the tire) instead of the deep, blocky lugs of a drive tire. A trailer tire showing several continuous circumferential grooves — even if the ribs look low or the face looks fairly smooth between them — is a NORMAL rib tire, NOT worn out. Only call a tire worn-smooth when those circumferential grooves are actually GONE (the tread face is a flat, groove-free band), not merely shallow. **AND the smooth tire must stand out against a grooved neighbour:** if EVERY visible trailer tire looks equally smooth/shallow, that is a uniform rib-pattern set, NOT evidence of wear — there is no grooved adjacent dual to contrast against, so do NOT flag. Never flag "all tires worn"; wear is ONE dual missing its grooves while an adjacent dual in the same frame still shows clear grooves.
       Valid example: "(1:15) Inner dual center tread smooth/worn vs grooved outer dual (49 CFR 393.75)".
       INVALID — do NOT produce these: "Drive tires show severe visible wear", "Tire heavily worn", "Tread is low", "Outer shoulder is smooth/bald", "Shoulder bald".
     - "Cracked sidewall" requires a visible split in the rubber where you can plainly see a gap or separation in the surface. Weathered-looking rubber, normal sidewall lettering/DOT codes, brand markings, mold lines, shadows, dirt, mud, or texture variation are NOT cracks. If you have to squint, it is not a crack.
@@ -406,17 +407,28 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
     return saved
 
 
+def _format_timestamp(seconds: float) -> str:
+    """Seconds → ``M:SS`` for the per-frame labels Gemini reads (e.g. 65.0 → "1:05")."""
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
 def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None, api_key: str | None = None):
     client = genai.Client(api_key=_resolve_api_key(api_key))
     n = len(frames)
     use_file_api = n > FILE_API_THRESHOLD
     uploaded_files = []
 
+    # Label each frame with its real video position ("Video frame at M:SS") so the
+    # model can cite an accurate timestamp. Without this it can't know the position
+    # and may grab a burned-in clock overlay instead.
+    labels = [f"Video frame at {_format_timestamp(ts)}" for ts, _ in frames]
+
     try:
         parts = []
         if use_file_api:
             logging.info(f"Uploading {n} frames via File API (parallel)...")
-            frame_tuples = [("image/jpeg", path, f"Frame {i + 1} of {n}") for i, (_, path) in enumerate(frames)]
+            frame_tuples = [("image/jpeg", path, labels[i]) for i, (_, path) in enumerate(frames)]
             with ThreadPoolExecutor(max_workers=8) as pool:
                 futs = {pool.submit(_upload_one, client, path, mime, label): idx
                         for idx, (mime, path, label) in enumerate(frame_tuples)}
@@ -426,12 +438,12 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
             uploaded_files = results
             for i, uf in enumerate(uploaded_files):
                 parts.append(genai_types.Part.from_uri(file_uri=uf.uri, mime_type="image/jpeg"))
-                parts.append(f"Frame {i + 1} of {n}")
+                parts.append(labels[i])
         else:
             for i, (_, path) in enumerate(frames):
                 with open(path, "rb") as f:
                     parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
-                parts.append(f"Frame {i + 1} of {n}")
+                parts.append(labels[i])
 
         history_text = _build_history_text(history or [])
         if history_text:
@@ -538,14 +550,19 @@ Examine EVERY frame. The same tires appear in many frames from slightly differen
 that is clear in even ONE good frame is a real defect — do not let it average out across the others.
 
 Report a tire ONLY when it is CLEARLY worn out: the CENTER tread (NOT the shoulder) of ONE dual is \
-smooth/featureless/bald — grooves worn away or barely visible — while the ADJACENT dual in the SAME frame \
-still shows clear grooves. That contrast against the neighbouring dual is what makes it certain. Do NOT \
+smooth/featureless/bald — the circumferential grooves worn completely AWAY (a flat, groove-free band, NOT \
+merely shallow) — while the ADJACENT dual in the SAME frame still shows clear grooves. That contrast against \
+the neighbouring dual is what makes it certain. Do NOT \
 report borderline cases ("a bit smoother", "slightly more worn"); only tires that are plainly worn out.
 
 DO NOT report (these are NOT defects):
  - the outer SHOULDER being smoother than the center (normal tire anatomy),
  - mixed tread PATTERNS (two different tire models on one axle is normal),
- - same-tire comparisons (center vs shoulder, or left vs right of one tire).
+ - same-tire comparisons (center vs shoulder, or left vs right of one tire),
+ - normal SHALLOW RIB-pattern trailer/steer tires: if you can still see continuous circumferential grooves \
+the tire is NOT worn smooth, even when the ribs look low — only a flat, groove-free band counts,
+ - uniformly smooth-looking tires with no grooved neighbour to contrast against (a uniform rib-pattern set \
+is normal, not wear). Never report "all tires worn".
 Never quote a tread-depth number or "wear bars". Be conservative: when in doubt, do not report.
 
 For each defect, write "evidence" as a CONCRETE visual observation — e.g. "center tread of the inner \
