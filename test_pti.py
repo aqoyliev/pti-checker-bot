@@ -407,17 +407,28 @@ def extract_frames(video_path: str, interval_seconds: float = PTI_FRAME_INTERVAL
     return saved
 
 
+def _format_timestamp(seconds: float) -> str:
+    """Seconds → ``M:SS`` for the per-frame labels Gemini reads (e.g. 65.0 → "1:05")."""
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
 def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None, api_key: str | None = None):
     client = genai.Client(api_key=_resolve_api_key(api_key))
     n = len(frames)
     use_file_api = n > FILE_API_THRESHOLD
     uploaded_files = []
 
+    # Label each frame with its real video position ("Video frame at M:SS") so the
+    # model can cite an accurate timestamp. Without this it can't know the position
+    # and may grab a burned-in clock overlay instead.
+    labels = [f"Video frame at {_format_timestamp(ts)}" for ts, _ in frames]
+
     try:
         parts = []
         if use_file_api:
             logging.info(f"Uploading {n} frames via File API (parallel)...")
-            frame_tuples = [("image/jpeg", path, f"Frame {i + 1} of {n}") for i, (_, path) in enumerate(frames)]
+            frame_tuples = [("image/jpeg", path, labels[i]) for i, (_, path) in enumerate(frames)]
             with ThreadPoolExecutor(max_workers=8) as pool:
                 futs = {pool.submit(_upload_one, client, path, mime, label): idx
                         for idx, (mime, path, label) in enumerate(frame_tuples)}
@@ -427,12 +438,12 @@ def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = No
             uploaded_files = results
             for i, uf in enumerate(uploaded_files):
                 parts.append(genai_types.Part.from_uri(file_uri=uf.uri, mime_type="image/jpeg"))
-                parts.append(f"Frame {i + 1} of {n}")
+                parts.append(labels[i])
         else:
             for i, (_, path) in enumerate(frames):
                 with open(path, "rb") as f:
                     parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
-                parts.append(f"Frame {i + 1} of {n}")
+                parts.append(labels[i])
 
         history_text = _build_history_text(history or [])
         if history_text:
