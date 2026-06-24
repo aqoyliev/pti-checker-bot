@@ -34,9 +34,10 @@ REJECT_THRESHOLD = 3
 REMINDER_INTERVAL = timedelta(minutes=10)
 REMINDER_MAX = 3
 # When False, proposal vote reminders ("still need votes") are never sent.
-# The vehicle-change confirmation flow is disabled for testing, so these
-# nags are just noise. Flip back to True to restore reminders.
-PROPOSAL_REMINDERS_ENABLED = False
+# The truck-change confirmation flow is active (#5), so reminders are ON — a
+# stalled vote gets nudged and eventually expires instead of holding a PTI
+# forever. Set False to silence the nags.
+PROPOSAL_REMINDERS_ENABLED = True
 SETUP_NAG_INTERVAL = timedelta(minutes=10)
 SETUP_NAG_MAX = 3
 

@@ -13,6 +13,7 @@ from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
     set_truck_plate, set_trailer, set_truck_unit, find_open_vehicle_change,
+    reset_group_reminders,
 )
 from utils.pti_processor import process_mixed_media
 from utils.enforcement import handle_pti_passed
@@ -20,25 +21,22 @@ from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
-# TESTING TOGGLE: when False, a detected truck change is adopted silently
-# instead of holding the PTI for a 3-member vote. Flip back to True to
-# re-enable the confirmation flow.
-TRUCK_CHANGE_CONFIRMATION = False
+# When True, a detected TRUCK change holds the PTI for a 3-member vote before the
+# unit is updated (#5). A TRAILER change never votes — it is applied immediately
+# (see _reconcile_vehicles).
+TRUCK_CHANGE_CONFIRMATION = True
 
-# TESTING TOGGLE: when True, ANY group member (not just registered drivers) can
-# run a PTI — both via /check and by sending a standalone video. Used while a
-# group is being used to test the bot. Flip back to False to restore the
-# registered-drivers-only rule. Non-registered submitters are still logged, but
-# the compliance loop only ever tracks/mutes registered drivers, so they aren't
-# subject to enforcement.
+# When True, ANY group member (not just registered drivers) can run a PTI via
+# /check (#6). Note: the *automatic* standalone-video inspection is intentionally
+# restricted to registered drivers regardless of this flag (#4) — see
+# handle_group_video. Non-registered /check submitters are logged but the
+# compliance/reminder loops only ever track registered drivers.
 ALLOW_ALL_MEMBERS = True
 
-# TESTING TOGGLE: when False, PTI runs are NOT persisted — no row is written via
-# log_pti and the dedup-cache lookup is skipped. Used while testing so repeat
-# runs on the same media aren't blocked ("already attributed to …") and test
-# runs don't count toward quotas or pollute history. Flip back to True for
-# production. Vehicle reconciliation still runs so truck/trailer detection works.
-SAVE_PTI_LOGS = False
+# When True, PTI runs are persisted via log_pti and the dedup cache is active.
+# Required for the reminder engine (#8/#9) to know who submitted when, and for
+# quotas/history. (Vehicle reconciliation runs regardless.)
+SAVE_PTI_LOGS = True
 
 
 async def _group_ready(message: types.Message) -> bool:
@@ -240,27 +238,30 @@ async def _reconcile_vehicles(
     truck_changed = bool(
         stored_truck_unit and truck_unit and truck_unit != stored_truck_unit
     )
-    trailer_changed = bool(
-        trailer_unit and trailer_unit != stored_trailer_unit
-    )
 
-    if truck_changed and not TRUCK_CHANGE_CONFIRMATION:
-        # TESTING: skip the 3-member vote and just adopt the new truck.
-        await set_truck_unit(message.chat.id, truck_unit, truck_plate)
-        if trailer_changed or (not stored_trailer_unit and trailer_unit):
+    # #5: a TRAILER change never goes to a vote — apply it immediately, whether or
+    # not the truck also changed.
+    if trailer:
+        if trailer_unit and trailer_unit != stored_trailer_unit:
             await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        await _notify_vehicle_change(
-            message, stored_truck_unit, truck_unit, truck_plate,
-            trailer_unit, trailer_plate,
-        )
-        return
+        elif not stored_trailer_unit and trailer_unit:
+            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
+        elif trailer_plate and trailer_plate != stored_trailer_plate:
+            await set_trailer(message.chat.id, None, trailer_plate)
 
     if truck_changed:
+        if not TRUCK_CHANGE_CONFIRMATION:
+            # Adopt the new truck silently.
+            await set_truck_unit(message.chat.id, truck_unit, truck_plate)
+            await _notify_vehicle_change(
+                message, stored_truck_unit, truck_unit, truck_plate,
+                trailer_unit, trailer_plate,
+            )
+            return
+        # #5: hold the PTI for a 3-member vote on the TRUCK change only. The
+        # trailer was already applied above, so nothing is bundled into the vote.
         if await find_open_vehicle_change(message.chat.id, "truck"):
             return
-        bundled_trailer = None
-        if trailer_changed or (not stored_trailer_unit and trailer_unit):
-            bundled_trailer = {"unit": trailer_unit, "plate": trailer_plate}
         await propose_vehicle_change(
             chat_id=message.chat.id,
             kind="truck",
@@ -269,24 +270,16 @@ async def _reconcile_vehicles(
             new_plate=truck_plate,
             pti_log_id=pti_log_id,
             result_message_id=result_message_id,
-            bundled_trailer=bundled_trailer,
+            bundled_trailer=None,
         )
         return
 
-    # No truck change → reconcile each side silently.
-    if truck and not truck_changed:
+    # No truck change → reconcile the truck plate silently.
+    if truck:
         if not stored_truck_unit and truck_plate and not stored_truck_plate:
             await set_truck_plate(message.chat.id, truck_plate)
         elif truck_plate and truck_plate != stored_truck_plate:
             await set_truck_plate(message.chat.id, truck_plate)
-
-    if trailer:
-        if trailer_unit and trailer_unit != stored_trailer_unit:
-            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        elif not stored_trailer_unit and trailer_unit:
-            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        elif trailer_plate and trailer_plate != stored_trailer_plate:
-            await set_trailer(message.chat.id, None, trailer_plate)
 
 
 async def _handle_pti_result(
@@ -323,6 +316,8 @@ async def _handle_pti_result(
             content_signature=content_signature,
         )
     await _reconcile_vehicles(message, pti_log_id, data, result_message_id)
+    # A driver submitting any PTI clears the overdue/escalation reminders (#9).
+    await reset_group_reminders(message.chat.id)
     if not truck_change_pending:
         await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
 
@@ -409,10 +404,19 @@ async def _run_pti(
     signature = _signature_from_items(items)
     content_sig = _content_signature_from_items(items)
     if SAVE_PTI_LOGS and (signature or content_sig):
+        # Dedup by (file_size, duration) — an old video re-uploaded keeps the same
+        # size+length even though Telegram assigns it a fresh file id. A match is
+        # rejected here BEFORE any inspection runs, so a recycled PTI never counts
+        # toward the quota and never clears the overdue reminders.
         cached = await get_cached_check(message.chat.id, signature, content_sig)
         if cached:
             if cached["user_id"] == driver_uid:
-                await message.reply(cached["result_text"], parse_mode="HTML")
+                await message.reply(
+                    "♻️ This is the <b>same inspection video you already sent</b> "
+                    "(same size and length) — it doesn't count.\n"
+                    "Please record and send a <b>new</b> pre-trip inspection.",
+                    parse_mode="HTML",
+                )
             else:
                 drivers = await get_drivers(message.chat.id)
                 original = next(
@@ -425,8 +429,8 @@ async def _run_pti(
                     or "another driver"
                 )
                 await message.answer(
-                    f"This PTI is already attributed to {original_name}. "
-                    f"Please record your own inspection."
+                    f"♻️ This video was already submitted by {html.escape(original_name)} — "
+                    f"it can't be reused. Please record your own inspection."
                 )
             return
 
@@ -507,7 +511,9 @@ async def handle_group_video(message: types.Message):
     uid = message.from_user.id if message.from_user else None
     if not uid:
         return
-    if not ALLOW_ALL_MEMBERS and not await is_registered_driver(message.chat.id, uid):
+    # #4: the bot only AUTO-checks a registered driver's video. Anyone else must
+    # use /check explicitly (#6). This holds even when ALLOW_ALL_MEMBERS is on.
+    if not await is_registered_driver(message.chat.id, uid):
         return
 
     drivers = await get_drivers(message.chat.id)
