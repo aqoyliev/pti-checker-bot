@@ -137,6 +137,13 @@ async def notify_admins(text: str):
 
 
 async def run_compliance_check():
+    # The bot is not (and won't be) a group admin, so it can neither mute nor
+    # unmute drivers. With enforcement off there is nothing to do — and probing
+    # each group only triggers spurious "unreachable" deregistration alerts when
+    # the restrict call fails for lack of rights. Bail out entirely.
+    if not ENFORCEMENT_ENABLED:
+        return
+
     groups = await get_all_registered_groups()
     non_compliant: list[str] = []
 
@@ -158,14 +165,6 @@ async def run_compliance_check():
         for driver in drivers:
             user_id = driver["user_id"]
             name = driver["name"]
-
-            # Enforcement disabled: never mute and send no reminders; just lift any
-            # restriction left over from when it was on, so no driver stays stuck.
-            if not ENFORCEMENT_ENABLED:
-                if await unmute_driver(group_id, user_id) is RestrictOutcome.UNREACHABLE:
-                    await _deregister_group(group_id, "unreachable during unmute")
-                    break
-                continue
 
             compliant, reason = await check_driver_compliance(group_id, user_id)
 
