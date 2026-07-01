@@ -105,6 +105,20 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
+
+            -- Driver-verification queue (handlers/admin/verify.py). Seeded from a
+            -- userbot member snapshot: one row per group, walked in `ord` order.
+            -- `members` is the group's member list [{user_id, name, username}];
+            -- `status` is pending | done | skipped.
+            CREATE TABLE IF NOT EXISTS driver_verify (
+                group_id    BIGINT PRIMARY KEY,
+                ord         BIGSERIAL,
+                unit        TEXT,
+                title       TEXT,
+                members     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                verified_at TIMESTAMP
+            );
         """)
 
 
@@ -334,6 +348,59 @@ async def is_registered_driver(group_id: int, user_id: int) -> bool:
         group_id, user_id,
     )
     return row is not None
+
+
+async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
+    """Overwrite a group's drivers with `drivers` ([{user_id, name}, ...]) in one
+    transaction and flip setup_complete. Used by the verification flow to commit
+    the admin's confirmed driver + co-driver."""
+    pool = _pool_check()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM group_drivers WHERE group_id = $1", group_id)
+            for d in drivers:
+                await conn.execute(
+                    """INSERT INTO group_drivers (group_id, user_id, name)
+                       VALUES ($1, $2, $3)
+                       ON CONFLICT (group_id, user_id) DO UPDATE SET name = $3""",
+                    group_id, int(d["user_id"]), d["name"],
+                )
+            await conn.execute(
+                "UPDATE groups SET setup_complete = TRUE WHERE group_id = $1", group_id
+            )
+
+
+# ---------- driver verification queue ----------
+
+async def get_verify_progress() -> tuple[int, int]:
+    """(handled, total) where handled = done + skipped."""
+    row = await _pool_check().fetchrow(
+        "SELECT COUNT(*) FILTER (WHERE status <> 'pending') AS handled, COUNT(*) AS total "
+        "FROM driver_verify"
+    )
+    return (row["handled"], row["total"]) if row else (0, 0)
+
+
+async def get_next_verify() -> dict | None:
+    """Next pending group to verify, in `ord` order. `members` comes back as a
+    Python list (asyncpg returns JSONB as a str, so decode it here)."""
+    row = await _pool_check().fetchrow(
+        "SELECT group_id, unit, title, members FROM driver_verify "
+        "WHERE status = 'pending' ORDER BY ord ASC LIMIT 1"
+    )
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("members"), str):
+        d["members"] = json.loads(d["members"])
+    return d
+
+
+async def set_verify_status(group_id: int, status: str) -> None:
+    await _pool_check().execute(
+        "UPDATE driver_verify SET status = $2, verified_at = NOW() WHERE group_id = $1",
+        group_id, status,
+    )
 
 
 # ---------- pti log ----------
