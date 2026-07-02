@@ -71,6 +71,10 @@
   .chip.warn { background: rgba(210,153,34,.15); color: var(--warn); }
   .chip.mut  { background: rgba(128,128,128,.15); color: var(--hint); }
 
+  .sortbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -2px 0 10px; }
+  .sortbar .chip { cursor: pointer; padding: 4px 11px; }
+  .sortbar .chip.on { background: var(--btn); color: var(--btn-text); }
+
   .item { padding: 11px 0; border-bottom: 1px solid rgba(128,128,128,.15); cursor: pointer; }
   .item:last-child { border-bottom: 0; }
 
@@ -142,6 +146,7 @@ const titleEl = document.getElementById("title");
 
 let me = null;
 let groupsCache = null;
+let groupSort = null;                         // null = server default order
 let current = { tab: "groups", gid: null };   // gid set = group detail open
 
 // ---------- helpers ----------
@@ -256,7 +261,23 @@ async function renderGroups() {
       '<div class="grow"><b>' + gs.length + '</b> groups <span class="hint">· ' +
       active + ' active · ' + configured + ' configured</span></div></div></div>' +
     '<input type="text" id="q" placeholder="Search unit, title, driver…" style="margin-bottom:10px">' +
+    '<div class="sortbar"><span class="hint" style="font-size:12px">Sort</span>' +
+      [["unit", "Unit #"], ["last", "Last PTI"], ["fail", "Fails"], ["due", "Due"]].map(s =>
+        '<span class="chip mut' + (groupSort === s[0] ? " on" : "") + '" data-sort="' + s[0] + '">' +
+        s[1] + '</span>').join("") + '</div>' +
     '<div class="card" id="glist"></div>';
+
+  // Timestamps are uniform "YYYY-MM-DD HH:MM:SS…" strings, so string comparison
+  // orders them correctly (Date.parse chokes on the space separator in WebKit).
+  const lastAt = g => g.last_pti ? String(g.last_pti.submitted_at) : "";
+  const failRank = g => !g.last_pti ? 1 : (g.last_pti.passed ? 2 : 0);  // FAIL, no PTIs, PASS
+  const sorters = {
+    unit: (a, b) => (!a.unit_number - !b.unit_number) ||
+      String(a.unit_number || "").localeCompare(String(b.unit_number || ""), undefined, { numeric: true }),
+    last: (a, b) => lastAt(b) > lastAt(a) ? 1 : lastAt(b) < lastAt(a) ? -1 : 0,
+    fail: (a, b) => failRank(a) - failRank(b) || sorters.last(a, b),
+    due:  (a, b) => (b.drivers_due || 0) - (a.drivers_due || 0) || sorters.last(a, b),
+  };
 
   const list = document.getElementById("glist");
   const draw = q => {
@@ -267,7 +288,9 @@ async function renderGroups() {
                    ...g.drivers.map(d => d.name)].join(" ").toLowerCase();
       return hay.includes(q);
     });
+    if (sorters[groupSort]) rows.sort(sorters[groupSort]);
     list.innerHTML = rows.map(g => {
+      const due = g.drivers_due ? '<span class="chip warn">' + g.drivers_due + ' due</span>' : '';
       const last = g.last_pti
         ? '<span class="chip ' + (g.last_pti.passed ? "ok" : "bad") + '">' +
           (g.last_pti.passed ? "PASS" : "FAIL") + ' ' + fmtDate(g.last_pti.submitted_at).slice(5) + '</span>'
@@ -279,13 +302,19 @@ async function renderGroups() {
           ' <span class="hint">· ' + esc(g.title) + '</span>' + bell + '</div>' +
           '<div class="hint ellip">' +
             (g.drivers.length ? g.drivers.map(d => esc(d.name)).join(", ") : "no drivers") +
-          '</div></div>' + last + '</div></div>';
+          '</div></div>' + due + last + '</div></div>';
     }).join("") || '<div class="hint" style="padding:8px 0">No matching groups.</div>';
     list.querySelectorAll(".item").forEach(el =>
       el.onclick = () => { current.gid = Number(el.dataset.gid); render(); });
   };
   draw("");
   document.getElementById("q").oninput = e => draw(e.target.value);
+  view.querySelectorAll(".sortbar .chip").forEach(c => c.onclick = () => {
+    groupSort = groupSort === c.dataset.sort ? null : c.dataset.sort;  // tap again = default order
+    view.querySelectorAll(".sortbar .chip").forEach(x =>
+      x.classList.toggle("on", x.dataset.sort === groupSort));
+    draw(document.getElementById("q").value);
+  });
 }
 
 // ---------- group detail ----------

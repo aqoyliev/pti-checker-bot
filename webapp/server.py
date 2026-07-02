@@ -187,6 +187,7 @@ async def api_groups(request: web.Request) -> web.Response:
     groups = await get_all_groups()
     drivers = await get_all_drivers_by_group()
     last_ptis = await get_last_pti_per_group()
+    weekly = await get_weekly_pti_stats()
     titles = {g["group_id"]: g["title"] for g in groups if g.get("title")}
     titles.update(await _chat_titles([g["group_id"] for g in groups if not g.get("title")]))
 
@@ -194,6 +195,17 @@ async def api_groups(request: web.Request) -> web.Response:
     for g in groups:
         gid = g["group_id"]
         last = last_ptis.get(gid)
+        # Non-compliant driver count, so the list can sort/badge "due" groups.
+        # Same eligibility rule as api_stats: only active, configured groups.
+        due = 0
+        if g.get("is_active", True) and g.get("setup_complete"):
+            for d in drivers.get(gid, []):
+                s = weekly.get((gid, d["user_id"]))
+                ok, _ = compliance_verdict(
+                    s["week_count"] if s else 0, s["last_at"] if s else None
+                )
+                if not ok:
+                    due += 1
         out.append({
             "group_id": gid,
             "title": titles.get(gid, str(gid)),
@@ -205,6 +217,7 @@ async def api_groups(request: web.Request) -> web.Response:
             "setup_complete": bool(g.get("setup_complete")),
             "notifications_disabled": bool(g.get("notifications_disabled")),
             "drivers": drivers.get(gid, []),
+            "drivers_due": due,
             "last_pti": last and {"passed": last["passed"], "submitted_at": last["submitted_at"]},
         })
     return _json(out)
