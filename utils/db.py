@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import asyncpg
-from data.config import DATABASE_URL
+from data.config import DATABASE_URL, FLEET_TZ
 
 _pool: asyncpg.Pool | None = None
 
@@ -556,11 +556,17 @@ async def get_recent_ptis(group_id: int, limit: int = 5) -> list[dict]:
 
 
 async def get_pti_count_this_week(group_id: int, user_id: int) -> int:
+    # The quota week starts at midnight Monday in FLEET_TZ, not UTC. Reading the
+    # boundary expression inside-out: NOW() in fleet-local time → truncate to
+    # Monday 00:00 local → back to an absolute instant → rendered as naive UTC
+    # to match how submitted_at is stored. DST is handled by the tz database.
     row = await _pool_check().fetchrow(
         """SELECT COUNT(*) FROM pti_log
            WHERE group_id = $1 AND user_id = $2
-           AND submitted_at >= date_trunc('week', NOW())""",
-        group_id, user_id,
+           AND submitted_at >=
+               (date_trunc('week', NOW() AT TIME ZONE $3) AT TIME ZONE $3)
+                   AT TIME ZONE 'UTC'""",
+        group_id, user_id, FLEET_TZ,
     )
     return row["count"] if row else 0
 
@@ -579,13 +585,17 @@ async def get_weekly_pti_stats() -> dict[tuple[int, int], dict]:
     """Per (group_id, user_id): PTIs submitted this week + most recent submission,
     in one query. Fleet-wide compliance views use this instead of two queries per
     driver (hundreds of round-trips across ~150 groups)."""
+    # Same FLEET_TZ week boundary as get_pti_count_this_week (see comment there).
     rows = await _pool_check().fetch(
         """SELECT group_id, user_id,
-                  COUNT(*) FILTER (WHERE submitted_at >= date_trunc('week', NOW()))
+                  COUNT(*) FILTER (WHERE submitted_at >=
+                      (date_trunc('week', NOW() AT TIME ZONE $1) AT TIME ZONE $1)
+                          AT TIME ZONE 'UTC')
                       AS week_count,
                   MAX(submitted_at) AS last_at
            FROM pti_log
-           GROUP BY group_id, user_id"""
+           GROUP BY group_id, user_id""",
+        FLEET_TZ,
     )
     return {
         (r["group_id"], r["user_id"]): {"week_count": r["week_count"], "last_at": r["last_at"]}

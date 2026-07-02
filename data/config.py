@@ -51,6 +51,12 @@ PTI_SPLIT_MIN_FRAMES = env.int("PTI_SPLIT_MIN_FRAMES", default=30)
 # re-enable muting + reminders.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
 
+# Timezone the weekly PTI quota is anchored to. The week resets at midnight
+# Monday in this zone (DST-aware), not UTC — otherwise drivers' Sunday-evening
+# and Monday-morning submissions land in the wrong week. Timestamps stay stored
+# as UTC; only the week boundary shifts.
+FLEET_TZ = env.str("FLEET_TZ", default="America/New_York")
+
 # Web admin panel (Telegram Mini App). The bot always starts a small aiohttp
 # server (webapp/server.py) that serves the panel UI + JSON API on WEBAPP_PORT —
 # on Railway the injected PORT wins, so generating a service domain "just works".
