@@ -35,6 +35,7 @@ from utils.db import (
     get_drivers,
     get_group,
     get_recent_ptis,
+    normalize_unit,
     remove_admin,
     remove_driver,
     set_group_active,
@@ -563,7 +564,7 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
 async def admin_set_unit_input(message: types.Message, state: FSMContext):
     if not await _is_admin(message.from_user.id):
         return
-    unit = (message.text or "").strip()
+    unit = normalize_unit(message.text)
     data = await state.get_data()
     gid = data.get("gid")
     await state.finish()

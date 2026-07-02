@@ -33,6 +33,7 @@ from utils.db import (
     get_last_pti_per_group,
     get_pti_count_this_week,
     get_recent_ptis,
+    normalize_unit,
     remove_admin,
     remove_driver,
     set_group_active,
@@ -248,7 +249,7 @@ async def api_group_ptis(request: web.Request) -> web.Response:
 
 async def api_group_set_unit(request: web.Request) -> web.Response:
     gid = _int_param(request, "gid")
-    unit = str((await _body(request)).get("unit", "")).strip()
+    unit = normalize_unit(str((await _body(request)).get("unit", "")))
     if not unit:
         return _err(400, "Unit number can't be empty.")
     if not await get_group(gid):

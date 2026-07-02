@@ -119,6 +119,22 @@ async def init_db():
                 status      TEXT NOT NULL DEFAULT 'pending',
                 verified_at TIMESTAMP
             );
+
+            -- Unit numbers imported with <angle brackets>/stray spaces (e.g.
+            -- '<1304 >'). One-time cleanup, idempotent: normalize_unit() keeps
+            -- new writes clean, this fixes rows that predate it.
+            UPDATE groups
+               SET unit_number = NULLIF(BTRIM(TRANSLATE(unit_number, '<>', '')), '')
+             WHERE unit_number IS DISTINCT FROM
+                   NULLIF(BTRIM(TRANSLATE(unit_number, '<>', '')), '');
+            UPDATE groups
+               SET trailer_unit = NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '')
+             WHERE trailer_unit IS DISTINCT FROM
+                   NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '');
+            UPDATE driver_verify
+               SET unit = NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '')
+             WHERE unit IS DISTINCT FROM
+                   NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '');
         """)
 
 
@@ -245,6 +261,15 @@ async def reset_setup_nag(group_id: int):
 
 # ---------- vehicle info ----------
 
+def normalize_unit(unit: str | None) -> str:
+    """Bare unit number: drop the <angle brackets> and stray whitespace that
+    came in with imported/typed units (e.g. "<1304 >" → "1304"). Every unit
+    write below runs through this so the junk can't reappear."""
+    if not unit:
+        return ""
+    return unit.replace("<", "").replace(">", "").strip()
+
+
 async def set_truck_plate(group_id: int, plate: str):
     await _pool_check().execute(
         "UPDATE groups SET truck_plate = $1 WHERE group_id = $2", plate, group_id,
@@ -252,6 +277,8 @@ async def set_truck_plate(group_id: int, plate: str):
 
 
 async def set_trailer(group_id: int, unit: str | None, plate: str | None):
+    if unit is not None:
+        unit = normalize_unit(unit)
     if unit is not None and plate is not None:
         await _pool_check().execute(
             "UPDATE groups SET trailer_unit = $1, trailer_plate = $2 WHERE group_id = $3",
@@ -269,6 +296,7 @@ async def set_trailer(group_id: int, unit: str | None, plate: str | None):
 
 async def set_truck_unit(group_id: int, unit: str, plate: str | None):
     """Replace truck unit (and optionally plate) without flipping setup_complete."""
+    unit = normalize_unit(unit)
     if plate is not None:
         await _pool_check().execute(
             "UPDATE groups SET unit_number = $1, truck_plate = $2 WHERE group_id = $3",
@@ -306,6 +334,7 @@ async def mark_pti_failed(pti_log_id: int):
 
 
 async def set_group_unit(group_id: int, unit_number: str):
+    unit_number = normalize_unit(unit_number)
     await _pool_check().execute(
         "UPDATE groups SET unit_number = $1, setup_complete = TRUE WHERE group_id = $2",
         unit_number, group_id,
