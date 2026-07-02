@@ -347,19 +347,23 @@ _MODEL_HINTS = {
 }
 
 
-async def _render_model() -> tuple[str, InlineKeyboardMarkup]:
+async def _render_model(is_super: bool) -> tuple[str, InlineKeyboardMarkup]:
     active = get_active_model()
     kb = InlineKeyboardMarkup(row_width=1)
-    for model in AVAILABLE_GEMINI_MODELS:
-        mark = "✅ " if model == active else ""
-        kb.add(InlineKeyboardButton(f"{mark}{model}", callback_data=f"adm:setmodel:{model}"))
+    if is_super:
+        for model in AVAILABLE_GEMINI_MODELS:
+            mark = "✅ " if model == active else ""
+            kb.add(InlineKeyboardButton(f"{mark}{model}", callback_data=f"adm:setmodel:{model}"))
     kb.add(InlineKeyboardButton("« Menu", callback_data="adm:menu"))
 
     lines = ["<b>🤖 AI Model</b>\n", f"Active: <code>{escape(active)}</code>\n"]
     for model in AVAILABLE_GEMINI_MODELS:
         hint = _MODEL_HINTS.get(model, "")
         lines.append(f"• <code>{escape(model)}</code>" + (f" — {hint}" if hint else ""))
-    lines.append("\nTap a model to switch. Applies to the next inspection.")
+    lines.append(
+        "\nTap a model to switch. Applies to the next inspection." if is_super
+        else "\nOnly super-admins can switch the model."
+    )
     return "\n".join(lines), kb
 
 
@@ -487,11 +491,16 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
         return
 
     if action == "model":
-        text, kb = await _render_model()
+        text, kb = await _render_model(await _is_super(query.from_user.id))
         await _edit(query, text, kb)
         return
 
     if action == "setmodel":
+        # Re-check here too — the buttons only render for super-admins, but a
+        # stale keyboard (or a demoted admin) could still fire the callback.
+        if not await _is_super(query.from_user.id):
+            await query.answer("Super-admins only.", show_alert=True)
+            return
         model = parts[2] if len(parts) > 2 else ""
         if not set_active_model(model):
             await query.answer("Unknown model.", show_alert=True)
@@ -499,7 +508,7 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
         await set_setting("gemini_model", model)  # persist across restarts
         await query.answer(f"Model set to {model}.")
         logging.info("Admin %s switched Gemini model to %s", query.from_user.id, model)
-        text, kb = await _render_model()
+        text, kb = await _render_model(True)  # only reachable by super-admins
         await _edit(query, text, kb)
         return
 

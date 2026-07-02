@@ -433,12 +433,15 @@ async function renderTools() {
   try { m = await api("/api/model"); }
   catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
 
+  const canSwitch = me.is_super_admin;
   view.innerHTML =
     '<div class="card"><b>🤖 AI model</b><div class="hint" style="margin:4px 0 6px">' +
-      'Applies to the next inspection and persists across restarts.</div>' +
+      (canSwitch ? 'Applies to the next inspection and persists across restarts.'
+                 : 'Only super-admins can switch the model.') + '</div>' +
       m.available.map(x =>
         '<label class="radio"><input type="radio" name="model" value="' + esc(x.id) + '"' +
-        (x.id === m.active ? " checked" : "") + '><span><code>' + esc(x.id) + '</code>' +
+        (x.id === m.active ? " checked" : "") + (canSwitch ? "" : " disabled") +
+        '><span><code>' + esc(x.id) + '</code>' +
         (x.hint ? '<div class="hint">' + esc(x.hint) + '</div>' : "") + '</span></label>'
       ).join("") + '</div>' +
     '<div class="card"><b>📣 Broadcast</b><div class="hint" style="margin:4px 0 8px">' +

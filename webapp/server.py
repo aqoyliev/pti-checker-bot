@@ -328,6 +328,8 @@ async def api_model(request: web.Request) -> web.Response:
 
 
 async def api_model_set(request: web.Request) -> web.Response:
+    if resp := _require_super(request):
+        return resp
     model = str((await _body(request)).get("model", ""))
     if not set_active_model(model):
         return _err(400, "Unknown model.")
