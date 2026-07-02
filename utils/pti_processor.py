@@ -51,15 +51,11 @@ def _fmt_timestamp(seconds: float) -> str:
 def _should_split(num_images: int, num_keys: int) -> bool:
     """Whether to split this inspection's frames across keys instead of one whole call.
 
-    Split only when it's enabled, there's more than one key, and the footage is long
-    enough to be worth chunking (>= PTI_SPLIT_MIN_FRAMES). Short clips stay a single
-    sharp call to the first key; failover still backs them up.
+    Split whenever it's enabled, there's more than one key, and there are at least
+    two images (one image can't be chunked — it stays a single call to the first
+    key, with failover backing it up).
     """
-    return (
-        config.PTI_SPLIT_FRAMES
-        and num_keys > 1
-        and num_images >= config.PTI_SPLIT_MIN_FRAMES
-    )
+    return config.PTI_SPLIT_FRAMES and num_keys > 1 and num_images >= 2
 
 
 def _split_strided(items: list, n: int) -> list[list]:
