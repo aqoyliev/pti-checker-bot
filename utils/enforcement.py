@@ -108,24 +108,35 @@ def is_gap_ok(last_pti: dict | None) -> bool:
     return datetime.utcnow() - last_dt.replace(tzinfo=None) >= timedelta(days=MIN_GAP_DAYS)
 
 
-async def check_driver_compliance(group_id: int, user_id: int) -> tuple[bool, str]:
-    """Returns (is_compliant, reason)."""
-    count = await get_pti_count_this_week(group_id, user_id)
-    last = await get_last_pti(group_id, user_id)
+def compliance_verdict(
+    week_count: int,
+    last_pti_at: datetime | None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """(is_compliant, reason) from a driver's PTI count this week and their most
+    recent submission (ever). Pure, so fleet-wide views can evaluate every driver
+    from one get_weekly_pti_stats() batch instead of two queries per driver."""
+    if now is None:
+        now = datetime.utcnow()
 
-    if count >= REQUIRED_PER_WEEK:
+    if week_count >= REQUIRED_PER_WEEK:
         return True, "weekly quota met"
 
-    if last is None:
+    if last_pti_at is None:
         return False, "no PTI submitted yet this week"
 
-    last_dt = last["submitted_at"]
-    gap = datetime.utcnow() - last_dt
-    days_left = MIN_GAP_DAYS - gap.days
+    days_left = MIN_GAP_DAYS - (now - last_pti_at).days
     if days_left > 0:
         return True, f"next PTI due in {days_left} day(s)"
 
-    return False, f"only {count}/{REQUIRED_PER_WEEK} PTIs submitted this week"
+    return False, f"only {week_count}/{REQUIRED_PER_WEEK} PTIs submitted this week"
+
+
+async def check_driver_compliance(group_id: int, user_id: int) -> tuple[bool, str]:
+    """Returns (is_compliant, reason) for a single driver."""
+    count = await get_pti_count_this_week(group_id, user_id)
+    last = await get_last_pti(group_id, user_id)
+    return compliance_verdict(count, last["submitted_at"] if last else None)
 
 
 async def notify_admins(text: str):

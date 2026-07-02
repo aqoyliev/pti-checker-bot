@@ -30,18 +30,21 @@ from utils.db import (
     get_all_groups,
     get_drivers,
     get_group,
+    get_last_pti,
     get_last_pti_per_group,
     get_pti_count_this_week,
     get_recent_ptis,
+    get_weekly_pti_stats,
     normalize_unit,
     remove_admin,
     remove_driver,
     set_group_active,
     set_group_notifications,
+    set_group_title,
     set_group_unit,
     set_setting,
 )
-from utils.enforcement import REQUIRED_PER_WEEK, check_driver_compliance
+from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
 from webapp.auth import extract_user, parse_init_data, resolve_admin
 
 _INDEX_HTML = Path(__file__).parent / "static" / "index.html"
@@ -70,23 +73,30 @@ def _err(status: int, message: str) -> web.Response:
 
 
 # ---------- chat-title cache ----------
-# get_chat is a Telegram round-trip per group; the groups list would fan out one
-# per row on every open, so cache titles briefly (misses cache too — a dead
-# group id would otherwise re-error on every refresh).
+# Titles live in groups.title (kept fresh by the group_title middleware), so
+# listing groups normally needs no Telegram calls. get_chat only fills gaps —
+# groups with no stored title yet — and its result is persisted; the short
+# in-memory cache just absorbs rapid re-fetches (including failures for dead
+# group ids).
 
 _TITLE_TTL = 600.0
 _title_cache: dict[int, tuple[float, str]] = {}
 
 
-async def _chat_title(group_id: int) -> str:
+async def _chat_title(group_id: int, stored: str | None = None) -> str:
     hit = _title_cache.get(group_id)
     if hit and time.monotonic() - hit[0] < _TITLE_TTL:
         return hit[1]
     try:
         chat = await bot.get_chat(group_id)
         title = chat.title or str(group_id)
+        if title != stored:
+            try:
+                await set_group_title(group_id, title)
+            except Exception:
+                logging.exception("web panel: failed to store title for %s", group_id)
     except Exception:
-        title = str(group_id)
+        title = stored or str(group_id)
     _title_cache[group_id] = (time.monotonic(), title)
     return title
 
@@ -177,7 +187,8 @@ async def api_groups(request: web.Request) -> web.Response:
     groups = await get_all_groups()
     drivers = await get_all_drivers_by_group()
     last_ptis = await get_last_pti_per_group()
-    titles = await _chat_titles([g["group_id"] for g in groups])
+    titles = {g["group_id"]: g["title"] for g in groups if g.get("title")}
+    titles.update(await _chat_titles([g["group_id"] for g in groups if not g.get("title")]))
 
     out = []
     for g in groups:
@@ -207,18 +218,20 @@ async def api_group(request: web.Request) -> web.Response:
 
     drivers = []
     for d in await get_drivers(gid):
-        ok, reason = await check_driver_compliance(gid, d["user_id"])
+        count = await get_pti_count_this_week(gid, d["user_id"])
+        last = await get_last_pti(gid, d["user_id"])
+        ok, reason = compliance_verdict(count, last["submitted_at"] if last else None)
         drivers.append({
             "user_id": d["user_id"],
             "name": d["name"],
-            "ptis_this_week": await get_pti_count_this_week(gid, d["user_id"]),
+            "ptis_this_week": count,
             "compliant": ok,
             "reason": None if ok else reason,
         })
 
     return _json({
         "group_id": gid,
-        "title": await _chat_title(gid),
+        "title": await _chat_title(gid, g.get("title")),
         "unit_number": g.get("unit_number"),
         "truck_plate": g.get("truck_plate"),
         "trailer_unit": g.get("trailer_unit"),
@@ -289,6 +302,8 @@ async def api_remove_driver(request: web.Request) -> web.Response:
 
 async def api_stats(request: web.Request) -> web.Response:
     groups = await get_all_groups()
+    drivers_by_group = await get_all_drivers_by_group()
+    weekly = await get_weekly_pti_stats()
     active = [g for g in groups if g.get("is_active", True)]
     setup_done = [g for g in active if g.get("setup_complete")]
 
@@ -296,9 +311,12 @@ async def api_stats(request: web.Request) -> web.Response:
     non_compliant = []
     for g in setup_done:
         gid = g["group_id"]
-        for d in await get_drivers(gid):
+        for d in drivers_by_group.get(gid, []):
             total_drivers += 1
-            ok, reason = await check_driver_compliance(gid, d["user_id"])
+            s = weekly.get((gid, d["user_id"]))
+            ok, reason = compliance_verdict(
+                s["week_count"] if s else 0, s["last_at"] if s else None
+            )
             if ok:
                 compliant += 1
             else:

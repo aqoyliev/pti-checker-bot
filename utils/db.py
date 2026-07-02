@@ -120,6 +120,25 @@ async def init_db():
                 verified_at TIMESTAMP
             );
 
+            -- Chat title cache, refreshed opportunistically (group_title
+            -- middleware + web panel fetches) so listing groups doesn't need a
+            -- get_chat round-trip per group.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT;
+
+            -- pti_log is queried three ways on every hot path: recent-per-group
+            -- (results/reminders), per-driver weekly counts (compliance), and
+            -- signature lookups (recycled-video dedup on every submission).
+            -- Without these, each is a full-table scan that degrades as the log
+            -- grows (~300 rows/week fleet-wide).
+            CREATE INDEX IF NOT EXISTS idx_pti_log_group_time
+                ON pti_log (group_id, submitted_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_pti_log_group_user_time
+                ON pti_log (group_id, user_id, submitted_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_pti_log_media_sig
+                ON pti_log (group_id, media_signature) WHERE media_signature IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_pti_log_content_sig
+                ON pti_log (group_id, content_signature) WHERE content_signature IS NOT NULL;
+
             -- Unit numbers imported with <angle brackets>/stray spaces (e.g.
             -- '<1304 >'). One-time cleanup, idempotent: normalize_unit() keeps
             -- new writes clean, this fixes rows that predate it.
@@ -225,6 +244,15 @@ async def upsert_group(group_id: int):
 async def mark_group_inactive(group_id: int):
     await _pool_check().execute(
         "UPDATE groups SET is_active = FALSE WHERE group_id = $1", group_id,
+    )
+
+
+async def set_group_title(group_id: int, title: str) -> None:
+    """Cache the chat title. Written opportunistically (message middleware, web
+    panel fetches); the IS DISTINCT FROM guard makes unchanged-title calls free."""
+    await _pool_check().execute(
+        "UPDATE groups SET title = $1 WHERE group_id = $2 AND title IS DISTINCT FROM $1",
+        title, group_id,
     )
 
 
@@ -545,6 +573,24 @@ async def get_last_pti(group_id: int, user_id: int) -> dict | None:
         group_id, user_id,
     )
     return dict(row) if row else None
+
+
+async def get_weekly_pti_stats() -> dict[tuple[int, int], dict]:
+    """Per (group_id, user_id): PTIs submitted this week + most recent submission,
+    in one query. Fleet-wide compliance views use this instead of two queries per
+    driver (hundreds of round-trips across ~150 groups)."""
+    rows = await _pool_check().fetch(
+        """SELECT group_id, user_id,
+                  COUNT(*) FILTER (WHERE submitted_at >= date_trunc('week', NOW()))
+                      AS week_count,
+                  MAX(submitted_at) AS last_at
+           FROM pti_log
+           GROUP BY group_id, user_id"""
+    )
+    return {
+        (r["group_id"], r["user_id"]): {"week_count": r["week_count"], "last_at": r["last_at"]}
+        for r in rows
+    }
 
 
 async def get_all_registered_groups() -> list[dict]:

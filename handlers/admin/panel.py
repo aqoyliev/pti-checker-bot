@@ -31,10 +31,12 @@ from utils.db import (
     get_active_group_ids,
     get_admin,
     get_admins,
+    get_all_drivers_by_group,
     get_all_groups,
     get_drivers,
     get_group,
     get_recent_ptis,
+    get_weekly_pti_stats,
     normalize_unit,
     remove_admin,
     remove_driver,
@@ -43,7 +45,7 @@ from utils.db import (
     set_group_unit,
     set_setting,
 )
-from utils.enforcement import REQUIRED_PER_WEEK, check_driver_compliance
+from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
 from test_pti import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 
 PAGE_SIZE = 8
@@ -280,15 +282,20 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
     setup_done = [g for g in active if g.get("setup_complete")]
     inactive = len(groups) - len(active)
 
+    drivers_by_group = await get_all_drivers_by_group()
+    weekly = await get_weekly_pti_stats()
     total_drivers = 0
     compliant = 0
     non_compliant: list[str] = []
     for g in setup_done:
         gid = g["group_id"]
         unit = g.get("unit_number") or gid
-        for d in await get_drivers(gid):
+        for d in drivers_by_group.get(gid, []):
             total_drivers += 1
-            ok, reason = await check_driver_compliance(gid, d["user_id"])
+            s = weekly.get((gid, d["user_id"]))
+            ok, reason = compliance_verdict(
+                s["week_count"] if s else 0, s["last_at"] if s else None
+            )
             if ok:
                 compliant += 1
             else:
