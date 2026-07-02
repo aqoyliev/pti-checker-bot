@@ -645,6 +645,7 @@ async def process_mixed_media(
     tmp_paths: list[str] = []
     video_frames: list[tuple[float, str]] = []
     images: list[tuple[str, str]] = []
+    tire_task: asyncio.Task | None = None
     skipped = 0
 
     # Bound concurrent analyses so a burst of submissions queues instead of
@@ -736,11 +737,15 @@ async def process_mixed_media(
             else _call_gemini_with_retry(call_gemini_photos, all_images, history=history)
         )
 
+        # The tire pass runs as a named task rather than in a gather() with the broad
+        # pass: gather propagates a broad-pass failure immediately WITHOUT waiting for
+        # the tire task, which then kept reading the frame files after the finally
+        # block below deleted them (FileNotFoundError mid-upload). The finally block
+        # instead waits for this task before removing the frames.
         if config.PTI_TIRE_PASS:
-            broad_result, tire_data = await asyncio.gather(broad_coro, _run_tire_pass(all_images))
-        else:
-            broad_result = await broad_coro
-            tire_data = None
+            tire_task = asyncio.create_task(_run_tire_pass(all_images))
+        broad_result = await broad_coro
+        tire_data = (await tire_task) if tire_task else None
         # Split passes return an already-merged data dict; the single call returns a
         # raw Gemini response that still needs parsing.
         response = None if use_split else broad_result
@@ -778,6 +783,11 @@ async def process_mixed_media(
         return None, None, status_msg
     finally:
         slot.release()
+        if tire_task is not None and not tire_task.done():
+            # The broad pass failed while the tire pass was still uploading the frame
+            # files. Its worker thread can't be cancelled, so wait it out (it never
+            # raises) before deleting the frames it is reading.
+            await tire_task
         if video_frames:
             delete_frames(video_frames)
         for path in tmp_paths:
