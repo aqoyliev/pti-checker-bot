@@ -50,3 +50,12 @@ PTI_SPLIT_MIN_FRAMES = env.int("PTI_SPLIT_MIN_FRAMES", default=30)
 # lifts any restrictions left over from when enforcement was on. Set True to
 # re-enable muting + reminders.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
+
+# Web admin panel (Telegram Mini App). The bot always starts a small aiohttp
+# server (webapp/server.py) that serves the panel UI + JSON API on WEBAPP_PORT —
+# on Railway the injected PORT wins, so generating a service domain "just works".
+# Set WEBAPP_URL to that public HTTPS URL (e.g. https://<app>.up.railway.app) to
+# show the "Open Web Panel" button in /admin; Telegram requires HTTPS for Mini
+# Apps, and until WEBAPP_URL is set the button is hidden (the server still runs).
+WEBAPP_URL = env.str("WEBAPP_URL", default="").strip().rstrip("/")
+WEBAPP_PORT = env.int("PORT", default=env.int("WEBAPP_PORT", default=8080))

@@ -21,10 +21,10 @@ from html import escape
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.types import ContentType, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import ContentType, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.exceptions import MessageNotModified
 
-from data.config import ADMINS
+from data.config import ADMINS, WEBAPP_URL
 from loader import bot, dp
 from utils.db import (
     add_admin,
@@ -82,6 +82,12 @@ async def _is_super(user_id: int) -> bool:
 
 def _menu_kb(is_super: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
+    if WEBAPP_URL:
+        # Telegram Mini App version of this panel (webapp/) — same admin set,
+        # nicer UX. Requires WEBAPP_URL to be the public HTTPS URL of the bot's
+        # web server; web_app buttons only work in private chats, which is where
+        # /admin lives.
+        kb.add(InlineKeyboardButton("🌐 Open Web Panel", web_app=WebAppInfo(url=WEBAPP_URL)))
     kb.add(
         InlineKeyboardButton("📋 Groups", callback_data="adm:groups:0"),
         InlineKeyboardButton("📊 Stats", callback_data="adm:stats"),

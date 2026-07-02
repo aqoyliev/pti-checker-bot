@@ -6,6 +6,8 @@ services:
     environment:
       LOCAL_SERVER_URL: http://localhost:8081
       DATABASE_URL: postgresql://pti:pti@db:5432/pti_bot
+    ports:
+      - "8080:8080"   # web admin panel (webapp/server.py)
     depends_on:
       db:
         condition: service_healthy

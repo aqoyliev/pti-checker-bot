@@ -466,6 +466,29 @@ async def get_pti_log(pti_log_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_all_drivers_by_group() -> dict[int, list[dict]]:
+    """All registered drivers keyed by group_id — one query for the web panel's
+    groups list instead of a per-group fan-out."""
+    rows = await _pool_check().fetch(
+        "SELECT group_id, user_id, name FROM group_drivers ORDER BY id"
+    )
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["group_id"], []).append(
+            {"user_id": r["user_id"], "name": r["name"]}
+        )
+    return out
+
+
+async def get_last_pti_per_group() -> dict[int, dict]:
+    """Most recent PTI (passed + submitted_at) per group, in one query."""
+    rows = await _pool_check().fetch(
+        """SELECT DISTINCT ON (group_id) group_id, passed, submitted_at
+           FROM pti_log ORDER BY group_id, submitted_at DESC"""
+    )
+    return {r["group_id"]: dict(r) for r in rows}
+
+
 async def get_recent_ptis(group_id: int, limit: int = 5) -> list[dict]:
     rows = await _pool_check().fetch(
         """SELECT * FROM pti_log WHERE group_id = $1

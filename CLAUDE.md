@@ -23,6 +23,12 @@ issues) is posted back into the group.
   `call_gemini`, `call_gemini_photos`, `parse_result`) plus a CLI for manually
   checking a single video: `python test_pti.py <video.mp4>` (needs a Gemini key).
 - **`utils/scheduler.py` + `utils/enforcement.py`** — hourly compliance loop.
+- **`webapp/`** — the web admin panel (Telegram Mini App). `server.py` is an
+  aiohttp app started from `on_startup` (listens on `PORT`/`WEBAPP_PORT`,
+  default 8080); `auth.py` validates the Mini App's signed `initData` (admins =
+  env `ADMINS` ∪ admins table, same as the inline panel); `static/index.html`
+  is the whole UI. `/admin` shows an "Open Web Panel" button once `WEBAPP_URL`
+  (public HTTPS URL) is set.
 - **`handlers/groups/proposals.py`** — group voting/proposal flow + a "nag" loop.
 - **`middlewares/throttling.py`** — anti-flood for text messages.
 

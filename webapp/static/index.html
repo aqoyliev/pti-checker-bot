@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>PTI Admin Panel</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg:       var(--tg-theme-bg-color, #0f1216);
+    --bg2:      var(--tg-theme-secondary-bg-color, #1a2027);
+    --text:     var(--tg-theme-text-color, #e8ecf1);
+    --hint:     var(--tg-theme-hint-color, #8a94a3);
+    --btn:      var(--tg-theme-button-color, #2f81f7);
+    --btn-text: var(--tg-theme-button-text-color, #ffffff);
+    --ok:   #3fb950;
+    --warn: #d29922;
+    --bad:  #e5534b;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 76px;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px 8px;
+  }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .iconbtn {
+    border: 0; background: var(--bg2); color: var(--text);
+    border-radius: 8px; padding: 6px 10px; font-size: 15px; cursor: pointer;
+  }
+  main { padding: 0 12px; }
+  .card {
+    background: var(--bg2); border-radius: var(--radius);
+    padding: 12px 14px; margin-bottom: 10px;
+  }
+  .hint { color: var(--hint); font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .btn {
+    display: block; width: 100%; border: 0; cursor: pointer;
+    background: var(--btn); color: var(--btn-text);
+    border-radius: 10px; padding: 11px; font-size: 15px; font-weight: 600;
+    margin-top: 8px;
+  }
+  .btn.secondary { background: var(--bg2); color: var(--text); border: 1px solid rgba(128,128,128,.25); }
+  .btn.danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
+  .btn:disabled { opacity: .5; }
+  .btn.inline { display: inline-block; width: auto; padding: 8px 14px; margin: 0; }
+
+  input[type=text], textarea {
+    width: 100%; border: 1px solid rgba(128,128,128,.3); border-radius: 10px;
+    background: var(--bg); color: var(--text); padding: 10px 12px; font-size: 15px;
+    outline: none;
+  }
+  textarea { min-height: 90px; resize: vertical; font-family: inherit; }
+
+  .chip {
+    display: inline-block; font-size: 12px; font-weight: 600;
+    border-radius: 20px; padding: 2px 9px; white-space: nowrap;
+  }
+  .chip.ok   { background: rgba(63,185,80,.15);  color: var(--ok); }
+  .chip.bad  { background: rgba(229,83,75,.15);  color: var(--bad); }
+  .chip.warn { background: rgba(210,153,34,.15); color: var(--warn); }
+  .chip.mut  { background: rgba(128,128,128,.15); color: var(--hint); }
+
+  .item { padding: 11px 0; border-bottom: 1px solid rgba(128,128,128,.15); cursor: pointer; }
+  .item:last-child { border-bottom: 0; }
+
+  .statgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: var(--bg2); border-radius: var(--radius); padding: 12px; }
+  .stat .num { font-size: 22px; font-weight: 700; }
+
+  .kv { display: flex; gap: 8px; margin: 3px 0; }
+  .kv .k { color: var(--hint); min-width: 92px; }
+
+  nav {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    display: flex; background: var(--bg2);
+    border-top: 1px solid rgba(128,128,128,.15);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav button {
+    flex: 1; border: 0; background: none; color: var(--hint);
+    padding: 9px 0 7px; font-size: 11px; cursor: pointer;
+  }
+  nav button .ico { display: block; font-size: 20px; margin-bottom: 1px; }
+  nav button.on { color: var(--btn); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%);
+    background: rgba(20,20,20,.92); color: #fff; border-radius: 10px;
+    padding: 9px 16px; font-size: 14px; max-width: 88vw;
+    opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 20;
+  }
+  #toast.show { opacity: 1; }
+
+  .center { text-align: center; padding: 48px 20px; color: var(--hint); }
+  details.pti summary { cursor: pointer; list-style: none; }
+  details.pti summary::-webkit-details-marker { display: none; }
+  .ptibody {
+    margin-top: 8px; padding: 10px; background: var(--bg); border-radius: 8px;
+    font-size: 13px; white-space: normal; word-break: break-word;
+  }
+  .radio { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; cursor: pointer;
+           border-bottom: 1px solid rgba(128,128,128,.12); }
+  .radio:last-child { border-bottom: 0; }
+  .radio input { margin-top: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <button class="iconbtn" id="backBtn" style="display:none">‹</button>
+  <h1 id="title">🛠 PTI Admin</h1>
+  <button class="iconbtn" id="refreshBtn" title="Refresh">↻</button>
+</header>
+<main id="view"><div class="center">Loading…</div></main>
+<nav id="tabs" style="display:none">
+  <button data-tab="groups"><span class="ico">📋</span>Groups</button>
+  <button data-tab="stats"><span class="ico">📊</span>Stats</button>
+  <button data-tab="tools"><span class="ico">🧰</span>Tools</button>
+  <button data-tab="admins" id="adminsTab" style="display:none"><span class="ico">🛡</span>Admins</button>
+</nav>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const view = document.getElementById("view");
+const tabs = document.getElementById("tabs");
+const backBtn = document.getElementById("backBtn");
+const titleEl = document.getElementById("title");
+
+let me = null;
+let groupsCache = null;
+let current = { tab: "groups", gid: null };   // gid set = group detail open
+
+// ---------- helpers ----------
+
+const esc = s => String(s == null ? "" : s)
+  .replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// PTI result_text is our bot's Telegram-HTML output; keep only harmless
+// formatting tags, escape everything else.
+function richText(s) {
+  return esc(s).replace(/&lt;(\/?)(b|i|u|s|code|pre)&gt;/g, "<$1$2>").replace(/\n/g, "<br>");
+}
+
+const fmtDate = s => s ? String(s).slice(0, 16) : "—";
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function confirmDlg(msg) {
+  return new Promise(res => {
+    if (tg && tg.showConfirm) { try { tg.showConfirm(msg, ok => res(!!ok)); return; } catch (e) {} }
+    res(window.confirm(msg));
+  });
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  const res = await fetch(path, {
+    method: opts.method || "GET",
+    headers: {
+      "Authorization": "tma " + (tg ? tg.initData : ""),
+      "Content-Type": "application/json",
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = "HTTP " + res.status;
+    try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function setChrome() {
+  const inDetail = current.gid != null;
+  backBtn.style.display = inDetail ? "" : "none";
+  if (tg && tg.BackButton) {
+    try { inDetail ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) {}
+  }
+  document.querySelectorAll("nav button").forEach(b =>
+    b.classList.toggle("on", b.dataset.tab === current.tab));
+}
+
+function goBack() { current.gid = null; render(); }
+backBtn.onclick = goBack;
+if (tg && tg.BackButton) { try { tg.BackButton.onClick(goBack); } catch (e) {} }
+
+document.getElementById("refreshBtn").onclick = () => { groupsCache = null; render(); };
+tabs.addEventListener("click", e => {
+  const b = e.target.closest("button[data-tab]");
+  if (!b) return;
+  current = { tab: b.dataset.tab, gid: null };
+  render();
+});
+
+// ---------- boot ----------
+
+async function boot() {
+  try {
+    me = await api("/api/me");
+  } catch (e) {
+    view.innerHTML = '<div class="center">🔒 ' + esc(e.message) +
+      '<br><br><span class="hint">Open the panel with the button in the bot\'s /admin menu.</span></div>';
+    return;
+  }
+  tabs.style.display = "";
+  if (me.is_super_admin) document.getElementById("adminsTab").style.display = "";
+  render();
+}
+
+async function render() {
+  setChrome();
+  if (current.gid != null) return renderGroup(current.gid);
+  titleEl.textContent = "🛠 PTI Admin";
+  if (current.tab === "groups") return renderGroups();
+  if (current.tab === "stats")  return renderStats();
+  if (current.tab === "tools")  return renderTools();
+  if (current.tab === "admins") return renderAdmins();
+}
+
+// ---------- groups list ----------
+
+function groupIcon(g) { return !g.is_active ? "💤" : (g.setup_complete ? "✅" : "⚙️"); }
+
+async function renderGroups() {
+  if (!groupsCache) {
+    view.innerHTML = '<div class="center">Loading groups…</div>';
+    try { groupsCache = await api("/api/groups"); }
+    catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+  }
+  const gs = groupsCache;
+  const active = gs.filter(g => g.is_active).length;
+  const configured = gs.filter(g => g.is_active && g.setup_complete).length;
+
+  view.innerHTML =
+    '<div class="card"><div class="row">' +
+      '<div class="grow"><b>' + gs.length + '</b> groups <span class="hint">· ' +
+      active + ' active · ' + configured + ' configured</span></div></div></div>' +
+    '<input type="text" id="q" placeholder="Search unit, title, driver…" style="margin-bottom:10px">' +
+    '<div class="card" id="glist"></div>';
+
+  const list = document.getElementById("glist");
+  const draw = q => {
+    q = (q || "").toLowerCase();
+    const rows = gs.filter(g => {
+      if (!q) return true;
+      const hay = [g.unit_number, g.title, g.group_id,
+                   ...g.drivers.map(d => d.name)].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+    list.innerHTML = rows.map(g => {
+      const last = g.last_pti
+        ? '<span class="chip ' + (g.last_pti.passed ? "ok" : "bad") + '">' +
+          (g.last_pti.passed ? "PASS" : "FAIL") + ' ' + fmtDate(g.last_pti.submitted_at).slice(5) + '</span>'
+        : '<span class="chip mut">no PTIs</span>';
+      const bell = g.notifications_disabled ? " 🔕" : "";
+      return '<div class="item" data-gid="' + g.group_id + '"><div class="row">' +
+        '<div class="grow">' +
+          '<div class="ellip">' + groupIcon(g) + ' <b>' + esc(g.unit_number || "(no unit)") + '</b>' +
+          ' <span class="hint">· ' + esc(g.title) + '</span>' + bell + '</div>' +
+          '<div class="hint ellip">' +
+            (g.drivers.length ? g.drivers.map(d => esc(d.name)).join(", ") : "no drivers") +
+          '</div></div>' + last + '</div></div>';
+    }).join("") || '<div class="hint" style="padding:8px 0">No matching groups.</div>';
+    list.querySelectorAll(".item").forEach(el =>
+      el.onclick = () => { current.gid = Number(el.dataset.gid); render(); });
+  };
+  draw("");
+  document.getElementById("q").oninput = e => draw(e.target.value);
+}
+
+// ---------- group detail ----------
+
+async function renderGroup(gid) {
+  titleEl.textContent = "Group";
+  view.innerHTML = '<div class="center">Loading group…</div>';
+  let g;
+  try { g = await api("/api/groups/" + gid); }
+  catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+  titleEl.textContent = groupIcon(g) + " " + (g.unit_number || "Group");
+
+  const truck = esc(g.unit_number || "—") + (g.truck_plate ? " (plate " + esc(g.truck_plate) + ")" : "");
+  const trailer = (g.trailer_unit || g.trailer_plate)
+    ? esc(g.trailer_unit || "—") + (g.trailer_plate ? " (plate " + esc(g.trailer_plate) + ")" : "")
+    : "—";
+
+  const drivers = g.drivers.map(d =>
+    '<div class="item" style="cursor:default"><div class="row">' +
+      '<div class="grow"><b>' + esc(d.name) + '</b> <span class="hint">' + d.user_id + '</span>' +
+      '<div class="hint">' + d.ptis_this_week + '/' + me.required_per_week + ' this week' +
+      (d.compliant ? "" : " · " + esc(d.reason || "non-compliant")) + '</div></div>' +
+      '<span class="chip ' + (d.compliant ? "ok" : "warn") + '">' + (d.compliant ? "OK" : "due") + '</span>' +
+      '<button class="btn danger inline" data-rm="' + d.user_id + '" data-name="' + esc(d.name) + '">Remove</button>' +
+    '</div></div>'
+  ).join("") || '<div class="hint" style="padding:6px 0">No drivers registered.</div>';
+
+  view.innerHTML =
+    '<div class="card">' +
+      '<div style="font-weight:700;margin-bottom:6px">' + esc(g.title) + '</div>' +
+      '<div class="kv"><div class="k">ID</div><div><code>' + g.group_id + '</code></div></div>' +
+      '<div class="kv"><div class="k">Status</div><div>' + (g.is_active ? "🟢 active" : "💤 inactive") +
+        ' · ' + (g.setup_complete ? "setup complete" : "setup incomplete") + '</div></div>' +
+      '<div class="kv"><div class="k">Truck</div><div>' + truck + '</div></div>' +
+      '<div class="kv"><div class="k">Trailer</div><div>' + trailer + '</div></div>' +
+      '<div class="kv"><div class="k">Reminders</div><div>' + (g.notifications_disabled ? "🔕 disabled" : "🔔 on") + '</div></div>' +
+    '</div>' +
+
+    '<div class="card"><b>🔧 Unit number</b><div class="hint" style="margin:4px 0 8px">' +
+      'Applies immediately — skips the 3-vote flow.</div>' +
+      '<div class="row"><input type="text" id="unitIn" value="' + esc(g.unit_number || "") + '" placeholder="Unit #">' +
+      '<button class="btn inline" id="unitSave">Save</button></div></div>' +
+
+    '<div class="card"><b>👤 Drivers</b><div class="hint" style="margin:4px 0 2px">' +
+      'Removing here skips the 3-vote process.</div>' + drivers + '</div>' +
+
+    '<div class="card"><b>📊 PTI log</b><div id="ptis" class="hint" style="padding-top:6px">Loading…</div></div>' +
+
+    '<button class="btn secondary" id="notifBtn">' +
+      (g.notifications_disabled ? "🔔 Enable notifications" : "🔕 Disable notifications") + '</button>' +
+    '<button class="btn ' + (g.is_active ? "danger" : "") + '" id="togBtn">' +
+      (g.is_active ? "🚫 Deactivate group" : "✅ Reactivate group") + '</button>';
+
+  document.getElementById("unitSave").onclick = async () => {
+    const unit = document.getElementById("unitIn").value.trim();
+    if (!unit) return toast("Unit can't be empty");
+    try {
+      await api("/api/groups/" + gid + "/unit", { method: "POST", body: { unit } });
+      toast("✅ Unit set to " + unit);
+      groupsCache = null; render();
+    } catch (e) { toast(e.message); }
+  };
+
+  document.getElementById("notifBtn").onclick = async () => {
+    try {
+      await api("/api/groups/" + gid + "/notifications",
+        { method: "POST", body: { disabled: !g.notifications_disabled } });
+      toast(g.notifications_disabled ? "🔔 Notifications enabled" : "🔕 Notifications disabled");
+      groupsCache = null; render();
+    } catch (e) { toast(e.message); }
+  };
+
+  document.getElementById("togBtn").onclick = async () => {
+    const verb = g.is_active ? "Deactivate" : "Reactivate";
+    if (!await confirmDlg(verb + " this group?")) return;
+    try {
+      await api("/api/groups/" + gid + "/active", { method: "POST", body: { active: !g.is_active } });
+      toast(g.is_active ? "Deactivated" : "Reactivated");
+      groupsCache = null; render();
+    } catch (e) { toast(e.message); }
+  };
+
+  view.querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+    if (!await confirmDlg("Remove driver " + b.dataset.name + "? This skips the 3-vote process.")) return;
+    try {
+      await api("/api/groups/" + gid + "/drivers/" + b.dataset.rm, { method: "DELETE" });
+      toast("Driver removed");
+      groupsCache = null; render();
+    } catch (e) { toast(e.message); }
+  });
+
+  // PTI log loads after the main view so the page feels instant.
+  try {
+    const ptis = await api("/api/groups/" + gid + "/ptis");
+    document.getElementById("ptis").outerHTML = ptis.length
+      ? '<div>' + ptis.map(p =>
+          '<details class="pti item" style="cursor:default"><summary>' +
+            (p.passed ? "✅" : "❌") + " " + fmtDate(p.submitted_at) +
+            ' · ' + esc(p.driver_name) + ' <span class="hint">tap for details</span></summary>' +
+            '<div class="ptibody">' + richText(p.result_text || "(no stored result)") + '</div></details>'
+        ).join("") + '</div>'
+      : '<div class="hint" style="padding-top:6px">No PTIs recorded for this group.</div>';
+  } catch (e) {
+    const el = document.getElementById("ptis");
+    if (el) el.textContent = e.message;
+  }
+}
+
+// ---------- stats ----------
+
+async function renderStats() {
+  view.innerHTML = '<div class="center">Computing fleet stats…</div>';
+  let s;
+  try { s = await api("/api/stats"); }
+  catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+
+  const pct = s.drivers_total ? Math.round(100 * s.drivers_compliant / s.drivers_total) : 100;
+  view.innerHTML =
+    '<div class="statgrid">' +
+      '<div class="stat"><div class="num">' + s.groups_active + '</div><div class="hint">active groups (' + s.groups_total + ' total)</div></div>' +
+      '<div class="stat"><div class="num">' + s.groups_configured + '</div><div class="hint">configured</div></div>' +
+      '<div class="stat"><div class="num">' + s.drivers_total + '</div><div class="hint">drivers</div></div>' +
+      '<div class="stat"><div class="num" style="color:' + (pct >= 100 ? "var(--ok)" : "var(--warn)") + '">' +
+        s.drivers_compliant + '/' + s.drivers_total + '</div><div class="hint">compliant (quota ' +
+        s.required_per_week + '/week)</div></div>' +
+    '</div>' +
+    '<div class="card" style="margin-top:10px"><b>Non-compliant drivers</b>' +
+      (s.non_compliant.length
+        ? s.non_compliant.map(n =>
+            '<div class="item" data-gid="' + n.group_id + '"><div class="row"><div class="grow">' +
+            '<b>' + esc(n.name) + '</b> <span class="hint">· unit ' + esc(n.unit) + '</span>' +
+            '<div class="hint">' + esc(n.reason) + '</div></div><span class="chip warn">due</span></div></div>'
+          ).join("")
+        : '<div class="hint" style="padding-top:6px">✅ All registered drivers are compliant.</div>') +
+    '</div>';
+  view.querySelectorAll(".item[data-gid]").forEach(el =>
+    el.onclick = () => { current = { tab: "groups", gid: Number(el.dataset.gid) }; render(); });
+}
+
+// ---------- tools (model + broadcast) ----------
+
+async function renderTools() {
+  view.innerHTML = '<div class="center">Loading…</div>';
+  let m;
+  try { m = await api("/api/model"); }
+  catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+
+  view.innerHTML =
+    '<div class="card"><b>🤖 AI model</b><div class="hint" style="margin:4px 0 6px">' +
+      'Applies to the next inspection and persists across restarts.</div>' +
+      m.available.map(x =>
+        '<label class="radio"><input type="radio" name="model" value="' + esc(x.id) + '"' +
+        (x.id === m.active ? " checked" : "") + '><span><code>' + esc(x.id) + '</code>' +
+        (x.hint ? '<div class="hint">' + esc(x.hint) + '</div>' : "") + '</span></label>'
+      ).join("") + '</div>' +
+    '<div class="card"><b>📣 Broadcast</b><div class="hint" style="margin:4px 0 8px">' +
+      'Sent as plain text to every active group.</div>' +
+      '<textarea id="bcText" placeholder="Message…"></textarea>' +
+      '<button class="btn" id="bcSend">Send broadcast</button>' +
+      '<div class="hint" id="bcResult" style="margin-top:6px"></div></div>';
+
+  view.querySelectorAll('input[name=model]').forEach(r => r.onchange = async () => {
+    try {
+      await api("/api/model", { method: "POST", body: { model: r.value } });
+      toast("Model set to " + r.value);
+    } catch (e) { toast(e.message); renderTools(); }
+  });
+
+  document.getElementById("bcSend").onclick = async () => {
+    const text = document.getElementById("bcText").value.trim();
+    if (!text) return toast("Message can't be empty");
+    if (!await confirmDlg("Send this message to ALL active groups?")) return;
+    const btn = document.getElementById("bcSend");
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const r = await api("/api/broadcast", { method: "POST", body: { text } });
+      document.getElementById("bcResult").textContent =
+        "📣 Sent to " + r.sent + " groups" + (r.failed ? " · " + r.failed + " failed" : "");
+      document.getElementById("bcText").value = "";
+      toast("Broadcast done");
+    } catch (e) { toast(e.message); }
+    btn.disabled = false; btn.textContent = "Send broadcast";
+  };
+}
+
+// ---------- admins ----------
+
+async function renderAdmins() {
+  view.innerHTML = '<div class="center">Loading…</div>';
+  let admins;
+  try { admins = await api("/api/admins"); }
+  catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+
+  view.innerHTML =
+    '<div class="card"><b>🛡 Admins</b><div class="hint" style="margin:4px 0 2px">' +
+      'Regular admins can use the panel; only super-admins manage admins.</div>' +
+      admins.map(a =>
+        '<div class="item" style="cursor:default"><div class="row">' +
+        '<div class="grow"><code>' + a.user_id + '</code> ' +
+        (a.is_super_admin ? '<span class="chip ok">★ super</span>' : '<span class="chip mut">admin</span>') +
+        '</div>' +
+        (a.is_super_admin ? "" :
+          '<button class="btn danger inline" data-rma="' + a.user_id + '">Remove</button>') +
+        '</div></div>'
+      ).join("") + '</div>' +
+    '<div class="card"><b>➕ Add admin</b><div class="hint" style="margin:4px 0 8px">' +
+      'Numeric Telegram user id (forward one of their messages to @userinfobot to find it).</div>' +
+      '<div class="row"><input type="text" id="newAdmin" inputmode="numeric" placeholder="123456789">' +
+      '<button class="btn inline" id="addAdmin">Add</button></div></div>';
+
+  view.querySelectorAll("[data-rma]").forEach(b => b.onclick = async () => {
+    if (!await confirmDlg("Remove admin " + b.dataset.rma + "?")) return;
+    try { await api("/api/admins/" + b.dataset.rma, { method: "DELETE" }); toast("Admin removed"); renderAdmins(); }
+    catch (e) { toast(e.message); }
+  });
+
+  document.getElementById("addAdmin").onclick = async () => {
+    const raw = document.getElementById("newAdmin").value.trim();
+    if (!/^\d+$/.test(raw)) return toast("Enter a numeric user id");
+    try {
+      await api("/api/admins", { method: "POST", body: { user_id: Number(raw) } });
+      toast("Admin added"); renderAdmins();
+    } catch (e) { toast(e.message); }
+  };
+}
+
+boot();
+</script>
+</body>
+</html>

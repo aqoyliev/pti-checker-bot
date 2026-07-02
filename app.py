@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from aiogram import executor
 
@@ -11,10 +12,17 @@ from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
 from test_pti import set_active_model
+from webapp.server import start_webapp
 
 
 async def on_startup(dispatcher):
     await init_db()
+    # Web admin panel (Telegram Mini App). A failure to bind the port must not
+    # take the bot down — the inline /admin panel still works without it.
+    try:
+        await start_webapp()
+    except Exception:
+        logging.exception("web admin panel failed to start")
     # Seed the env ADMINS as super-admins in the DB-backed admins table; regular
     # admins are added from the panel at runtime.
     try:
