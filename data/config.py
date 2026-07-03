@@ -43,7 +43,8 @@ PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
 # command (handlers/groups/pti.py:handle_group_video). When False, the bot
 # never auto-runs a PTI on group videos — every inspection must be requested
 # explicitly with /check (in-reply). Buffering, dedup, and /check are unaffected.
-# Set False to turn the auto-inspector off fleet-wide. (default: true)
+# The hardcoded TEST groups (pti.TEST_GROUP_IDS) always auto-check regardless.
+# Set False to turn the auto-inspector off everywhere except TEST groups. (default: true)
 PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 
 # Compliance enforcement. When False (default), the hourly loop never mutes

@@ -536,8 +536,8 @@ async def handle_group_video(message: types.Message):
     # needed. Cheap guards first, DB lookups last. Stay silent (buffer only)
     # on anything that isn't an eligible standalone video so random group
     # media never triggers an inspection or an error reply.
-    if not PTI_AUTOCHECK_ENABLED:
-        return  # auto-inspector disabled fleet-wide — /check only
+    if not PTI_AUTOCHECK_ENABLED and message.chat.id not in TEST_GROUP_IDS:
+        return  # auto-inspector off — /check only (TEST groups keep auto-checking)
     if message.media_group_id:
         return  # part of an album — needs an explicit /check
     items = _items_from_reply(message)
