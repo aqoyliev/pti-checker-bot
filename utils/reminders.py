@@ -17,6 +17,7 @@ from html import escape
 from aiogram.utils.exceptions import BotBlocked, BotKicked, ChatNotFound, MethodIsNotAvailable
 
 from loader import bot
+from utils.email_alerts import send_overdue_alert
 from utils.db import (
     get_drivers,
     get_groups_for_reminders,
@@ -32,9 +33,13 @@ from utils.reminder_logic import OVERDUE_DAYS, decide_overdue_action, decide_wee
 _UNREACHABLE = (ChatNotFound, BotKicked, BotBlocked, MethodIsNotAvailable)
 
 
-def _driver_names(drivers: list[dict]) -> str:
+def _driver_names_plain(drivers: list[dict]) -> str:
     names = [d["name"] for d in drivers if d.get("name")]
-    return ", ".join(escape(n) for n in names) if names else "Driver"
+    return ", ".join(names) if names else "Driver"
+
+
+def _driver_names(drivers: list[dict]) -> str:
+    return escape(_driver_names_plain(drivers))
 
 
 def _weekly_text(drivers: list[dict]) -> str:
@@ -54,7 +59,7 @@ def _overdue_text(drivers: list[dict]) -> str:
 def _escalation_text(drivers: list[dict]) -> str:
     return (
         f"🚨 {_driver_names(drivers)}, your PTI is still overdue. Please send a PTI video "
-        "now — this reminder repeats every 3 hours until you do."
+        "now — this reminder repeats every 12 hours until you do."
     )
 
 
@@ -99,6 +104,13 @@ async def _process_group(group: dict, now: datetime) -> None:
     elif action == "escalation":
         if await _send(group_id, _escalation_text(drivers)):
             await mark_escalation_reminded(group_id, now)
+            # Email the global alert address on the same 12-hour cadence as the
+            # group nag (no-op unless SMTP + recipient are configured).
+            await send_overdue_alert(
+                group.get("unit_number"),
+                _driver_names_plain(drivers),
+                (now - reference).days,
+            )
 
 
 async def run_reminder_pass() -> None:

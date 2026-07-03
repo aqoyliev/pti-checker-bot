@@ -1,7 +1,7 @@
 """Pure tests for the reminder decision logic (utils/reminder_logic.py).
 
 No DB / network / aiogram — just the state machine for #8 (twice-weekly) and
-#9 (3-day overdue → next-day every-3-hours escalation).
+#9 (3-day overdue → next-day every-12-hours escalation).
 """
 from datetime import datetime, timedelta
 
@@ -69,11 +69,11 @@ def test_next_day_starts_escalation():
     assert decide_overdue_action(now, reference, reminded, None) == "escalation"
 
 
-def test_escalation_respects_three_hour_interval():
+def test_escalation_respects_twelve_hour_interval():
     now = datetime(2026, 6, 24, 12, 0)
     reference = now - timedelta(days=5)
     reminded = now - timedelta(days=2)
-    recent_esc = now - timedelta(hours=2)      # < 3h → quiet
+    recent_esc = now - timedelta(hours=11)      # < 12h → quiet
     assert decide_overdue_action(now, reference, reminded, recent_esc) == "none"
-    old_esc = now - timedelta(hours=3, minutes=1)  # >= 3h → fire
+    old_esc = now - timedelta(hours=12, minutes=1)  # >= 12h → fire
     assert decide_overdue_action(now, reference, reminded, old_esc) == "escalation"

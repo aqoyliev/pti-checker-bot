@@ -101,7 +101,7 @@ async def init_db():
             -- Reminder-engine bookkeeping (utils/reminders.py).
             -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
             -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
-            -- last_escalation_at: when the last every-3-hours escalation notice went out (#9).
+            -- last_escalation_at: when the last every-12-hours escalation notice went out (#9).
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
@@ -691,7 +691,7 @@ async def mark_escalation_reminded(group_id: int, at) -> None:
 
 async def reset_group_reminders(group_id: int) -> None:
     """Clear overdue/escalation state — called when a fresh PTI lands so the
-    every-3-hours nags stop immediately instead of waiting for the next pass."""
+    every-12-hours nags stop immediately instead of waiting for the next pass."""
     await _pool_check().execute(
         """UPDATE groups
            SET overdue_reminded_at = NULL, last_escalation_at = NULL
