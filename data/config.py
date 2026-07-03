@@ -59,3 +59,18 @@ FLEET_TZ = env.str("FLEET_TZ", default="America/New_York")
 # Apps, and until WEBAPP_URL is set the button is hidden (the server still runs).
 WEBAPP_URL = env.str("WEBAPP_URL", default="").strip().rstrip("/")
 WEBAPP_PORT = env.int("PORT", default=env.int("WEBAPP_PORT", default=8080))
+
+# Email alerts for the overdue escalation (#9). When a group enters the every-12h
+# overdue phase, the bot emails ALERT_EMAIL_TO alongside the group nag, so a
+# fleet manager hears about a non-compliant driver without watching the chat.
+# Sent via Gmail SMTP: set SMTP_USER to the Gmail address and SMTP_PASSWORD to a
+# Gmail *App Password* (16 chars, needs 2-Step Verification on the account) —
+# a normal login password won't work. Until SMTP_USER + SMTP_PASSWORD are set the
+# feature is a silent no-op (see utils/email_alerts.email_configured). Port 465 =
+# implicit SSL, else STARTTLS. Gmail sends From = the authenticated account.
+SMTP_HOST = env.str("SMTP_HOST", default="smtp.gmail.com")
+SMTP_PORT = env.int("SMTP_PORT", default=587)
+SMTP_USER = env.str("SMTP_USER", default="")
+SMTP_PASSWORD = env.str("SMTP_PASSWORD", default="").replace(" ", "")
+SMTP_FROM = env.str("SMTP_FROM", default="") or SMTP_USER
+ALERT_EMAIL_TO = env.str("ALERT_EMAIL_TO", default="")

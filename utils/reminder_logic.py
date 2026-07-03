@@ -14,7 +14,7 @@ WEEKLY_REMINDER_HOUR_UTC = 14             # don't fire before 14:00 UTC on those
 # #9 — overdue escalation.
 OVERDUE_DAYS = 3                          # quiet for this long → first reminder
 ESCALATION_GRACE = timedelta(days=1)      # one day after the first reminder before escalating
-ESCALATION_INTERVAL = timedelta(hours=3)  # then nag this often until a PTI lands
+ESCALATION_INTERVAL = timedelta(hours=12)  # then nag this often until a PTI lands
 
 
 def decide_weekly(
