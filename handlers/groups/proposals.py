@@ -7,7 +7,12 @@ from html import escape
 
 from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils.exceptions import MessageNotModified
+from aiogram.utils.exceptions import (
+    ChatNotFound,
+    MessageNotModified,
+    MethodIsNotAvailable,
+    Unauthorized,
+)
 
 from loader import dp, bot
 from utils.db import (
@@ -21,6 +26,7 @@ from utils.db import (
     get_open_proposals,
     get_pti_log,
     get_proposal,
+    mark_group_inactive,
     mark_pti_failed,
     reset_setup_nag,
     set_proposal_status,
@@ -176,6 +182,13 @@ async def setup_nag_loop():
         await asyncio.sleep(60)
 
 
+# Errors that mean the group is gone for good (kicked/blocked/deleted/not found).
+# Unauthorized is the parent of BotKicked/BotBlocked and also covers the bare
+# "Forbidden: the group chat was deleted" case. Marking the group inactive drops
+# it from get_groups_needing_setup_nag() so we stop retrying it every pass.
+_UNREACHABLE = (Unauthorized, ChatNotFound, MethodIsNotAvailable)
+
+
 async def _run_setup_nag_pass():
     now = datetime.utcnow()
     for g in await get_groups_needing_setup_nag():
@@ -185,6 +198,12 @@ async def _run_setup_nag_pass():
         try:
             await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
             await bump_setup_nag(g["group_id"])
+        except _UNREACHABLE as e:
+            logging.warning(
+                "Group %s unreachable during setup nag: %s — deactivating",
+                g["group_id"], type(e).__name__,
+            )
+            await mark_group_inactive(g["group_id"])
         except Exception:
             logging.exception("failed to send setup nag to %s", g["group_id"])
 
