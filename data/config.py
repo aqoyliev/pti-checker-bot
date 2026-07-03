@@ -39,6 +39,13 @@ PTI_TIRE_PASS = env.bool("PTI_TIRE_PASS", default=True)
 # filmed). Set False to always send the whole inspection in one call. (default: true)
 PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
 
+# Auto-inspect a standalone video from a registered driver without a /check
+# command (handlers/groups/pti.py:handle_group_video). When False, the bot
+# never auto-runs a PTI on group videos — every inspection must be requested
+# explicitly with /check (in-reply). Buffering, dedup, and /check are unaffected.
+# Set False to turn the auto-inspector off fleet-wide. (default: true)
+PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
+
 # Compliance enforcement. When False (default), the hourly loop never mutes
 # drivers and sends no overdue reminders to the group or to admins — it only
 # lifts any restrictions left over from when enforcement was on. Set True to
