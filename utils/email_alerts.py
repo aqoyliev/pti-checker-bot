@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 
@@ -40,6 +41,27 @@ def email_configured() -> bool:
     return bool(SMTP_HOST and ALERT_EMAIL_TO and SMTP_USER and SMTP_PASSWORD)
 
 
+def _resolve_ipv4(host: str, port: int) -> str:
+    """Return an IPv4 address for *host*.
+
+    The container network (Railway) has no IPv6 egress route, so if smtplib is
+    left to choose the address family it tries the host's AAAA record first and
+    fails instantly with ``OSError: [Errno 101] Network is unreachable``.
+    Resolving the A record ourselves and dialling that keeps outbound mail
+    working; the original hostname is still used for TLS (SNI + cert check)."""
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    return infos[0][4][0]
+
+
+class _IPv4SMTPSSL(smtplib.SMTP_SSL):
+    """SMTP_SSL that dials a pre-resolved IPv4 address but validates the TLS
+    certificate against the real hostname rather than the bare IP."""
+
+    def _get_socket(self, host, port, timeout):
+        sock = socket.create_connection((host, port), timeout, self.source_address)
+        return self.context.wrap_socket(sock, server_hostname=SMTP_HOST)
+
+
 def _send_blocking(subject: str, body: str) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -47,13 +69,17 @@ def _send_blocking(subject: str, body: str) -> None:
     msg["To"] = ALERT_EMAIL_TO
     msg.set_content(body)
 
+    ipv4 = _resolve_ipv4(SMTP_HOST, SMTP_PORT)
+    context = ssl.create_default_context()
+
     if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context()) as s:
+        with _IPv4SMTPSSL(ipv4, SMTP_PORT, context=context) as s:
             s.login(SMTP_USER, SMTP_PASSWORD)
             s.send_message(msg)
     else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
-            s.starttls(context=ssl.create_default_context())
+        with smtplib.SMTP(ipv4, SMTP_PORT) as s:
+            s._host = SMTP_HOST  # STARTTLS uses this for SNI / cert validation
+            s.starttls(context=context)
             s.login(SMTP_USER, SMTP_PASSWORD)
             s.send_message(msg)
 
@@ -78,5 +104,9 @@ async def send_overdue_alert(unit_number: str | None, driver_names: str, days_ov
     )
     try:
         await asyncio.to_thread(_send_blocking, subject, body)
+    except OSError as e:
+        # Connectivity failure (host unreachable, port blocked, DNS): expected
+        # and handled, so log one line instead of flooding a full traceback.
+        logging.warning("Could not reach SMTP server for unit %s alert: %s", unit, e)
     except Exception:
         logging.exception("Failed to send overdue alert email for unit %s", unit)
