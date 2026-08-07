@@ -53,6 +53,17 @@ async def cmd_add_driver(message: types.Message):
         )
         return
 
+    # Replying to one of the bot's own setup messages would otherwise register
+    # the bot as a driver of its own group -- it then counts toward the quota
+    # and gets tagged in reminders.
+    if reply.from_user.is_bot:
+        await message.reply(
+            "That's a bot, not a driver. Reply to a message the "
+            "<b>driver</b> sent.",
+            parse_mode="HTML",
+        )
+        return
+
     driver_name = args.strip()
     parts = driver_name.split(None, 1)
     if parts and parts[0].startswith("@"):

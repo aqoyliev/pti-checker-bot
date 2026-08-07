@@ -27,6 +27,9 @@ from utils.db import (
     get_pti_log,
     get_proposal,
     mark_group_inactive,
+    mark_unreachable,
+    clear_unreachable,
+    UNREACHABLE_LIMIT,
     mark_pti_failed,
     reset_setup_nag,
     set_proposal_status,
@@ -198,12 +201,23 @@ async def _run_setup_nag_pass():
         try:
             await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
             await bump_setup_nag(g["group_id"])
+            await clear_unreachable(g["group_id"])
         except _UNREACHABLE as e:
-            logging.warning(
-                "Group %s unreachable during setup nag: %s — deactivating",
-                g["group_id"], type(e).__name__,
-            )
-            await mark_group_inactive(g["group_id"])
+            # Same rule as the reminder path: one failure is not proof the group
+            # is gone (the local Bot API server forgets chats on restart), so
+            # deactivate only after a sustained streak.
+            strikes = await mark_unreachable(g["group_id"])
+            if strikes >= UNREACHABLE_LIMIT:
+                logging.warning(
+                    "Group %s unreachable %s times in a row during setup nag (%s)"
+                    " — deactivating", g["group_id"], strikes, type(e).__name__,
+                )
+                await mark_group_inactive(g["group_id"])
+            else:
+                logging.warning(
+                    "Group %s unreachable during setup nag (%s), strike %s/%s",
+                    g["group_id"], type(e).__name__, strikes, UNREACHABLE_LIMIT,
+                )
         except Exception:
             logging.exception("failed to send setup nag to %s", g["group_id"])
 

@@ -79,6 +79,12 @@ async def init_db():
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS content_signature TEXT;
 
+            -- Consecutive "unreachable" sends. A single failure is not proof a
+            -- group is gone: the local Bot API server loses its chat state on
+            -- restart and answers "chat not found" for chats it has not seen
+            -- since. Only a sustained streak deactivates. See mark_unreachable.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS unreachable_strikes INT DEFAULT 0;
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key        TEXT PRIMARY KEY,
                 value      TEXT NOT NULL,
@@ -244,6 +250,36 @@ async def upsert_group(group_id: int):
 async def mark_group_inactive(group_id: int):
     await _pool_check().execute(
         "UPDATE groups SET is_active = FALSE WHERE group_id = $1", group_id,
+    )
+
+
+# How many consecutive unreachable sends before a group is really deactivated.
+UNREACHABLE_LIMIT = 3
+
+
+async def mark_unreachable(group_id: int) -> int:
+    """Record one unreachable send and return the new strike count.
+
+    Deliberately does NOT deactivate on its own. One failure is unreliable
+    evidence -- the local Bot API server forgets every chat when it restarts
+    and then reports "chat not found" for groups the bot is still in, which is
+    how a fleet of healthy groups got deactivated after a redeploy.
+    """
+    return await _pool_check().fetchval(
+        """UPDATE groups
+              SET unreachable_strikes = COALESCE(unreachable_strikes, 0) + 1
+            WHERE group_id = $1
+        RETURNING unreachable_strikes""",
+        group_id,
+    )
+
+
+async def clear_unreachable(group_id: int):
+    """Reset the strike counter after any successful send."""
+    await _pool_check().execute(
+        "UPDATE groups SET unreachable_strikes = 0"
+        " WHERE group_id = $1 AND COALESCE(unreachable_strikes, 0) <> 0",
+        group_id,
     )
 
 
