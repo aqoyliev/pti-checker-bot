@@ -26,6 +26,9 @@ from utils.db import (
     mark_group_inactive,
     mark_overdue_reminded,
     mark_weekly_reminder,
+    mark_unreachable,
+    clear_unreachable,
+    UNREACHABLE_LIMIT,
     reset_group_reminders,
 )
 from utils.reminder_logic import OVERDUE_DAYS, decide_overdue_action, decide_weekly
@@ -42,35 +45,61 @@ def _driver_names(drivers: list[dict]) -> str:
     return escape(_driver_names_plain(drivers))
 
 
+# Every reminder spells out the submission step: send the video, then reply
+# <code>/check</code> to it. A registered driver's standalone video is picked up
+# automatically, but albums and photos always need the explicit reply, so the
+# instruction is the one that works in every case.
+_HOW = "Reply <code>/check</code> to your PTI video."
+
+
 def _weekly_text(drivers: list[dict]) -> str:
     return (
         f"⏰ <b>PTI reminder</b> — {_driver_names(drivers)}, please send your "
-        "pre-trip inspection video. Drivers should submit a PTI at least twice a week."
+        f"pre-trip inspection video. {_HOW}\n"
+        "Drivers should submit a PTI at least twice a week."
     )
 
 
 def _overdue_text(drivers: list[dict]) -> str:
     return (
         f"⚠️ <b>No PTI in {OVERDUE_DAYS} days.</b> {_driver_names(drivers)}, please send "
-        "your PTI video today."
+        f"your PTI video today. {_HOW}"
     )
 
 
 def _escalation_text(drivers: list[dict]) -> str:
     return (
         f"🚨 {_driver_names(drivers)}, your PTI is still overdue. Please send a PTI video "
-        "now — this reminder repeats every 12 hours until you do."
+        f"now. {_HOW}\nThis reminder repeats every 12 hours until you do."
     )
 
 
 async def _send(group_id: int, text: str) -> bool:
-    """Send a reminder; return False (and deactivate) if the group is unreachable."""
+    """Send a reminder; return False if the group looks unreachable.
+
+    Deactivation needs UNREACHABLE_LIMIT *consecutive* failures. A single one
+    proves nothing: the bot talks to a local Bot API server whose chat state is
+    lost on restart, after which it answers "chat not found" for groups the bot
+    is still a member of. Treating that as terminal silently deactivated a
+    large batch of healthy groups.
+    """
     try:
         await bot.send_message(group_id, text, parse_mode="HTML")
+        await clear_unreachable(group_id)
         return True
     except _UNREACHABLE as e:
-        logging.warning("Group %s unreachable during reminder: %s", group_id, type(e).__name__)
-        await mark_group_inactive(group_id)
+        strikes = await mark_unreachable(group_id)
+        if strikes >= UNREACHABLE_LIMIT:
+            logging.warning(
+                "Group %s unreachable %s times in a row (%s) — deactivating",
+                group_id, strikes, type(e).__name__,
+            )
+            await mark_group_inactive(group_id)
+        else:
+            logging.warning(
+                "Group %s unreachable (%s), strike %s/%s — keeping it active",
+                group_id, type(e).__name__, strikes, UNREACHABLE_LIMIT,
+            )
         return False
     except Exception:
         logging.exception("Failed to send reminder to group %s", group_id)

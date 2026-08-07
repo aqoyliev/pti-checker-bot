@@ -147,3 +147,10 @@ docker-compose.override.yml
 IMG_*
 _tg_capture/
 _frametest/
+# Fleet-audit artifacts (scripts/tg_*.py) — contain group ids, chat titles and
+# driver names. Operational data, never source.
+rehome_plan.json
+driver_matches.json
+tg_dialogs.json
+add_bot_log.jsonl
+*.session
