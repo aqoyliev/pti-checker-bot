@@ -42,24 +42,32 @@ def _driver_names(drivers: list[dict]) -> str:
     return escape(_driver_names_plain(drivers))
 
 
+# Every reminder spells out the submission step: send the video, then reply
+# <code>/check</code> to it. A registered driver's standalone video is picked up
+# automatically, but albums and photos always need the explicit reply, so the
+# instruction is the one that works in every case.
+_HOW = "Reply <code>/check</code> to your PTI video."
+
+
 def _weekly_text(drivers: list[dict]) -> str:
     return (
         f"⏰ <b>PTI reminder</b> — {_driver_names(drivers)}, please send your "
-        "pre-trip inspection video. Drivers should submit a PTI at least twice a week."
+        f"pre-trip inspection video. {_HOW}\n"
+        "Drivers should submit a PTI at least twice a week."
     )
 
 
 def _overdue_text(drivers: list[dict]) -> str:
     return (
         f"⚠️ <b>No PTI in {OVERDUE_DAYS} days.</b> {_driver_names(drivers)}, please send "
-        "your PTI video today."
+        f"your PTI video today. {_HOW}"
     )
 
 
 def _escalation_text(drivers: list[dict]) -> str:
     return (
         f"🚨 {_driver_names(drivers)}, your PTI is still overdue. Please send a PTI video "
-        "now — this reminder repeats every 12 hours until you do."
+        f"now. {_HOW}\nThis reminder repeats every 12 hours until you do."
     )
 
 

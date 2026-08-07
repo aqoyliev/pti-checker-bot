@@ -194,12 +194,17 @@ async def run_compliance_check():
 
             # The chat owner can't actually be muted, so don't claim they were
             # restricted — just nudge them. Everyone else really is restricted.
+            # Plain text: this send has no parse_mode, so no HTML markup here.
             if outcome is RestrictOutcome.OWNER:
-                reminder = f"⚠️ {name}, your PTI is overdue. Please submit one as soon as possible."
+                reminder = (
+                    f"⚠️ {name}, your PTI is overdue. Please submit one as soon as "
+                    f"possible. Reply /check to your PTI video."
+                )
             else:
                 reminder = (
                     f"⚠️ {name}, your PTI is overdue. "
-                    f"You have been restricted until a PTI is submitted."
+                    f"You have been restricted until a PTI is submitted. "
+                    f"Reply /check to your PTI video."
                 )
             try:
                 await bot.send_message(group_id, reminder)
