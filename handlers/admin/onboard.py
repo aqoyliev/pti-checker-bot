@@ -24,11 +24,12 @@ from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.exceptions import MessageNotModified
 
 from data.config import ADMINS
 from loader import bot, dp
 from utils import userbot
-from utils.db import add_driver, get_group, set_group_unit
+from utils.db import add_driver, get_active_units, get_group, set_group_unit
 from utils.unit_parse import guess_unit, looks_retired
 
 # group_id -> pending onboarding state, keyed per admin so two admins editing
@@ -39,20 +40,59 @@ _pending: dict[tuple[int, int], dict] = {}
 MAX_DRIVERS = 2
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
+# Picked drivers are numbered in the order they were tapped rather than all
+# getting the same tick, so the admin can see at a glance that two *different*
+# people were selected -- names in these groups are often near-identical.
+_ORDINALS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣")
+_UNPICKED = "▫️"
+
 
 def _key(admin_id: int, group_id: int) -> tuple[int, int]:
     return (admin_id, group_id)
+
+
+async def _checked_guess(title: str, description: str) -> tuple[str | None, str]:
+    """Guess the unit, then keep it only if it is an active unit.
+
+    A group title outlives the truck -- groups get renamed late, or never -- so
+    a parsed number can name a unit that left the fleet months ago. Rather than
+    offer it, fall back to "not found" and make the admin say what it is.
+    An empty units list means none has been supplied yet, so the check is
+    skipped rather than rejecting everything.
+    """
+    unit, source = guess_unit(title, description)
+    if not unit:
+        return None, ""
+    active = await get_active_units()
+    if active and unit not in active:
+        logging.info("unit %s parsed from %s is not in the active list — ignoring",
+                     unit, source)
+        return None, ""
+    return unit, source
+
+
+def _marker(selected: list[int], user_id: int) -> str:
+    """The button prefix for one member: 1️⃣/2️⃣ in pick order, else ▫️."""
+    if user_id not in selected:
+        return _UNPICKED
+    position = selected.index(user_id)
+    # Deselecting the first pick renumbers the rest, since `selected` is a list
+    # and the marker is derived from it rather than stored on the member.
+    return _ORDINALS[position] if position < len(_ORDINALS) else "✅"
 
 
 def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
     st = _pending[_key(admin_id, group_id)]
     kb = InlineKeyboardMarkup(row_width=1)
     for m in st["members"]:
-        chosen = m.user_id in st["selected"]
         kb.add(InlineKeyboardButton(
-            f"{'✅' if chosen else '▫️'} {m.label}"[:60],
+            f"{_marker(st['selected'], m.user_id)} {m.label}"[:60],
             callback_data=f"ob:t:{group_id}:{m.user_id}",
         ))
+    # Refresh is the fix for the commonest failure: the userbot account was not
+    # in the group when the prompt was built. Add it, tap this, get the roster.
+    kb.add(InlineKeyboardButton("🔄 Refresh members",
+                                callback_data=f"ob:r:{group_id}:0"))
     kb.add(
         InlineKeyboardButton("✏️ Change unit", callback_data=f"ob:u:{group_id}:0"),
         InlineKeyboardButton("💾 Save", callback_data=f"ob:s:{group_id}:0"),
@@ -73,16 +113,24 @@ def _text(admin_id: int, group_id: int) -> str:
     source = st.get("unit_source") or ""
     label = f"Unit (from {source})" if source else "Unit (not found)"
     lines.append(f"<b>{label}:</b> <code>{escape(str(unit))}</code>")
+    if st.get("unit_inactive"):
+        lines.append("⚠️ That unit is not in the active list — check it before "
+                     "saving.")
     if st["retired_marker"]:
         lines.append("⚠️ The title says this group is inactive/moved — check "
                      "it is really the live chat before saving.")
     if not st["members"]:
-        lines.append("\n⚠️ No member list available (the userbot account may not "
-                     "be in this group). Add drivers with /adddriver in the group.")
+        lines.append("\n⚠️ No member list available — the userbot account is "
+                     "probably not in this group. Add it, then tap "
+                     "<b>Refresh members</b>. (Or add drivers with /adddriver "
+                     "in the group.)")
     else:
-        chosen = len(st["selected"])
         lines.append(f"\nTap up to {MAX_DRIVERS} drivers, then Save. "
-                     f"Selected: {chosen}/{MAX_DRIVERS}")
+                     f"Selected: {len(st['selected'])}/{MAX_DRIVERS}")
+        for uid in st["selected"]:
+            member = next((x for x in st["members"] if x.user_id == uid), None)
+            name = member.label if member else str(uid)
+            lines.append(f"{_marker(st['selected'], uid)} {escape(name)}")
     return "\n".join(lines)
 
 
@@ -97,7 +145,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
     drivers_pool = [m for m in members if not m.is_bot][:40]
-    unit, unit_source = guess_unit(title, description)
+    unit, unit_source = await _checked_guess(title, description)
 
     delivered = False
     for admin_id in _ADMIN_IDS:
@@ -156,6 +204,36 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
+    if action == "r":
+        # The account was probably just added to the group. Re-read the roster
+        # and the About text; keep whatever drivers were already picked, minus
+        # anyone who is no longer a member.
+        await call.answer("Checking…")
+        members = await userbot.list_members(group_id)
+        st["members"] = [m for m in members if not m.is_bot][:40]
+        st["description"] = await userbot.get_description(group_id)
+        present = {m.user_id for m in st["members"]}
+        st["selected"] = [uid for uid in st["selected"] if uid in present]
+
+        # A description that was unreadable before may carry the unit now. Never
+        # overwrite a unit the admin typed by hand.
+        if st.get("unit_source") != "you":
+            st["unit"], st["unit_source"] = await _checked_guess(
+                st["title"], st["description"])
+
+        try:
+            await call.message.edit_text(
+                _text(call.from_user.id, group_id), parse_mode="HTML",
+                reply_markup=_keyboard(call.from_user.id, group_id))
+        except MessageNotModified:
+            # Refreshing an unchanged prompt is the normal "still nothing" case.
+            pass
+        if not st["members"]:
+            await call.answer(
+                "Still no member list. Add the userbot account to the group "
+                "first, then tap Refresh again.", show_alert=True)
+        return
+
     if action == "u":
         await state.update_data(onboard_group=group_id)
         await OnboardSG.unit.set()
@@ -205,6 +283,11 @@ async def on_unit_typed(message: types.Message, state: FSMContext):
         return
     st["unit"] = message.text.strip()
     st["unit_source"] = "you"
+    # A hand-typed unit is never rejected — the admin may be configuring a truck
+    # before it reaches the weekly list — but an off-list number is worth saying
+    # out loud, since it is usually a typo.
+    active = await get_active_units()
+    st["unit_inactive"] = bool(active) and st["unit"] not in active
     await message.answer(_text(message.from_user.id, group_id), parse_mode="HTML",
                          reply_markup=_keyboard(message.from_user.id, group_id))
 

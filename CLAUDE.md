@@ -23,6 +23,7 @@ issues) is posted back into the group.
   `call_gemini`, `call_gemini_photos`, `parse_result`) plus a CLI for manually
   checking a single video: `python test_pti.py <video.mp4>` (needs a Gemini key).
 - **`utils/scheduler.py` + `utils/enforcement.py`** — hourly compliance loop.
+  **The bot never restricts a driver** (see Conventions).
 - **`webapp/`** — the web admin panel (Telegram Mini App). `server.py` is an
   aiohttp app started from `on_startup` (listens on `PORT`/`WEBAPP_PORT`,
   default 8080); `auth.py` validates the Mini App's signed `initData` (admins =
@@ -77,6 +78,13 @@ require real secrets. Keep new unit tests pure (no network / no DB).
 - All Telegram messages use HTML parse mode — **escape** any user/model text
   (`format_result` uses `html.escape`).
 - Route DB access through `utils/db.py` helpers.
+- **The bot never restricts, mutes or otherwise silences a driver.** Overdue
+  compliance is answered with a reminder in the group and a summary to admins —
+  never by taking away someone's ability to post. `utils/enforcement.py` has no
+  `mute_driver()` and no muted-permission set, and a test asserts they stay
+  absent; `unmute_driver()` exists only to *lift* restrictions left over from
+  before this rule. `ENFORCEMENT_ENABLED` only toggles the reminders. Don't
+  reintroduce muting behind a config flag.
 
 ## Group onboarding
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import asyncpg
 from data.config import DATABASE_URL, FLEET_TZ
@@ -126,6 +127,17 @@ async def init_db():
                 verified_at TIMESTAMP
             );
 
+            -- The fleet's currently-active unit numbers, replaced wholesale by
+            -- an admin (see handlers/admin/units.py). Onboarding only offers a
+            -- unit it can find in here, so a group named after a retired truck
+            -- reads as "not found" instead of quietly configuring a dead unit.
+            -- Empty table = no list supplied yet, which disables the check
+            -- rather than rejecting everything.
+            CREATE TABLE IF NOT EXISTS active_units (
+                unit     TEXT PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT NOW()
+            );
+
             -- Chat title cache, refreshed opportunistically (group_title
             -- middleware + web panel fetches) so listing groups doesn't need a
             -- get_chat round-trip per group.
@@ -185,6 +197,51 @@ async def set_setting(key: str, value: str) -> None:
            ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
         key, value,
     )
+
+
+# ---------- active units ----------
+
+ACTIVE_UNITS_UPDATED_KEY = "active_units_updated_at"
+
+
+async def get_active_units() -> set[str]:
+    """Every active unit number. Empty set means "no list supplied yet"."""
+    rows = await _pool_check().fetch("SELECT unit FROM active_units")
+    return {r["unit"] for r in rows}
+
+
+async def replace_active_units(units: list[str]) -> tuple[set[str], set[str]]:
+    """Swap the list wholesale. Returns (added, removed) for the confirmation.
+
+    Wholesale replacement, not a merge: the weekly list *is* the fleet, so a
+    truck that drops off it has to disappear here too, or retired units would
+    accumulate forever and the "is this unit active?" check would rot.
+    """
+    pool = _pool_check()
+    wanted = {u.strip() for u in units if u.strip()}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
+            added, removed = wanted - existing, existing - wanted
+            if removed:
+                await conn.execute("DELETE FROM active_units WHERE unit = ANY($1::text[])",
+                                   list(removed))
+            if added:
+                await conn.executemany("INSERT INTO active_units (unit) VALUES ($1)",
+                                       [(u,) for u in added])
+    await set_setting(ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat())
+    return added, removed
+
+
+async def active_units_updated_at() -> datetime | None:
+    """When the list was last replaced, or None if it never has been."""
+    raw = await get_setting(ACTIVE_UNITS_UPDATED_KEY)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 # ---------- admins ----------
