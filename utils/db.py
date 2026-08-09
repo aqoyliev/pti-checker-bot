@@ -406,7 +406,12 @@ async def get_groups_needing_setup_nag() -> list[dict]:
         """SELECT g.* FROM groups g
            WHERE g.setup_complete = FALSE
              AND COALESCE(g.is_active, TRUE) = TRUE
-             AND COALESCE(g.setup_nag_count, 0) < 3
+             -- One prompt per group, full stop. The prompt is a DM to an admin
+             -- with a member picker in it; re-sending turns their chat into a
+             -- stack of identical prompts, all but the newest already dead
+             -- (the pending state is per-process). A group that never got one
+             -- is reachable with /onboard <group_id>.
+             AND COALESCE(g.setup_nag_count, 0) < 1
              AND NOT EXISTS (
                SELECT 1 FROM pending_proposals p
                WHERE p.group_id = g.group_id AND p.status = 'open'

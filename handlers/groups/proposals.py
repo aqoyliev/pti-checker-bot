@@ -49,7 +49,9 @@ REMINDER_MAX = 3
 # forever. Set False to silence the nags.
 PROPOSAL_REMINDERS_ENABLED = True
 SETUP_NAG_INTERVAL = timedelta(minutes=10)
-SETUP_NAG_MAX = 3
+# One prompt per group. The real ceiling lives in get_groups_needing_setup_nag
+# (setup_nag_count < 1); this constant only documents it.
+SETUP_NAG_MAX = 1
 
 # When False (current), an unconfigured group is never nagged in-chat — the
 # onboarding prompt is re-sent to the admins in DM instead. Flip to True to

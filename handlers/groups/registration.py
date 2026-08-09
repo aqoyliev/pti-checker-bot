@@ -10,6 +10,7 @@ from handlers.admin.onboard import start_onboarding
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
+    bump_setup_nag,
 )
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
@@ -48,7 +49,13 @@ async def on_bot_added(message: types.Message):
     # posted asking anyone to register. The group stays unconfigured and shows
     # up in the setup nag / `/onboard <group_id>` instead.
     try:
-        if not await start_onboarding(message.chat.id, message.chat.title or ""):
+        if await start_onboarding(message.chat.id, message.chat.title or ""):
+            # This *is* the group's one prompt, so record it against the nag
+            # budget — otherwise the loop sends an identical second one ten
+            # minutes later. A prompt that reached nobody is deliberately not
+            # counted, leaving the loop one retry.
+            await bump_setup_nag(message.chat.id)
+        else:
             logging.warning(
                 "group %s (%r) joined but no admin could be prompted — it stays "
                 "unconfigured until an admin runs /onboard",
