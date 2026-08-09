@@ -84,14 +84,22 @@ def _text(admin_id: int, group_id: int) -> str:
     return "\n".join(lines)
 
 
-async def start_onboarding(group_id: int, title: str) -> None:
-    """Called when the bot joins a group. Never messages the group itself."""
+async def start_onboarding(group_id: int, title: str) -> bool:
+    """Called when the bot joins a group. Never messages the group itself.
+
+    Returns True if at least one admin actually received the prompt. A bot
+    cannot open a DM with someone who has never started it, so "no admin
+    reachable" is an ordinary outcome, not an error -- and the caller has to
+    know about it, or the group is left with no setup path at all.
+    """
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
     drivers_pool = [m for m in members if not m.is_bot][:40]
 
+    delivered = False
     for admin_id in _ADMIN_IDS:
-        _pending[_key(admin_id, group_id)] = {
+        key = _key(admin_id, group_id)
+        _pending[key] = {
             "title": title,
             "description": description,
             "unit": parse_unit(title),
@@ -104,8 +112,15 @@ async def start_onboarding(group_id: int, title: str) -> None:
                 admin_id, _text(admin_id, group_id),
                 parse_mode="HTML", reply_markup=_keyboard(admin_id, group_id),
             )
+            delivered = True
         except Exception:
+            # Most often "bot can't initiate conversation with a user".
             logging.exception("could not send onboarding prompt to admin %s", admin_id)
+            _pending.pop(key, None)
+
+    if not delivered:
+        logging.warning("no admin could be reached to onboard group %s", group_id)
+    return delivered
 
 
 class OnboardSG(StatesGroup):

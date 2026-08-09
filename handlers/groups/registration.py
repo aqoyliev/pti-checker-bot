@@ -43,13 +43,16 @@ async def on_bot_added(message: types.Message):
     # title is now used, but only as a *suggestion* an admin confirms, because
     # it is 79.5% accurate and sometimes names a different valid unit.
     try:
-        await start_onboarding(message.chat.id, message.chat.title or "")
-        return
+        if await start_onboarding(message.chat.id, message.chat.title or ""):
+            return
     except Exception:
         logging.exception("onboarding prompt failed for %s; falling back to manual",
                           message.chat.id)
 
-    # Fallback only: admins unreachable or the userbot is unconfigured.
+    # Fallback: no admin could be DM'd (a bot cannot open a DM with someone who
+    # never started it), so the group would otherwise be left with no way to get
+    # configured at all. Asking the group is worse than not asking drivers, but
+    # it is much better than silence.
     await message.answer(MANUAL_SETUP_MESSAGE, parse_mode="HTML")
 
 
