@@ -13,7 +13,17 @@ created from -- messages, contacts, groups, everything. Anyone with access to
 the Railway project can read it. Use an account that only exists for this, not
 a personal one, and revoke it from Telegram > Settings > Devices when done.
 
+NEVER ship a session you also use locally. Telegram revokes an authorization
+key seen from two IP addresses at once (AuthKeyDuplicatedError), killing both
+copies -- which is what happened on 2026-08-09 when the `fleet_audit` session
+was sent to Railway and then used from a local script. Hence the default here
+is `bot_userbot`, a session that exists only to be deployed:
+
+    railway run py -3.11 scripts/tg_login.py --name bot_userbot
+    railway run py -3.11 scripts/tg_session_to_railway.py
+
     py -3.11 scripts/tg_session_to_railway.py [--service pti-checker-bot]
+                                              [--session bot_userbot]
 """
 from __future__ import annotations
 
@@ -25,18 +35,25 @@ from pathlib import Path
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 
-SESSION = Path.home() / ".pti-tg" / "fleet_audit"
+SESSION_DIR = Path.home() / ".pti-tg"
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--service", default="pti-checker-bot")
+    ap.add_argument("--session", default="bot_userbot",
+                    help="session name under ~/.pti-tg. Must NOT be one you use "
+                         "locally (default: bot_userbot)")
     ap.add_argument("--print-only", action="store_true",
                     help="print the value instead of setting it (avoid: it is a credential)")
     args = ap.parse_args()
 
-    if not SESSION.with_suffix(".session").exists():
-        raise SystemExit(f"no session at {SESSION}.session — run scripts/tg_login.py first")
+    session = SESSION_DIR / args.session
+    if not session.with_suffix(".session").exists():
+        raise SystemExit(
+            f"no session at {session}.session — create one with:\n"
+            f"  railway run py -3.11 scripts/tg_login.py --name {args.session}"
+        )
 
     import os
     api_id = os.environ.get("TELEGRAM_API_ID")
@@ -44,7 +61,7 @@ def main() -> None:
     if not api_id or not api_hash:
         raise SystemExit("TELEGRAM_API_ID / TELEGRAM_API_HASH not set (use `railway run`).")
 
-    with TelegramClient(str(SESSION), int(api_id), api_hash) as client:
+    with TelegramClient(str(session), int(api_id), api_hash) as client:
         me = client.get_me()
         value = StringSession.save(client.session)
 

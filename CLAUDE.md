@@ -132,6 +132,20 @@ rather than rejecting every unit.
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
 
+**One session per host.** Telegram revokes an authorization key seen from two IP
+addresses at once (`AuthKeyDuplicatedError`) and *both* copies die — this took
+out member lookup on 2026-08-09, when the session deployed to Railway was also
+used by a local script. `~/.pti-tg/fleet_audit` is for local tooling,
+`~/.pti-tg/bot_userbot` is for Railway, and they must never be the same file.
+Create one with `scripts/tg_login.py --name <n>`; recovery from a revoked key
+means moving the dead `.session` aside (Telethon retries it instead of
+prompting) and logging in again.
+
+Telethon also cannot address a chat by bare id on a fresh session — the access
+hash is only learned by walking the dialog list, so `get_entity(-100…)` raises
+`ValueError` and member lookup silently returns `[]`. `utils/userbot.py` warms
+the dialog cache once on the first unresolved chat; don't remove that.
+
 The userbot is strictly read-only (never sends, joins, leaves or edits) and
 connects lazily, so a bot that never onboards a group never opens the session.
 Every failure path degrades — a missing session, an unauthorized account, or a
