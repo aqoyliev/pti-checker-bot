@@ -82,3 +82,15 @@ SMTP_USER = env.str("SMTP_USER", default="")
 SMTP_PASSWORD = env.str("SMTP_PASSWORD", default="").replace(" ", "")
 SMTP_FROM = env.str("SMTP_FROM", default="") or SMTP_USER
 ALERT_EMAIL_TO = env.str("ALERT_EMAIL_TO", default="")
+
+# --- userbot (member lookup) ---
+# The Bot API cannot list group members, so onboarding borrows a *user* session
+# purely to read the roster. All three are optional: without them the feature
+# degrades to "no member buttons" rather than failing. See utils/userbot.py.
+TELEGRAM_API_ID = env.str("TELEGRAM_API_ID", default="")
+TELEGRAM_API_HASH = env.str("TELEGRAM_API_HASH", default="")
+# A Telethon StringSession — how the session travels to Railway (a .session file
+# would not survive a redeploy). Treat it like a password: it is full access to
+# the account it was made from.
+TELEGRAM_SESSION = env.str("TELEGRAM_SESSION", default="")
+TELEGRAM_SESSION_FILE = env.str("TELEGRAM_SESSION_FILE", default="")

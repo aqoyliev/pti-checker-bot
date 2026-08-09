@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from html import escape
 
 from aiogram import types
 
 from loader import dp, bot
+from handlers.admin.onboard import start_onboarding
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
@@ -19,11 +21,11 @@ INTRO_MESSAGE = (
     "and I'll do the rest. Type <code>/help</code> any time for the full guide."
 )
 
-MANUAL_SETUP_MESSAGE = (
-    "This group is not configured yet. Anyone in the group can run:\n"
-    "1. Have the driver send a message, then reply with: <code>/adddriver Driver Name</code>\n"
-    "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>"
-)
+# NOTE: there is deliberately no "this group is not configured, run /setunit"
+# message any more. Drivers are never asked to register or configure anything;
+# the unit comes off the title/description and the drivers are picked by an
+# admin in DM. /adddriver and /setunit still work as a manual escape hatch,
+# they are just not advertised to the group.
 
 
 @dp.message_handler(content_types=types.ContentType.NEW_CHAT_MEMBERS)
@@ -33,11 +35,27 @@ async def on_bot_added(message: types.Message):
         return
 
     await upsert_group(message.chat.id)
-
-    # #1/#2: the bot does NOT read the group's name or bio. Setup is fully manual
-    # — anyone runs /adddriver and /setunit.
     await message.answer(INTRO_MESSAGE, parse_mode="HTML")
-    await message.answer(MANUAL_SETUP_MESSAGE, parse_mode="HTML")
+
+    # Drivers are no longer asked to configure anything. The bot reads the unit
+    # off the title/description and hands the admins a member picker in DM
+    # instead. This reverses the earlier #1/#2 rule ("never read the group's
+    # name") — the title is now used, but only as a *suggestion* an admin
+    # confirms, because it is 79.5% accurate and sometimes names a different
+    # valid unit.
+    #
+    # If no admin can be reached the group is left alone on purpose: nothing is
+    # posted asking anyone to register. The group stays unconfigured and shows
+    # up in the setup nag / `/onboard <group_id>` instead.
+    try:
+        if not await start_onboarding(message.chat.id, message.chat.title or ""):
+            logging.warning(
+                "group %s (%r) joined but no admin could be prompted — it stays "
+                "unconfigured until an admin runs /onboard",
+                message.chat.id, message.chat.title,
+            )
+    except Exception:
+        logging.exception("onboarding prompt failed for %s", message.chat.id)
 
 
 @dp.message_handler(commands=["adddriver"], chat_type=GROUP_TYPES)
