@@ -47,6 +47,9 @@ from utils.unit_parse import guess_unit, looks_retired
 _pending: dict[tuple[int, int], dict] = {}
 
 MAX_DRIVERS = 2
+# Member buttons per row, and how much of a name fits in one that narrow.
+MEMBER_COLUMNS = 2
+LABEL_CHARS = 24
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
 # Picked drivers are numbered in the order they were tapped rather than all
@@ -109,31 +112,39 @@ def _hidden_count(st: dict) -> int:
 
 def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
     st = _pending[_key(admin_id, group_id)]
-    kb = InlineKeyboardMarkup(row_width=1)
-    for m in _visible(st):
-        kb.add(InlineKeyboardButton(
-            f"{_marker(st['selected'], m.user_id)} {m.label}"[:60],
+    kb = InlineKeyboardMarkup(row_width=MEMBER_COLUMNS)
+
+    # Two per row: a staff-heavy group runs to dozens of names, and one button
+    # per row pushes Save off the bottom of the screen. Labels are cut shorter
+    # to match the narrower button.
+    people = [
+        InlineKeyboardButton(
+            f"{_marker(st['selected'], m.user_id)} {m.label}"[:LABEL_CHARS],
             callback_data=f"ob:t:{group_id}:{m.user_id}",
-        ))
+        )
+        for m in _visible(st)
+    ]
+    for i in range(0, len(people), MEMBER_COLUMNS):
+        kb.row(*people[i:i + MEMBER_COLUMNS])
 
     # Escape hatch: someone marked "not a driver" in another group may well be
     # the driver here, and without this they would be unreachable.
     hidden = _hidden_count(st)
     if hidden:
-        kb.add(InlineKeyboardButton(f"👥 Show {hidden} hidden",
+        kb.row(InlineKeyboardButton(f"👥 Show {hidden} hidden",
                                     callback_data=f"ob:a:{group_id}:0"))
     elif st.get("show_all") and st["members"]:
-        kb.add(InlineKeyboardButton("🙈 Hide known non-drivers",
+        kb.row(InlineKeyboardButton("🙈 Hide known non-drivers",
                                     callback_data=f"ob:a:{group_id}:0"))
     # Refresh is the fix for the commonest failure: the userbot account was not
     # in the group when the prompt was built. Add it, tap this, get the roster.
-    kb.add(InlineKeyboardButton("🔄 Refresh members",
+    kb.row(InlineKeyboardButton("🔄 Refresh members",
                                 callback_data=f"ob:r:{group_id}:0"))
-    kb.add(
+    kb.row(
         InlineKeyboardButton("✏️ Change unit", callback_data=f"ob:u:{group_id}:0"),
         InlineKeyboardButton("💾 Save", callback_data=f"ob:s:{group_id}:0"),
     )
-    kb.add(InlineKeyboardButton("✖️ Skip this group", callback_data=f"ob:x:{group_id}:0"))
+    kb.row(InlineKeyboardButton("✖️ Skip this group", callback_data=f"ob:x:{group_id}:0"))
     return kb
 
 
