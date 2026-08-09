@@ -30,6 +30,7 @@ from data.config import (
 
 _client = None
 _lock = asyncio.Lock()
+_cache_warmed = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,28 @@ async def _get_client():
     return _client
 
 
+async def _resolve(client, group_id: int):
+    """Get the entity for a raw chat id, warming the dialog cache if needed.
+
+    Telethon cannot address a chat by bare id alone -- it needs the access hash,
+    which it only learns by seeing the chat, usually via the dialog list. On a
+    fresh session every get_entity(-100...) therefore raises ValueError, which
+    is how member lookup came back empty in production while the session itself
+    was perfectly healthy. Walking the dialogs once fills the cache for good.
+    """
+    global _cache_warmed
+    try:
+        return await client.get_entity(group_id)
+    except ValueError:
+        if _cache_warmed:
+            raise
+        logging.info("warming userbot entity cache (first unresolved chat)")
+        async for _ in client.iter_dialogs():
+            pass
+        _cache_warmed = True
+        return await client.get_entity(group_id)
+
+
 async def list_members(group_id: int, limit: int = 200) -> list[Member]:
     """Members of `group_id`, or [] if unavailable.
 
@@ -91,7 +114,7 @@ async def list_members(group_id: int, limit: int = 200) -> list[Member]:
     if client is None:
         return []
     try:
-        entity = await client.get_entity(group_id)
+        entity = await _resolve(client, group_id)
         # A basic group upgraded to a supergroup leaves a tombstone whose member
         # list is forbidden; the real chat is what migrated_to points at.
         if getattr(entity, "migrated_to", None) is not None:
@@ -119,7 +142,7 @@ async def get_description(group_id: int) -> str:
         from telethon.tl.functions.messages import GetFullChatRequest
         from telethon.tl.types import Channel
 
-        entity = await client.get_entity(group_id)
+        entity = await _resolve(client, group_id)
         if isinstance(entity, Channel):
             full = await client(GetFullChannelRequest(entity))
         else:
