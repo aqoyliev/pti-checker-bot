@@ -39,6 +39,40 @@ def parse_unit(title: str | None) -> str | None:
     return None
 
 
+def parse_unit_from_description(description: str | None) -> str | None:
+    """Best guess at the unit in a group's About text, or None.
+
+    Deliberately stricter than `parse_unit`: only the *labelled* forms count
+    ("UNIT 1216", "TRUCK# 147085", "SUB x // y"). A description is free prose,
+    so the bare-leading-number rule that works on titles would happily return a
+    phone number, a year, a DOT number or a street address.
+    """
+    if not description:
+        return None
+    for pattern in (_SUB, _LABELLED):
+        m = pattern.search(description)
+        if m:
+            return m.group(1)
+    return None
+
+
+def guess_unit(title: str | None, description: str | None = None) -> tuple[str | None, str]:
+    """Unit guess plus where it came from: ("1216", "title"|"description"|"").
+
+    The title wins when both carry a number -- it is the field the fleet keeps
+    current, while an About text is often stale boilerplate from whenever the
+    group was created. The source is surfaced to the admin so a guess pulled out
+    of prose is visibly weaker than one off the title.
+    """
+    unit = parse_unit(title)
+    if unit:
+        return unit, "title"
+    unit = parse_unit_from_description(description)
+    if unit:
+        return unit, "description"
+    return None, ""
+
+
 def looks_retired(title: str | None) -> bool:
     """True if the fleet has renamed the group to mark it dead.
 

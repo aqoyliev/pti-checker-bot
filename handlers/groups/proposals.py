@@ -205,18 +205,20 @@ async def _run_setup_nag_pass():
         if last is not None and (now - last) < SETUP_NAG_INTERVAL:
             continue
         try:
-            reached_admin = False
-            if not NAG_THE_GROUP:
+            if NAG_THE_GROUP:
+                await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
+            else:
                 # Drivers are never asked to configure their own group; the
                 # reminder goes to the admins who actually do the onboarding.
+                # If none of them is reachable the group gets nothing — silence
+                # is the intended behaviour, not a fallback to nagging drivers.
                 chat = await bot.get_chat(g["group_id"])
-                reached_admin = await start_onboarding(
-                    g["group_id"], chat.title or str(g["group_id"]))
-            if not reached_admin:
-                # No admin was reachable (or nagging the group is switched back
-                # on), so fall back to asking the group rather than burning a
-                # nag slot on a message nobody received.
-                await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
+                if not await start_onboarding(
+                        g["group_id"], chat.title or str(g["group_id"])):
+                    logging.warning(
+                        "setup nag for %s reached no admin; group left untouched",
+                        g["group_id"],
+                    )
             await bump_setup_nag(g["group_id"])
             await clear_unreachable(g["group_id"])
         except _UNREACHABLE as e:

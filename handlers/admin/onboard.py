@@ -29,7 +29,7 @@ from data.config import ADMINS
 from loader import bot, dp
 from utils import userbot
 from utils.db import add_driver, get_group, set_group_unit
-from utils.unit_parse import looks_retired, parse_unit
+from utils.unit_parse import guess_unit, looks_retired
 
 # group_id -> pending onboarding state, keyed per admin so two admins editing
 # the same group don't clobber each other. In memory on purpose: this is a
@@ -70,7 +70,9 @@ def _text(admin_id: int, group_id: int) -> str:
     ]
     if st["description"]:
         lines.append(f"<b>About:</b> {escape(st['description'][:300])}")
-    lines.append(f"<b>Unit (from title):</b> <code>{escape(str(unit))}</code>")
+    source = st.get("unit_source") or ""
+    label = f"Unit (from {source})" if source else "Unit (not found)"
+    lines.append(f"<b>{label}:</b> <code>{escape(str(unit))}</code>")
     if st["retired_marker"]:
         lines.append("⚠️ The title says this group is inactive/moved — check "
                      "it is really the live chat before saving.")
@@ -95,6 +97,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
     drivers_pool = [m for m in members if not m.is_bot][:40]
+    unit, unit_source = guess_unit(title, description)
 
     delivered = False
     for admin_id in _ADMIN_IDS:
@@ -102,7 +105,8 @@ async def start_onboarding(group_id: int, title: str) -> bool:
         _pending[key] = {
             "title": title,
             "description": description,
-            "unit": parse_unit(title),
+            "unit": unit,
+            "unit_source": unit_source,
             "retired_marker": looks_retired(title),
             "members": drivers_pool,
             "selected": [],
@@ -200,6 +204,7 @@ async def on_unit_typed(message: types.Message, state: FSMContext):
         await message.answer("That prompt expired — run /onboard again.")
         return
     st["unit"] = message.text.strip()
+    st["unit_source"] = "you"
     await message.answer(_text(message.from_user.id, group_id), parse_mode="HTML",
                          reply_markup=_keyboard(message.from_user.id, group_id))
 

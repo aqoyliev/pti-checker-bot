@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from utils.unit_parse import looks_retired, parse_unit
+from utils.unit_parse import (
+    guess_unit,
+    looks_retired,
+    parse_unit,
+    parse_unit_from_description,
+)
 
 
 @pytest.mark.parametrize("title,expected", [
@@ -61,3 +66,44 @@ def test_looks_retired(title):
 ])
 def test_not_retired(title):
     assert looks_retired(title) is False
+
+
+# --- description ---------------------------------------------------------
+# A group's About text is free prose, so only the *labelled* forms count there.
+# The bare-leading-number rule that works on titles would read a phone number,
+# a year or a DOT number as a unit.
+
+@pytest.mark.parametrize("description, expected", [
+    ("Unit 1216 — Smith. Call dispatch at 555-0134.", "1216"),
+    ("TRUCK# 147085", "147085"),
+    ("Driver group. UNIT: 2003", "2003"),
+    ("SUB 588197 // 212566 FARAH", "212566"),
+    # Must NOT be read as a unit:
+    ("Call 5550134 for dispatch", None),
+    ("Established 2019", None),
+    ("1216 Riverside Ave, Newark NJ", None),
+    ("DOT 3947281", None),
+    ("", None),
+    (None, None),
+])
+def test_parse_unit_from_description(description, expected):
+    assert parse_unit_from_description(description) == expected
+
+
+def test_guess_unit_prefers_the_title():
+    # The title is the field the fleet keeps current; About text goes stale.
+    assert guess_unit("UNIT 1216 SMITH", "Unit 9999 old truck") == ("1216", "title")
+
+
+def test_guess_unit_falls_back_to_the_description():
+    assert guess_unit("Smith / Jones", "Unit 1216 assigned") == ("1216", "description")
+
+
+def test_guess_unit_reports_no_source_when_nothing_matches():
+    assert guess_unit("Smith / Jones", "no numbers here") == (None, "")
+
+
+def test_guess_unit_ignores_unlabelled_numbers_in_the_description():
+    # A title with no unit plus a description holding only a phone number must
+    # produce no guess at all, rather than a confidently wrong one.
+    assert guess_unit("MARCANO", "reach us on 5550134") == (None, "")
