@@ -8,9 +8,10 @@ a picker -- the group is silently stranded, with only a log line to show for it.
 import asyncio
 from unittest.mock import AsyncMock
 
-from aiogram.utils.exceptions import CantInitiateConversation
+from aiogram.utils.exceptions import CantInitiateConversation, ChatNotFound
 
 from handlers.admin import onboard
+from utils.userbot import Member
 
 
 def _stub_userbot(monkeypatch, members=()):
@@ -72,4 +73,37 @@ def test_failed_admin_leaves_no_pending_state(monkeypatch):
 
     asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
 
+    assert onboard._pending == {}
+
+
+# --- rebuilding a prompt whose process is gone ---------------------------
+# _pending lives in memory, so every deploy strands open prompts. With each
+# group now prompted only once, "expired" would be a dead end rather than an
+# inconvenience.
+
+def test_rebuild_recreates_usable_state(monkeypatch):
+    _stub_userbot(monkeypatch, members=[
+        Member(user_id=1, name="Roberto Pessanha", username=None, is_bot=False),
+        Member(user_id=2, name="Monica Pessanha", username=None, is_bot=False),
+    ])
+    monkeypatch.setattr(onboard.bot, "get_chat", AsyncMock(
+        return_value=type("Chat", (), {"title": "1338 - PESSANHA"})()))
+    onboard._pending.clear()
+
+    st = asyncio.run(onboard._rebuild_pending(7564871221, -100))
+
+    assert st is not None
+    assert st["title"] == "1338 - PESSANHA"
+    assert [m.user_id for m in st["members"]] == [1, 2]
+    assert st["selected"] == []
+    assert onboard._key(7564871221, -100) in onboard._pending
+
+
+def test_rebuild_gives_up_when_the_chat_is_unreachable(monkeypatch):
+    _stub_userbot(monkeypatch)
+    monkeypatch.setattr(onboard.bot, "get_chat",
+                        AsyncMock(side_effect=ChatNotFound("chat not found")))
+    onboard._pending.clear()
+
+    assert asyncio.run(onboard._rebuild_pending(7564871221, -100)) is None
     assert onboard._pending == {}

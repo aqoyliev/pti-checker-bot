@@ -38,6 +38,7 @@ from utils.db import (
     mark_non_drivers,
     set_group_unit,
     unmark_non_drivers,
+    upsert_group,
 )
 from utils.unit_parse import guess_unit, looks_retired
 
@@ -228,6 +229,39 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     return delivered
 
 
+async def _rebuild_pending(admin_id: int, group_id: int) -> dict | None:
+    """Recreate the state for a prompt whose process is gone. None if we can't.
+
+    Selections are not recoverable — nothing was written — so this returns a
+    fresh prompt rather than pretending otherwise.
+    """
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception as e:
+        logging.warning("cannot rebuild onboarding state for %s: %s",
+                        group_id, type(e).__name__)
+        return None
+
+    title = chat.title or str(group_id)
+    members = await userbot.list_members(group_id)
+    description = await userbot.get_description(group_id)
+    unit, unit_source = await _checked_guess(title, description)
+
+    st = {
+        "title": title,
+        "description": description,
+        "unit": unit,
+        "unit_source": unit_source,
+        "retired_marker": looks_retired(title),
+        "members": [m for m in members if not m.is_bot][:40],
+        "hidden": await get_non_driver_ids(),
+        "show_all": False,
+        "selected": [],
+    }
+    _pending[_key(admin_id, group_id)] = st
+    return st
+
+
 class OnboardSG(StatesGroup):
     unit = State()
 
@@ -240,8 +274,16 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
 
     st = _pending.get(key)
     if st is None:
-        await call.answer("This prompt expired — run /onboard again.", show_alert=True)
-        return
+        # The pending state lives in memory, so every deploy strands whatever
+        # prompts are open. Rebuilding it costs one roster read and leaves the
+        # admin where they were, which beats telling them to start over — all
+        # the more so now each group is prompted only once.
+        st = await _rebuild_pending(call.from_user.id, group_id)
+        if st is None:
+            await call.answer("I can't reach that group any more — run /onboard "
+                              "again.", show_alert=True)
+            return
+        await call.answer("Prompt restored.")
 
     if action == "t":
         if user_id in st["selected"]:
@@ -352,6 +394,8 @@ async def on_unit_typed(message: types.Message, state: FSMContext):
     key = _key(message.from_user.id, group_id)
     st = _pending.get(key)
     await state.finish()
+    if st is None and group_id is not None:
+        st = await _rebuild_pending(message.from_user.id, group_id)
     if st is None:
         await message.answer("That prompt expired — run /onboard again.")
         return
@@ -390,7 +434,13 @@ async def cmd_non_drivers(message: types.Message):
 
 @dp.message_handler(commands=["onboard"], chat_type=types.ChatType.PRIVATE)
 async def cmd_onboard(message: types.Message):
-    """Re-open the prompt for any group that still has no unit or drivers."""
+    """Open the prompt for a group — including one the bot never registered.
+
+    The bot only creates a row when it is *added* to a group, so a group it was
+    already sitting in when this feature shipped has no row at all. Refusing
+    those with "Unknown group" would lock out exactly the groups that most need
+    onboarding, so membership is checked against Telegram rather than the DB.
+    """
     if message.from_user.id not in _ADMIN_IDS:
         return
     args = message.get_args().strip()
@@ -404,9 +454,19 @@ async def cmd_onboard(message: types.Message):
         await message.answer("That doesn't look like a group id.")
         return
 
-    group = await get_group(group_id)
-    if not group:
-        await message.answer("Unknown group.")
+    # getChat is the real test of "can I work with this chat", and it fails for
+    # a group the bot is not in — which is the only case worth refusing.
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception as e:
+        await message.answer(
+            f"I can't reach that chat ({type(e).__name__}). Am I still in it?")
         return
-    chat = await bot.get_chat(group_id)
-    await start_onboarding(group_id, chat.title or str(group_id))
+
+    if not await get_group(group_id):
+        await upsert_group(group_id)
+        await message.answer(f"Registering <code>{group_id}</code> — it had no "
+                             f"record yet.", parse_mode="HTML")
+
+    if not await start_onboarding(group_id, chat.title or str(group_id)):
+        await message.answer("Couldn't send you the prompt — check the logs.")
