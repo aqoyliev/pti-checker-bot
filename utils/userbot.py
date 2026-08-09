@@ -81,6 +81,24 @@ async def _get_client():
     return _client
 
 
+async def _drop_client():
+    """Forget the cached client so the next call builds a fresh one.
+
+    The client is cached for the process's lifetime, so a session that dies
+    mid-flight (revoked key, dropped socket) leaves every later lookup failing
+    with ConnectionError until the bot is redeployed -- which is exactly what
+    happened after an auth key was revoked on 2026-08-09. Dropping it on a
+    connection error makes recovery automatic once the session is valid again.
+    """
+    global _client, _cache_warmed
+    stale, _client, _cache_warmed = _client, None, False
+    if stale is not None:
+        try:
+            await stale.disconnect()
+        except Exception:
+            pass
+
+
 async def _resolve(client, group_id: int):
     """Get the entity for a raw chat id, warming the dialog cache if needed.
 
@@ -122,6 +140,8 @@ async def list_members(group_id: int, limit: int = 200) -> list[Member]:
         participants = await client.get_participants(entity, limit=limit)
     except Exception as e:
         logging.warning("userbot could not list members of %s: %s", group_id, type(e).__name__)
+        if isinstance(e, (ConnectionError, OSError)):
+            await _drop_client()
         return []
 
     out = []
@@ -151,6 +171,8 @@ async def get_description(group_id: int) -> str:
     except Exception as e:
         logging.warning("userbot could not read description of %s: %s",
                         group_id, type(e).__name__)
+        if isinstance(e, (ConnectionError, OSError)):
+            await _drop_client()
         return ""
 
 
