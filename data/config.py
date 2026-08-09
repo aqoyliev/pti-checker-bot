@@ -47,10 +47,9 @@ PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
 # Set False to turn the auto-inspector off everywhere except TEST groups. (default: true)
 PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 
-# Compliance enforcement. When False (default), the hourly loop never mutes
-# drivers and sends no overdue reminders to the group or to admins — it only
-# lifts any restrictions left over from when enforcement was on. Set True to
-# re-enable muting + reminders.
+# Overdue reminders. The bot never restricts a driver under any setting — this
+# only controls whether the hourly loop sends overdue reminders to the group and
+# a summary to admins. False (default) = the loop does nothing at all.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
 
 # Timezone the weekly PTI quota is anchored to. The week resets at midnight

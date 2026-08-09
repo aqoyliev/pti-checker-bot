@@ -10,6 +10,7 @@ from utils.set_bot_commands import set_default_commands
 from data.config import ADMINS
 from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
+from handlers.admin.units import units_refresh_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
 from test_pti import set_active_model
 from webapp.server import start_webapp
@@ -36,6 +37,7 @@ async def on_startup(dispatcher):
     await on_startup_notify(dispatcher)
     asyncio.create_task(compliance_loop())
     asyncio.create_task(setup_nag_loop())
+    asyncio.create_task(units_refresh_loop())
     await schedule_pending_reminders()
 
 
