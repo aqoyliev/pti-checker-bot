@@ -160,3 +160,52 @@ def test_hidden_people_are_not_re_marked_on_save():
     passed_over = [(m.user_id, m.label) for m in onboard._visible(st)
                    if m.user_id not in st["selected"]]
     assert passed_over == [(LIVENSTONN.user_id, LIVENSTONN.label)]
+
+
+# --- two-column layout ---------------------------------------------------
+# A staff-heavy group runs to dozens of names; one button per row pushes Save
+# off the bottom of the screen.
+
+def _rows_for(selected, hidden=(), show_all=False):
+    st = _state(selected)
+    st["hidden"] = set(hidden)
+    st["show_all"] = show_all
+    onboard._pending[onboard._key(1, -100)] = st
+    kb = onboard._keyboard(1, -100)
+    return [[b.text for b in row] for row in kb.inline_keyboard]
+
+
+def test_members_are_laid_out_two_per_row():
+    rows = _rows_for([])
+    assert len(rows[0]) == 2
+    assert rows[0][0].endswith("SANON ARLETTE")
+    assert rows[0][1].endswith("DATTUS LIVENSTONN")
+
+
+def test_an_odd_member_count_leaves_a_single_button_last():
+    # Three members: two on the first row, one alone on the second.
+    rows = _rows_for([])
+    assert len(rows[1]) == 1
+    assert rows[1][0].endswith("OTHER PERSON")
+
+
+def test_change_unit_and_save_share_a_row():
+    rows = _rows_for([])
+    pair = [r for r in rows if len(r) == 2 and any("Save" in b for b in r)]
+    assert pair, "Change unit and Save should sit on one row"
+    assert any("Change unit" in b for b in pair[0])
+
+
+def test_refresh_and_skip_stay_full_width():
+    rows = _rows_for([])
+    for label in ("🔄 Refresh members", "✖️ Skip this group"):
+        assert [label] in rows, f"{label} should have a row to itself"
+
+
+def test_labels_are_trimmed_for_the_narrower_button():
+    long_name = onboard._marker([], 999) + " " + "X" * 80
+    assert len(long_name[:onboard.LABEL_CHARS]) == onboard.LABEL_CHARS
+    rows = _rows_for([])
+    for row in rows:
+        for text in row:
+            assert len(text) <= max(onboard.LABEL_CHARS, 24)
