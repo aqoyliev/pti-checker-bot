@@ -37,6 +37,7 @@ from utils.db import (
     set_truck_unit,
 )
 from utils.enforcement import handle_pti_passed
+from handlers.admin.onboard import start_onboarding
 
 CONFIRM_THRESHOLD = 3
 REJECT_THRESHOLD = 3
@@ -49,6 +50,11 @@ REMINDER_MAX = 3
 PROPOSAL_REMINDERS_ENABLED = True
 SETUP_NAG_INTERVAL = timedelta(minutes=10)
 SETUP_NAG_MAX = 3
+
+# When False (current), an unconfigured group is never nagged in-chat — the
+# onboarding prompt is re-sent to the admins in DM instead. Flip to True to
+# restore the old behaviour of asking whoever is in the group to run /setunit.
+NAG_THE_GROUP = False
 
 SETUP_NAG_MESSAGE = (
     "⏰ This group is still not configured. Anyone in the group can run:\n"
@@ -199,7 +205,13 @@ async def _run_setup_nag_pass():
         if last is not None and (now - last) < SETUP_NAG_INTERVAL:
             continue
         try:
-            await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
+            if NAG_THE_GROUP:
+                await bot.send_message(g["group_id"], SETUP_NAG_MESSAGE, parse_mode="HTML")
+            else:
+                # Drivers are never asked to configure their own group; the
+                # reminder goes to the admins who actually do the onboarding.
+                chat = await bot.get_chat(g["group_id"])
+                await start_onboarding(g["group_id"], chat.title or str(g["group_id"]))
             await bump_setup_nag(g["group_id"])
             await clear_unreachable(g["group_id"])
         except _UNREACHABLE as e:

@@ -1,0 +1,213 @@
+"""Admin-driven group onboarding.
+
+Replaces the old flow where the bot posted setup instructions into the driver's
+group and nagged until someone ran /setunit and /adddriver. Drivers are never
+asked to configure anything now. Instead, when the bot is added to a group it:
+
+  1. guesses the unit from the chat title (a suggestion only -- see
+     utils/unit_parse, title parsing is 79.5% accurate and sometimes names a
+     *different* valid unit);
+  2. reads the member roster through the userbot, since the Bot API cannot
+     list members;
+  3. DMs the admins the title, the description and one button per member.
+
+The admin taps the drivers, confirms the unit, and the group is configured.
+Nothing is written until they press Save, so a bad title guess can't reach the
+database on its own.
+"""
+from __future__ import annotations
+
+import logging
+from html import escape
+
+from aiogram import types
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from data.config import ADMINS
+from loader import bot, dp
+from utils import userbot
+from utils.db import add_driver, get_group, set_group_unit
+from utils.unit_parse import looks_retired, parse_unit
+
+# group_id -> pending onboarding state, keyed per admin so two admins editing
+# the same group don't clobber each other. In memory on purpose: this is a
+# short interactive exchange, and a restart just means re-running /onboard.
+_pending: dict[tuple[int, int], dict] = {}
+
+MAX_DRIVERS = 2
+_ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
+
+
+def _key(admin_id: int, group_id: int) -> tuple[int, int]:
+    return (admin_id, group_id)
+
+
+def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
+    st = _pending[_key(admin_id, group_id)]
+    kb = InlineKeyboardMarkup(row_width=1)
+    for m in st["members"]:
+        chosen = m.user_id in st["selected"]
+        kb.add(InlineKeyboardButton(
+            f"{'✅' if chosen else '▫️'} {m.label}"[:60],
+            callback_data=f"ob:t:{group_id}:{m.user_id}",
+        ))
+    kb.add(
+        InlineKeyboardButton("✏️ Change unit", callback_data=f"ob:u:{group_id}:0"),
+        InlineKeyboardButton("💾 Save", callback_data=f"ob:s:{group_id}:0"),
+    )
+    kb.add(InlineKeyboardButton("✖️ Skip this group", callback_data=f"ob:x:{group_id}:0"))
+    return kb
+
+
+def _text(admin_id: int, group_id: int) -> str:
+    st = _pending[_key(admin_id, group_id)]
+    unit = st["unit"] or "—"
+    lines = [
+        "🆕 <b>New group — who are the drivers?</b>",
+        f"<b>Title:</b> {escape(st['title'])}",
+    ]
+    if st["description"]:
+        lines.append(f"<b>About:</b> {escape(st['description'][:300])}")
+    lines.append(f"<b>Unit (from title):</b> <code>{escape(str(unit))}</code>")
+    if st["retired_marker"]:
+        lines.append("⚠️ The title says this group is inactive/moved — check "
+                     "it is really the live chat before saving.")
+    if not st["members"]:
+        lines.append("\n⚠️ No member list available (the userbot account may not "
+                     "be in this group). Add drivers with /adddriver in the group.")
+    else:
+        chosen = len(st["selected"])
+        lines.append(f"\nTap up to {MAX_DRIVERS} drivers, then Save. "
+                     f"Selected: {chosen}/{MAX_DRIVERS}")
+    return "\n".join(lines)
+
+
+async def start_onboarding(group_id: int, title: str) -> None:
+    """Called when the bot joins a group. Never messages the group itself."""
+    members = await userbot.list_members(group_id)
+    description = await userbot.get_description(group_id)
+    drivers_pool = [m for m in members if not m.is_bot][:40]
+
+    for admin_id in _ADMIN_IDS:
+        _pending[_key(admin_id, group_id)] = {
+            "title": title,
+            "description": description,
+            "unit": parse_unit(title),
+            "retired_marker": looks_retired(title),
+            "members": drivers_pool,
+            "selected": [],
+        }
+        try:
+            await bot.send_message(
+                admin_id, _text(admin_id, group_id),
+                parse_mode="HTML", reply_markup=_keyboard(admin_id, group_id),
+            )
+        except Exception:
+            logging.exception("could not send onboarding prompt to admin %s", admin_id)
+
+
+class OnboardSG(StatesGroup):
+    unit = State()
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("ob:"))
+async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
+    _, action, gid_s, uid_s = call.data.split(":", 3)
+    group_id, user_id = int(gid_s), int(uid_s)
+    key = _key(call.from_user.id, group_id)
+
+    st = _pending.get(key)
+    if st is None:
+        await call.answer("This prompt expired — run /onboard again.", show_alert=True)
+        return
+
+    if action == "t":
+        if user_id in st["selected"]:
+            st["selected"].remove(user_id)
+        elif len(st["selected"]) >= MAX_DRIVERS:
+            await call.answer(f"Only {MAX_DRIVERS} drivers per group.", show_alert=True)
+            return
+        else:
+            st["selected"].append(user_id)
+        await call.message.edit_text(
+            _text(call.from_user.id, group_id), parse_mode="HTML",
+            reply_markup=_keyboard(call.from_user.id, group_id))
+        await call.answer()
+        return
+
+    if action == "u":
+        await state.update_data(onboard_group=group_id)
+        await OnboardSG.unit.set()
+        await call.message.answer("Send the correct unit number for this group.")
+        await call.answer()
+        return
+
+    if action == "x":
+        _pending.pop(key, None)
+        await call.message.edit_text("Skipped. Run /onboard to configure it later.")
+        await call.answer()
+        return
+
+    if action == "s":
+        if not st["unit"]:
+            await call.answer("Set a unit first (Change unit).", show_alert=True)
+            return
+        if not st["selected"]:
+            await call.answer("Select at least one driver.", show_alert=True)
+            return
+
+        await set_group_unit(group_id, st["unit"])
+        names = []
+        for uid in st["selected"]:
+            m = next((x for x in st["members"] if x.user_id == uid), None)
+            name = m.label if m else str(uid)
+            await add_driver(group_id, uid, name)
+            names.append(name)
+        _pending.pop(key, None)
+
+        await call.message.edit_text(
+            f"✅ Unit <code>{escape(st['unit'])}</code> configured.\n"
+            f"Drivers: {escape(', '.join(names))}",
+            parse_mode="HTML")
+        await call.answer("Saved")
+
+
+@dp.message_handler(state=OnboardSG.unit, chat_type=types.ChatType.PRIVATE)
+async def on_unit_typed(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    group_id = data.get("onboard_group")
+    key = _key(message.from_user.id, group_id)
+    st = _pending.get(key)
+    await state.finish()
+    if st is None:
+        await message.answer("That prompt expired — run /onboard again.")
+        return
+    st["unit"] = message.text.strip()
+    await message.answer(_text(message.from_user.id, group_id), parse_mode="HTML",
+                         reply_markup=_keyboard(message.from_user.id, group_id))
+
+
+@dp.message_handler(commands=["onboard"], chat_type=types.ChatType.PRIVATE)
+async def cmd_onboard(message: types.Message):
+    """Re-open the prompt for any group that still has no unit or drivers."""
+    if message.from_user.id not in _ADMIN_IDS:
+        return
+    args = message.get_args().strip()
+    if not args:
+        await message.answer("Usage: <code>/onboard &lt;group_id&gt;</code>",
+                             parse_mode="HTML")
+        return
+    try:
+        group_id = int(args)
+    except ValueError:
+        await message.answer("That doesn't look like a group id.")
+        return
+
+    group = await get_group(group_id)
+    if not group:
+        await message.answer("Unknown group.")
+        return
+    chat = await bot.get_chat(group_id)
+    await start_onboarding(group_id, chat.title or str(group_id))

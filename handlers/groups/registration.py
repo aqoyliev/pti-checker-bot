@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from html import escape
 
 from aiogram import types
 
 from loader import dp, bot
+from handlers.admin.onboard import start_onboarding
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
@@ -33,10 +35,21 @@ async def on_bot_added(message: types.Message):
         return
 
     await upsert_group(message.chat.id)
-
-    # #1/#2: the bot does NOT read the group's name or bio. Setup is fully manual
-    # — anyone runs /adddriver and /setunit.
     await message.answer(INTRO_MESSAGE, parse_mode="HTML")
+
+    # Drivers are no longer asked to configure anything. The bot reads the unit
+    # off the title and hands the admins a member picker in DM instead. This
+    # reverses the earlier #1/#2 rule ("never read the group's name") — the
+    # title is now used, but only as a *suggestion* an admin confirms, because
+    # it is 79.5% accurate and sometimes names a different valid unit.
+    try:
+        await start_onboarding(message.chat.id, message.chat.title or "")
+        return
+    except Exception:
+        logging.exception("onboarding prompt failed for %s; falling back to manual",
+                          message.chat.id)
+
+    # Fallback only: admins unreachable or the userbot is unconfigured.
     await message.answer(MANUAL_SETUP_MESSAGE, parse_mode="HTML")
 
 
