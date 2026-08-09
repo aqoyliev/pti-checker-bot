@@ -111,3 +111,52 @@ def test_no_guess_never_consults_the_list(monkeypatch):
     monkeypatch.setattr(onboard, "get_active_units", called)
     assert asyncio.run(onboard._checked_guess("SANON ARLETTE", "")) == (None, "")
     called.assert_not_awaited()
+
+
+# --- known non-drivers hidden from the picker ---------------------------
+# Dispatchers and safety staff sit in many driver groups, so once an admin has
+# passed over someone they should stop being offered. The exclusion must stay
+# reversible: it is fleet-wide, so a mistake would otherwise hide a real driver
+# in every group forever.
+
+def _state_with_hidden(hidden, selected=(), show_all=False):
+    st = _state(selected)
+    st["hidden"] = set(hidden)
+    st["show_all"] = show_all
+    return st
+
+
+def test_known_non_drivers_are_hidden():
+    st = _state_with_hidden({THIRD.user_id})
+    assert [m.user_id for m in onboard._visible(st)] == [ARLETTE.user_id,
+                                                         LIVENSTONN.user_id]
+    assert onboard._hidden_count(st) == 1
+
+
+def test_show_all_reveals_them():
+    st = _state_with_hidden({THIRD.user_id}, show_all=True)
+    assert len(onboard._visible(st)) == 3
+    assert onboard._hidden_count(st) == 0
+
+
+def test_a_hidden_person_who_is_selected_stays_visible():
+    # Otherwise a stale exclusion would make a current pick vanish from the
+    # list while still counting toward the saved drivers.
+    st = _state_with_hidden({THIRD.user_id}, selected=[THIRD.user_id])
+    assert THIRD.user_id in [m.user_id for m in onboard._visible(st)]
+
+
+def test_nothing_hidden_when_the_list_is_empty():
+    st = _state_with_hidden(set())
+    assert len(onboard._visible(st)) == 3
+    assert onboard._hidden_count(st) == 0
+
+
+def test_hidden_people_are_not_re_marked_on_save():
+    # Save records the people who were on screen and passed over. Someone
+    # hidden was never judged in this group, so they must not be swept in as a
+    # fresh decision.
+    st = _state_with_hidden({THIRD.user_id}, selected=[ARLETTE.user_id])
+    passed_over = [(m.user_id, m.label) for m in onboard._visible(st)
+                   if m.user_id not in st["selected"]]
+    assert passed_over == [(LIVENSTONN.user_id, LIVENSTONN.label)]

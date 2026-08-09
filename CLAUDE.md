@@ -116,6 +116,19 @@ Three rules that are easy to undo by accident:
   group is deliberately left alone rather than being asked to run `/setunit` —
   it stays unconfigured and surfaces via the setup nag or `/onboard <group_id>`.
 
+Saving also records everyone who was on screen and *not* picked as a fleet-wide
+non-driver (`non_drivers`), so dispatchers and safety staff stop being offered in
+the next group. That exclusion is global, so it is kept reversible three ways:
+picking someone as a driver clears their row, a "Show N hidden" button reveals
+them for one prompt, and `/nondrivers clear` empties the table. Someone hidden is
+never swept into a fresh non-driver decision — only people actually displayed
+count as "passed over".
+
+The unit guess is also checked against `active_units` before being offered, so a
+title naming a retired truck reads as "not found". An admin refreshes that list
+weekly with `/units …` (replaced wholesale); an empty table disables the check
+rather than rejecting every unit.
+
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
 

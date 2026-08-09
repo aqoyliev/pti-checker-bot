@@ -19,6 +19,7 @@ def _stub_userbot(monkeypatch, members=()):
     # The unit guess is checked against the active-units list, which is a DB
     # read; these tests are about admin reachability, so stub it out.
     monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value=set()))
+    monkeypatch.setattr(onboard, "get_non_driver_ids", AsyncMock(return_value=set()))
 
 
 def test_returns_true_when_an_admin_is_reached(monkeypatch):
