@@ -24,7 +24,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ContentType, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.exceptions import MessageNotModified
 
-from data.config import ADMINS, WEBAPP_URL
+from data.config import ADMINS, GROUP_INACTIVE_DAYS, WEBAPP_URL
 from loader import bot, dp
 from utils.db import (
     add_admin,
@@ -46,6 +46,7 @@ from utils.db import (
     set_setting,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
+from utils.group_activity import describe_quiet, is_dormant
 from test_pti import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 
 PAGE_SIZE = 8
@@ -108,8 +109,12 @@ def _back_kb(callback_data: str, label: str = "« Back") -> InlineKeyboardMarkup
 
 
 def _group_label(g: dict) -> str:
+    # Dormant is shown separately from deactivated: one is what the chat is
+    # doing, the other is a switch an admin flipped.
     if not g.get("is_active", True):
         icon = "💤"
+    elif is_dormant(g):
+        icon = "🌙"
     elif g.get("setup_complete"):
         icon = "✅"
     else:
@@ -171,7 +176,8 @@ async def _render_groups(page: int) -> tuple[str, InlineKeyboardMarkup]:
     if not chunk:
         text += "\n\nNo groups yet."
     else:
-        text += "\n\n✅ live · ⚙️ setup incomplete · 💤 inactive"
+        text += (f"\n\n✅ live · ⚙️ setup incomplete · 🌙 no human message in "
+                 f"{GROUP_INACTIVE_DAYS}d · 💤 deactivated")
     return text, kb
 
 
@@ -210,10 +216,20 @@ async def _render_group(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
     else:
         last_line = "no PTIs yet"
 
+    quiet = describe_quiet(g)
+    if not active:
+        status = "💤 deactivated"
+    elif is_dormant(g):
+        status = f"🌙 dormant (no human message in {quiet})"
+    elif quiet == "—":
+        status = "🟢 active"  # no traffic seen yet, too new to judge
+    else:
+        status = f"🟢 active (last message {quiet} ago)"
+
     text = (
         f"🚛 <b>{title}</b>\n"
         f"ID: <code>{group_id}</code>\n"
-        f"Status: {'🟢 active' if active else '💤 inactive'} · "
+        f"Status: {status} · "
         f"{'setup complete' if g.get('setup_complete') else 'setup incomplete'}\n\n"
         f"Unit: <b>{unit_line}</b>\n"
         f"Trailer: {trailer_line}\n"
@@ -281,6 +297,9 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
     active = [g for g in groups if g.get("is_active", True)]
     setup_done = [g for g in active if g.get("setup_complete")]
     inactive = len(groups) - len(active)
+    # Dormant groups stay in the compliance numbers below on purpose: a truck
+    # whose chat went silent is a missing inspection, not a group to hide.
+    dormant = [g for g in active if is_dormant(g)]
 
     drivers_by_group = await get_all_drivers_by_group()
     weekly = await get_weekly_pti_stats()
@@ -303,8 +322,9 @@ async def _render_stats() -> tuple[str, InlineKeyboardMarkup]:
 
     text = (
         f"<b>📊 Fleet stats</b>\n\n"
-        f"Groups: {len(groups)} total · {len(active)} active · "
-        f"{len(setup_done)} configured · {inactive} inactive\n"
+        f"Groups: {len(groups)} total · {len(active) - len(dormant)} live · "
+        f"{len(setup_done)} configured · {len(dormant)} dormant · {inactive} deactivated\n"
+        f"<i>Dormant = no human message in {GROUP_INACTIVE_DAYS} days.</i>\n"
         f"Drivers: {total_drivers} · compliant {compliant}/{total_drivers} "
         f"(quota {REQUIRED_PER_WEEK}/week)\n"
     )

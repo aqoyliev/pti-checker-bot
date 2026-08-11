@@ -155,6 +155,13 @@ async def init_db():
             -- get_chat round-trip per group.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT;
 
+            -- When a human last posted in the group (middlewares/group_activity.py).
+            -- Bot messages and service events are excluded, so this is the one
+            -- signal that separates a truck still in service from a dead chat --
+            -- see utils/group_activity.py. Backfilled below from pti_log so the
+            -- column is useful before the first message arrives.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_human_message_at TIMESTAMP;
+
             -- pti_log is queried three ways on every hot path: recent-per-group
             -- (results/reminders), per-driver weekly counts (compliance), and
             -- signature lookups (recycled-video dedup on every submission).
@@ -184,6 +191,17 @@ async def init_db():
                SET unit = NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '')
              WHERE unit IS DISTINCT FROM
                    NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '');
+
+            -- Seed last_human_message_at from the PTI log: a submitted
+            -- inspection is a human message, and it is the only human traffic
+            -- recorded before this column existed. Only fills NULLs, so live
+            -- stamps always win and a re-run is a no-op.
+            UPDATE groups g
+               SET last_human_message_at = l.last_at
+              FROM (SELECT group_id, MAX(submitted_at) AS last_at
+                      FROM pti_log GROUP BY group_id) l
+             WHERE l.group_id = g.group_id
+               AND g.last_human_message_at IS NULL;
         """)
 
 
@@ -398,6 +416,22 @@ async def set_group_title(group_id: int, title: str) -> None:
     await _pool_check().execute(
         "UPDATE groups SET title = $1 WHERE group_id = $2 AND title IS DISTINCT FROM $1",
         title, group_id,
+    )
+
+
+async def touch_group_activity(group_id: int) -> None:
+    """Record that a human just posted in the group.
+
+    Written opportunistically from the message middleware (throttled there), so
+    the stamp can lag live traffic by a few minutes — irrelevant against a
+    multi-day dormancy window. Never inserts: a group the bot hasn't registered
+    yet has nothing to stamp. The clock is the DB's, in UTC, to match the naive
+    UTC timestamps the rest of the app compares against (datetime.utcnow()).
+    """
+    await _pool_check().execute(
+        "UPDATE groups SET last_human_message_at = (NOW() AT TIME ZONE 'UTC')"
+        " WHERE group_id = $1",
+        group_id,
     )
 
 

@@ -52,6 +52,14 @@ PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 # a summary to admins. False (default) = the loop does nothing at all.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
 
+# A group counts as dormant ("inactive") once no human has posted in it for this
+# many days — the same rule scripts/tg_scan.py + tg_rehome.py already use offline
+# (bot chatter and join/leave service messages don't count as a sign of life).
+# This is a *derived* status for reporting only: it never flips groups.is_active,
+# and it never silences a reminder — a quiet group is exactly the one the overdue
+# reminder is for. See utils/group_activity.py.
+GROUP_INACTIVE_DAYS = env.int("GROUP_INACTIVE_DAYS", default=3)
+
 # Timezone the weekly PTI quota is anchored to. The week resets at midnight
 # Monday in this zone (DST-aware), not UTC — otherwise drivers' Sunday-evening
 # and Monday-morning submissions land in the wrong week. Timestamps stay stored

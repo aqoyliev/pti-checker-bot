@@ -244,7 +244,20 @@ async function render() {
 
 // ---------- groups list ----------
 
-function groupIcon(g) { return !g.is_active ? "💤" : (g.setup_complete ? "✅" : "⚙️"); }
+// 💤 = an admin deactivated it; 🌙 = nobody has posted in it for days (derived
+// from real traffic, see utils/group_activity.py).
+function groupIcon(g) {
+  if (!g.is_active) return "💤";
+  if (g.dormant) return "🌙";
+  return g.setup_complete ? "✅" : "⚙️";
+}
+
+function groupStatus(g) {
+  if (!g.is_active) return "💤 deactivated";
+  if (g.dormant) return "🌙 dormant — no human message in " + esc(g.quiet_for);
+  return g.quiet_for && g.quiet_for !== "—"
+    ? "🟢 active — last message " + esc(g.quiet_for) + " ago" : "🟢 active";
+}
 
 async function renderGroups() {
   if (!groupsCache) {
@@ -255,14 +268,17 @@ async function renderGroups() {
   const gs = groupsCache;
   const active = gs.filter(g => g.is_active).length;
   const configured = gs.filter(g => g.is_active && g.setup_complete).length;
+  const dormant = gs.filter(g => g.is_active && g.dormant).length;
 
   view.innerHTML =
     '<div class="card"><div class="row">' +
       '<div class="grow"><b>' + gs.length + '</b> groups <span class="hint">· ' +
-      active + ' active · ' + configured + ' configured</span></div></div></div>' +
+      (active - dormant) + ' live · ' + configured + ' configured · ' +
+      dormant + ' dormant</span></div></div></div>' +
     '<input type="text" id="q" placeholder="Search unit, title, driver…" style="margin-bottom:10px">' +
     '<div class="sortbar"><span class="hint" style="font-size:12px">Sort</span>' +
-      [["unit", "Unit #"], ["last", "Last PTI"], ["fail", "Fails"], ["due", "Due"]].map(s =>
+      [["unit", "Unit #"], ["last", "Last PTI"], ["fail", "Fails"], ["due", "Due"],
+       ["quiet", "Quiet"]].map(s =>
         '<span class="chip mut' + (groupSort === s[0] ? " on" : "") + '" data-sort="' + s[0] + '">' +
         s[1] + '</span>').join("") + '</div>' +
     '<div class="card" id="glist"></div>';
@@ -271,12 +287,16 @@ async function renderGroups() {
   // orders them correctly (Date.parse chokes on the space separator in WebKit).
   const lastAt = g => g.last_pti ? String(g.last_pti.submitted_at) : "";
   const failRank = g => !g.last_pti ? 1 : (g.last_pti.passed ? 2 : 0);  // FAIL, no PTIs, PASS
+  // Quietest first; a group with no recorded human message at all sorts to the
+  // very top ("" is smaller than any timestamp).
+  const humanAt = g => g.last_human_message_at ? String(g.last_human_message_at) : "";
   const sorters = {
     unit: (a, b) => (!a.unit_number - !b.unit_number) ||
       String(a.unit_number || "").localeCompare(String(b.unit_number || ""), undefined, { numeric: true }),
     last: (a, b) => lastAt(b) > lastAt(a) ? 1 : lastAt(b) < lastAt(a) ? -1 : 0,
     fail: (a, b) => failRank(a) - failRank(b) || sorters.last(a, b),
     due:  (a, b) => (b.drivers_due || 0) - (a.drivers_due || 0) || sorters.last(a, b),
+    quiet: (a, b) => humanAt(a) > humanAt(b) ? 1 : humanAt(a) < humanAt(b) ? -1 : 0,
   };
 
   const list = document.getElementById("glist");
@@ -295,6 +315,8 @@ async function renderGroups() {
         ? '<span class="chip ' + (g.last_pti.passed ? "ok" : "bad") + '">' +
           (g.last_pti.passed ? "PASS" : "FAIL") + ' ' + fmtDate(g.last_pti.submitted_at).slice(5) + '</span>'
         : '<span class="chip mut">no PTIs</span>';
+      const quiet = (g.is_active && g.dormant)
+        ? '<span class="chip mut">🌙 ' + esc(g.quiet_for) + '</span>' : '';
       const bell = g.notifications_disabled ? " 🔕" : "";
       return '<div class="item" data-gid="' + g.group_id + '"><div class="row">' +
         '<div class="grow">' +
@@ -302,7 +324,7 @@ async function renderGroups() {
           ' <span class="hint">· ' + esc(g.title) + '</span>' + bell + '</div>' +
           '<div class="hint ellip">' +
             (g.drivers.length ? g.drivers.map(d => esc(d.name)).join(", ") : "no drivers") +
-          '</div></div>' + due + last + '</div></div>';
+          '</div></div>' + quiet + due + last + '</div></div>';
     }).join("") || '<div class="hint" style="padding:8px 0">No matching groups.</div>';
     list.querySelectorAll(".item").forEach(el =>
       el.onclick = () => { current.gid = Number(el.dataset.gid); render(); });
@@ -346,7 +368,7 @@ async function renderGroup(gid) {
     '<div class="card">' +
       '<div style="font-weight:700;margin-bottom:6px">' + esc(g.title) + '</div>' +
       '<div class="kv"><div class="k">ID</div><div><code>' + g.group_id + '</code></div></div>' +
-      '<div class="kv"><div class="k">Status</div><div>' + (g.is_active ? "🟢 active" : "💤 inactive") +
+      '<div class="kv"><div class="k">Status</div><div>' + groupStatus(g) +
         ' · ' + (g.setup_complete ? "setup complete" : "setup incomplete") + '</div></div>' +
       '<div class="kv"><div class="k">Truck</div><div>' + truck + '</div></div>' +
       '<div class="kv"><div class="k">Trailer</div><div>' + trailer + '</div></div>' +
@@ -434,8 +456,9 @@ async function renderStats() {
   const pct = s.drivers_total ? Math.round(100 * s.drivers_compliant / s.drivers_total) : 100;
   view.innerHTML =
     '<div class="statgrid">' +
-      '<div class="stat"><div class="num">' + s.groups_active + '</div><div class="hint">active groups (' + s.groups_total + ' total)</div></div>' +
+      '<div class="stat"><div class="num">' + s.groups_live + '</div><div class="hint">live groups (' + s.groups_total + ' total)</div></div>' +
       '<div class="stat"><div class="num">' + s.groups_configured + '</div><div class="hint">configured</div></div>' +
+      '<div class="stat"><div class="num">' + s.groups_dormant + '</div><div class="hint">dormant (no human message in ' + s.inactive_days + 'd)</div></div>' +
       '<div class="stat"><div class="num">' + s.drivers_total + '</div><div class="hint">drivers</div></div>' +
       '<div class="stat"><div class="num" style="color:' + (pct >= 100 ? "var(--ok)" : "var(--warn)") + '">' +
         s.drivers_compliant + '/' + s.drivers_total + '</div><div class="hint">compliant (quota ' +
