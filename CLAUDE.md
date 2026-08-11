@@ -31,9 +31,10 @@ issues) is posted back into the group.
   env `ADMINS` ∪ admins table, same as the inline panel); `static/index.html`
   is the whole UI. `/admin` shows an "Open Web Panel" button once `WEBAPP_URL`
   (public HTTPS URL) is set.
-- **`handlers/groups/proposals.py`** — group voting/proposal flow + a "nag" loop
-  for still-unconfigured groups (the nag re-sends the onboarding prompt to
-  admins in DM; it does not message the group).
+- **`handlers/groups/proposals.py`** — the "nag" loop for still-unconfigured
+  groups (the nag re-sends the onboarding prompt to admins in DM; it does not
+  message the group). It also still holds the 3-vote proposal flow, which is
+  **no longer reached** — vehicle changes are decided from the video (below).
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
@@ -167,6 +168,32 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+## Vehicle changes: decided by the plate, not by a vote
+
+A truck or trailer swap is applied straight from the PTI — there is no
+confirmation vote. Trailers were always applied immediately; trucks now are too,
+guarded by `truck_verdict` in `handlers/groups/pti.py`:
+
+| Registered vs. filmed | Result |
+| --- | --- |
+| unit differs, **plate identical** | **misread — store nothing** |
+| unit differs, plate differs *or* no plate filmed | real change — store unit + plate |
+| unit same, plate differs | store the plate |
+
+The misread rule is the point of the whole thing. A plate is a far more legible
+marking than a stencilled unit number, so a matching plate outweighs a differing
+unit: that is one truck filmed badly, and adopting the unit would silently
+misattribute every later inspection in the group. It stays silent in the chat —
+nothing about the driver's inspection changed — and logs instead.
+
+A differing unit with *no* plate to compare is treated as a real change on
+purpose: genuine swaps are often filmed without a clear plate shot, and
+demanding plate evidence would strand those groups on the old truck.
+
+Because the change resolves from the video, the driver's result is never held
+back. Don't reintroduce the vote: `PROPOSAL_REMINDERS_ENABLED` and the `pv:`
+callbacks in `proposals.py` are dead for vehicle changes.
 
 ## Behavior under high load
 
