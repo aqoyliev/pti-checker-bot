@@ -23,9 +23,25 @@ Deliberately read-only:
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from data.config import GROUP_QUIET_DAYS, GROUP_QUIET_MAX_MESSAGES
 
-__all__ = ["GROUP_QUIET_DAYS", "is_quiet", "quiet_groups"]
+__all__ = ["GROUP_QUIET_DAYS", "has_full_window", "is_quiet", "quiet_groups"]
+
+
+def has_full_window(since, today, days: int = GROUP_QUIET_DAYS) -> bool:
+    """True once message counts cover the whole judging window.
+
+    ``since`` is the oldest day counts exist for (None = none at all). Counting
+    only ever runs forward, so in the first days after this ships every group has
+    zero messages and would be reported as dead — and that report is printed
+    beside the decision that retires trucks. Until the window is genuinely
+    covered, the honest answer is "not yet", not "everything is quiet".
+    """
+    if since is None:
+        return False
+    return since <= today - timedelta(days=days - 1)
 
 
 def is_quiet(count: int | None, max_messages: int = GROUP_QUIET_MAX_MESSAGES) -> bool:

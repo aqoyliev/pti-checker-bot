@@ -135,12 +135,14 @@ rather than rejecting every unit.
 
 **The weekly list also retires groups.** Any active group whose `unit_number` is
 missing from the new list is deactivated (`groups_to_deactivate` →
-`deactivate_groups`). Three rules keep that from going wrong:
+`apply_units_sweep`). Three rules keep that from going wrong:
 
-- **Preview, then confirm.** One pasted message deactivating groups fleet-wide is
-  precisely how `is_active` once went FALSE across the fleet, so `/units` shows
-  what would be retired and writes *nothing* — not even the list — until the
-  admin confirms.
+- **Preview, then confirm — then one transaction.** One pasted message
+  deactivating groups fleet-wide is precisely how `is_active` once went FALSE
+  across the fleet, so `/units` shows what would be retired and writes *nothing*
+  — not even the list — until the admin confirms. The confirmed write stores the
+  list and retires the groups in a **single transaction** (`apply_units_sweep`),
+  so the stored state can never disagree with what the admin was told happened.
 - **Deactivate only.** A unit reappearing on a later list never reactivates its
   group; that stays a manual panel decision.
 - **No unit ⇒ untouched.** A group still awaiting onboarding has no unit to

@@ -19,6 +19,9 @@ Unlike a last-seen stamp, this is not throttled: the report thresholds on a
 group message, which is why the storage is a per-group-per-day counter rather
 than a row per message.
 """
+import logging
+from time import monotonic
+
 from aiogram import types
 from aiogram.dispatcher.middlewares import BaseMiddleware
 
@@ -51,6 +54,15 @@ def is_human(message: types.Message) -> bool:
     return message.content_type in _HUMAN_CONTENT
 
 
+# A failing write must still be *visible*. Counting failures look identical to
+# silence — every count stays absent, and the quiet report confidently calls the
+# whole fleet dead — so a swallowed error here would be indistinguishable from a
+# healthy answer. Logged at most once every few minutes so a sustained outage
+# reports the problem instead of flooding the log with one line per message.
+_ERROR_LOG_INTERVAL = 300  # seconds
+_last_error_log = float("-inf")
+
+
 class GroupActivityMiddleware(BaseMiddleware):
     async def on_pre_process_message(self, message: types.Message, data: dict):
         chat = message.chat
@@ -61,4 +73,10 @@ class GroupActivityMiddleware(BaseMiddleware):
         except Exception:
             # Activity is derived reporting data — never fail a message (or a
             # PTI submission) over it.
-            pass
+            global _last_error_log
+            now = monotonic()
+            if now - _last_error_log >= _ERROR_LOG_INTERVAL:
+                _last_error_log = now
+                logging.warning("group activity counting is failing (group %s) — "
+                                "the quiet report will read every group as silent",
+                                chat.id, exc_info=True)

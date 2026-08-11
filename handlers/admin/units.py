@@ -46,17 +46,17 @@ from data.config import ADMINS
 from loader import bot, dp
 from utils.db import (
     active_units_updated_at,
-    deactivate_groups,
+    apply_units_sweep,
     get_active_units,
     get_all_groups,
     get_group_message_counts,
     get_setting,
+    group_activity_since,
     normalize_unit,
     prune_group_message_days,
-    replace_active_units,
     set_setting,
 )
-from utils.group_activity import GROUP_QUIET_DAYS, quiet_groups
+from utils.group_activity import GROUP_QUIET_DAYS, has_full_window, quiet_groups
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
@@ -192,8 +192,13 @@ async def cmd_units(message: types.Message):
 
 
 async def _apply(units: list[str], casualties: list[dict]) -> str:
-    """Store the list and retire the groups that fell off it. Returns the reply."""
-    added, removed = await replace_active_units(units)
+    """Store the list and retire the groups that fell off it. Returns the reply.
+
+    Both writes happen in one transaction (``apply_units_sweep``), so the stored
+    state can never disagree with what the admin is told happened.
+    """
+    group_ids = [g["group_id"] for g in casualties]
+    added, removed, deactivated = await apply_units_sweep(units, group_ids)
 
     lines = [f"✅ <b>{len(units)} active units stored.</b>"]
     if added:
@@ -205,12 +210,10 @@ async def _apply(units: list[str], casualties: list[dict]) -> str:
     if not added and not removed:
         lines.append("No change from the previous list.")
 
-    if casualties:
-        count = await deactivate_groups([g["group_id"] for g in casualties])
-        lines.append(f"\n💤 <b>{count} group(s) deactivated</b> — unit no longer "
-                     f"on the list.")
-        logging.info("units sweep deactivated %s groups: %s", count,
-                     [g["group_id"] for g in casualties])
+    if group_ids:
+        lines.append(f"\n💤 <b>{deactivated} group(s) deactivated</b> — unit no "
+                     f"longer on the list.")
+        logging.info("units sweep deactivated %s groups: %s", deactivated, group_ids)
     return "\n".join(lines)
 
 
@@ -234,13 +237,39 @@ async def units_confirm_callback(query: types.CallbackQuery):
         await query.answer()
         return
 
-    text = await _apply(state["units"], state["casualties"])
+    # A failure here must be visible. Letting it escape to the global error
+    # handler leaves the preview on screen still reading "nothing has been saved
+    # yet", with no way to tell whether the sweep ran.
+    try:
+        text = await _apply(state["units"], state["casualties"])
+    except Exception:
+        logging.exception("units sweep failed for admin %s", uid)
+        await query.message.edit_text(
+            "⚠️ <b>Something went wrong — nothing was saved.</b>\n"
+            "The list and the group changes are applied together, so neither "
+            "took effect. Send /units again to retry.",
+            parse_mode="HTML",
+        )
+        await query.answer()
+        return
+
     await query.message.edit_text(text, parse_mode="HTML")
     await query.answer()
 
 
 async def _quiet_report() -> str:
     """The quiet-groups list, as HTML. Safe to call even with no traffic data."""
+    # Counting only runs forward, so for the first few days after this ships
+    # every group has zero messages and would be reported as dead. That list is
+    # printed directly above "paste this week's active units", i.e. next to the
+    # decision that retires trucks — so until a full window has been observed,
+    # say so instead of raising a fleet-wide false alarm.
+    since = await group_activity_since()
+    if not has_full_window(since, datetime.utcnow().date()):
+        collected = "no traffic recorded yet" if since is None else f"collecting since {since}"
+        return (f"🕓 <b>Quiet-group report not ready</b> — it needs "
+                f"{GROUP_QUIET_DAYS} days of message history ({collected}).")
+
     groups = await get_all_groups()
     counts = await get_group_message_counts(GROUP_QUIET_DAYS)
     quiet = quiet_groups(groups, counts)

@@ -237,15 +237,25 @@ async def get_active_units() -> set[str]:
     return {r["unit"] for r in rows}
 
 
-async def replace_active_units(units: list[str]) -> tuple[set[str], set[str]]:
-    """Swap the list wholesale. Returns (added, removed) for the confirmation.
+async def apply_units_sweep(
+    units: list[str], group_ids: list[int],
+) -> tuple[set[str], set[str], int]:
+    """Store the weekly list and retire the groups that fell off it — atomically.
 
-    Wholesale replacement, not a merge: the weekly list *is* the fleet, so a
-    truck that drops off it has to disappear here too, or retired units would
-    accumulate forever and the "is this unit active?" check would rot.
+    Returns ``(added, removed, deactivated_count)``.
+
+    One transaction on purpose. These were previously two independent writes, so
+    a failure between them left the list replaced but no group retired, while the
+    admin's screen still read "nothing has been saved yet" — the stored state and
+    the reported state disagreeing in the one flow that can deactivate trucks
+    fleet-wide. Either both land or neither does.
+
+    The updated-at stamp is written inside the transaction too: rolling back the
+    list while leaving the stamp fresh would suppress the next weekly ask.
     """
     pool = _pool_check()
     wanted = {u.strip() for u in units if u.strip()}
+    deactivated = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
             existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
@@ -256,8 +266,21 @@ async def replace_active_units(units: list[str]) -> tuple[set[str], set[str]]:
             if added:
                 await conn.executemany("INSERT INTO active_units (unit) VALUES ($1)",
                                        [(u,) for u in added])
-    await set_setting(ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat())
-    return added, removed
+            if group_ids:
+                rows = await conn.fetch(
+                    """UPDATE groups SET is_active = FALSE
+                        WHERE group_id = ANY($1::bigint[])
+                          AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    group_ids,
+                )
+                deactivated = len(rows)
+            await conn.execute(
+                """INSERT INTO app_settings (key, value) VALUES ($1, $2)
+                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
+                ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
+            )
+    return added, removed, deactivated
 
 
 async def active_units_updated_at() -> datetime | None:
@@ -833,6 +856,19 @@ async def get_group_message_counts(days: int) -> dict[int, int]:
     return {r["group_id"]: r["total"] for r in rows}
 
 
+async def group_activity_since():
+    """The oldest day we still hold message counts for, or None if we hold none.
+
+    This is how the quiet report knows whether it has a full window to judge on.
+    Counting only ever runs forward, so for the first few days after the feature
+    ships every group looks silent — and that report sits next to the decision
+    that retires trucks. Comparing against this date turns "no data yet" into an
+    honest "still collecting" instead of a fleet-wide false alarm.
+    """
+    row = await _pool_check().fetchrow("SELECT MIN(day) AS since FROM group_message_days")
+    return row["since"] if row else None
+
+
 async def prune_group_message_days(keep_days: int = 14) -> int:
     """Drop buckets older than the reporting window needs."""
     rows = await _pool_check().fetch(
@@ -844,25 +880,6 @@ async def prune_group_message_days(keep_days: int = 14) -> int:
     return len(rows)
 
 
-async def deactivate_groups(group_ids: list[int]) -> int:
-    """Flip is_active FALSE for these groups at once (the weekly /units sweep).
-
-    Returns how many rows actually changed: already-inactive groups are skipped
-    by the WHERE clause, so re-running a sweep reports 0 rather than re-counting
-    groups an admin had already switched off. Deactivation only — a unit
-    reappearing on a later list never flips a group back, so the weekly paste
-    can't undo a deliberate manual decision.
-    """
-    if not group_ids:
-        return 0
-    rows = await _pool_check().fetch(
-        """UPDATE groups SET is_active = FALSE
-            WHERE group_id = ANY($1::bigint[])
-              AND COALESCE(is_active, TRUE) = TRUE
-        RETURNING group_id""",
-        group_ids,
-    )
-    return len(rows)
 
 
 # ---------- reminders / notifications (#8/#9/#10) ----------

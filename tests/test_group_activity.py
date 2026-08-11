@@ -3,7 +3,9 @@
 The rule is "at most N human messages in the window", not "zero", so the
 boundary is the whole point of these tests.
 """
-from utils.group_activity import is_quiet, quiet_groups
+from datetime import date
+
+from utils.group_activity import has_full_window, is_quiet, quiet_groups
 
 
 def _g(gid: int, unit=None, active=True) -> dict:
@@ -70,3 +72,35 @@ def test_missing_is_active_key_defaults_to_active():
 
 def test_empty_fleet_is_not_an_error():
     assert quiet_groups([], {}) == []
+
+
+# ---------- has_full_window (cold start) ----------
+
+TODAY = date(2026, 8, 11)
+
+
+def test_no_data_at_all_is_not_a_full_window():
+    # The whole point: before any counting has happened, every group would look
+    # dead. That must not be reported as "the fleet is quiet".
+    assert has_full_window(None, TODAY) is False
+
+
+def test_first_day_of_counting_is_not_a_full_window():
+    assert has_full_window(TODAY, TODAY) is False
+
+
+def test_second_day_is_still_not_enough():
+    assert has_full_window(date(2026, 8, 10), TODAY) is False
+
+
+def test_three_days_of_history_covers_a_three_day_window():
+    assert has_full_window(date(2026, 8, 9), TODAY) is True
+
+
+def test_older_history_still_covers_it():
+    assert has_full_window(date(2026, 7, 1), TODAY) is True
+
+
+def test_window_length_is_configurable():
+    assert has_full_window(date(2026, 8, 10), TODAY, days=2) is True
+    assert has_full_window(date(2026, 8, 10), TODAY, days=7) is False
