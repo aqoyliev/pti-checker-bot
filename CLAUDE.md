@@ -40,8 +40,6 @@ issues) is posted back into the group.
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
 - **`middlewares/throttling.py`** — anti-flood for text messages.
-- **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
-  "is this group still in use?" status (below).
 
 The **live PTI path** is `handlers/groups/pti.py` → `pti_processor.process_mixed_media`.
 The other `process_*` functions in `pti_processor.py` are legacy/unused.
@@ -156,40 +154,6 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
-
-## Active vs. dormant groups
-
-Two different things, deliberately kept apart:
-
-- **`groups.is_active`** is an administrative switch (the panel's
-  Deactivate/Reactivate, `mark_unreachable`'s strike limit). It is a poor
-  measure of whether a truck's chat is in use — a send failure once flipped it
-  FALSE across the fleet, and 19 of 30 "inactive" groups still had the bot in
-  them.
-- **Dormant** is derived from traffic: no message from a *human* in
-  `GROUP_INACTIVE_DAYS` days (env, default **3**), the same rule
-  `scripts/tg_scan.py` / `tg_rehome.py --stale-days` already use offline.
-  `middlewares/group_activity.py` stamps `groups.last_human_message_at` from
-  live updates — the bot's own results and reminders don't count (they'd make
-  every nagged group look alive), nor do join/leave/pin service messages, but an
-  anonymous admin does (`from_user` is GroupAnonymousBot **with** `sender_chat`).
-  Writes are throttled to one per group per 5 min. `utils/group_activity.py`
-  holds the pure "how old is too old" half.
-
-Dormancy is a **reporting** status — the admin panel and web panel show 🌙 and a
-"quiet 6d" chip, and stats count live/dormant separately. Two rules:
-
-- It never writes `is_active`. Deactivation stays a human decision; this exists
-  precisely because an automatic flag got it wrong before.
-- It never gates a reminder or a broadcast. A group with no human message for
-  three days is exactly the one the overdue reminder is for — filtering on it
-  would silence the drivers who most need nudging. For the same reason dormant
-  groups stay in the compliance denominator: a silent truck is a missing
-  inspection, not a group to hide.
-
-On first deploy the column is backfilled from `MAX(pti_log.submitted_at)` (a
-submitted inspection is a human message). A group that has never spoken falls
-back to `created_at`, so one added this morning reads as alive rather than dead.
 
 ## Behavior under high load
 

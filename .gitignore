@@ -154,4 +154,3 @@ driver_matches.json
 tg_dialogs.json
 add_bot_log.jsonl
 *.session
-dormant_units.csv

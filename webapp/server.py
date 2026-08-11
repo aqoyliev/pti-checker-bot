@@ -19,7 +19,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from data.config import GROUP_INACTIVE_DAYS, WEBAPP_PORT
+from data.config import WEBAPP_PORT
 from loader import bot
 from utils.db import (
     add_admin,
@@ -45,7 +45,6 @@ from utils.db import (
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
 from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
-from utils.group_activity import describe_quiet, is_dormant, last_human_at
 from webapp.auth import extract_user, parse_init_data, resolve_admin
 
 _INDEX_HTML = Path(__file__).parent / "static" / "index.html"
@@ -215,9 +214,6 @@ async def api_groups(request: web.Request) -> web.Response:
             "trailer_unit": g.get("trailer_unit"),
             "trailer_plate": g.get("trailer_plate"),
             "is_active": g.get("is_active", True),
-            "dormant": is_dormant(g),
-            "quiet_for": describe_quiet(g),
-            "last_human_message_at": last_human_at(g),
             "setup_complete": bool(g.get("setup_complete")),
             "notifications_disabled": bool(g.get("notifications_disabled")),
             "drivers": drivers.get(gid, []),
@@ -254,9 +250,6 @@ async def api_group(request: web.Request) -> web.Response:
         "trailer_unit": g.get("trailer_unit"),
         "trailer_plate": g.get("trailer_plate"),
         "is_active": g.get("is_active", True),
-        "dormant": is_dormant(g),
-        "quiet_for": describe_quiet(g),
-        "last_human_message_at": last_human_at(g),
         "setup_complete": bool(g.get("setup_complete")),
         "notifications_disabled": bool(g.get("notifications_disabled")),
         "drivers": drivers,
@@ -326,9 +319,6 @@ async def api_stats(request: web.Request) -> web.Response:
     weekly = await get_weekly_pti_stats()
     active = [g for g in groups if g.get("is_active", True)]
     setup_done = [g for g in active if g.get("setup_complete")]
-    # Reported alongside, not subtracted from, the compliance numbers: a silent
-    # truck is a missing inspection, not a group to exclude from the denominator.
-    dormant = [g for g in active if is_dormant(g)]
 
     total_drivers = compliant = 0
     non_compliant = []
@@ -353,11 +343,8 @@ async def api_stats(request: web.Request) -> web.Response:
     return _json({
         "groups_total": len(groups),
         "groups_active": len(active),
-        "groups_live": len(active) - len(dormant),
-        "groups_dormant": len(dormant),
         "groups_configured": len(setup_done),
         "groups_inactive": len(groups) - len(active),
-        "inactive_days": GROUP_INACTIVE_DAYS,
         "drivers_total": total_drivers,
         "drivers_compliant": compliant,
         "required_per_week": REQUIRED_PER_WEEK,
