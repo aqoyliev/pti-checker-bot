@@ -786,6 +786,27 @@ async def set_group_active(group_id: int, active: bool):
     )
 
 
+async def deactivate_groups(group_ids: list[int]) -> int:
+    """Flip is_active FALSE for these groups at once (the weekly /units sweep).
+
+    Returns how many rows actually changed: already-inactive groups are skipped
+    by the WHERE clause, so re-running a sweep reports 0 rather than re-counting
+    groups an admin had already switched off. Deactivation only — a unit
+    reappearing on a later list never flips a group back, so the weekly paste
+    can't undo a deliberate manual decision.
+    """
+    if not group_ids:
+        return 0
+    rows = await _pool_check().fetch(
+        """UPDATE groups SET is_active = FALSE
+            WHERE group_id = ANY($1::bigint[])
+              AND COALESCE(is_active, TRUE) = TRUE
+        RETURNING group_id""",
+        group_ids,
+    )
+    return len(rows)
+
+
 # ---------- reminders / notifications (#8/#9/#10) ----------
 
 async def set_group_notifications(group_id: int, disabled: bool) -> None:
