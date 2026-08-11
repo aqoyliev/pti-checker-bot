@@ -8,7 +8,7 @@ import asyncio
 import httpx
 import pytest
 
-import test_pti
+from utils import gemini
 from utils import pti_processor as pp
 
 
@@ -16,18 +16,18 @@ from utils import pti_processor as pp
 
 def test_get_api_keys_parses_comma_separated(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEYS", " k1, k2 ,k3,")
-    assert test_pti.get_api_keys() == ["k1", "k2", "k3"]
+    assert gemini.get_api_keys() == ["k1", "k2", "k3"]
 
 
 def test_get_api_keys_dedupes_and_drops_placeholder_and_blanks(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEYS", f"k1,k1,{test_pti._GEMINI_KEY_PLACEHOLDER},, k2")
-    assert test_pti.get_api_keys() == ["k1", "k2"]
+    monkeypatch.setenv("GEMINI_API_KEYS", f"k1,k1,{gemini._GEMINI_KEY_PLACEHOLDER},, k2")
+    assert gemini.get_api_keys() == ["k1", "k2"]
 
 
 def test_get_api_keys_falls_back_to_single_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "solo")
-    assert test_pti.get_api_keys() == ["solo"]
+    assert gemini.get_api_keys() == ["solo"]
 
 
 # ---------- failover ----------

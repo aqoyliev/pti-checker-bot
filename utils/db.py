@@ -155,6 +155,21 @@ async def init_db():
             -- get_chat round-trip per group.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT;
 
+            -- How many HUMAN messages landed in each group each day
+            -- (middlewares/group_activity.py). Daily buckets rather than one row
+            -- per message: the question is only ever "how many in the last few
+            -- days", so a counter per group per day answers it with one small
+            -- row instead of thousands, and pruning is a single DELETE.
+            -- Bot chatter is excluded at the middleware, so a nagged-but-dead
+            -- group can't look alive. See utils/group_activity.py.
+            CREATE TABLE IF NOT EXISTS group_message_days (
+                group_id  BIGINT NOT NULL,
+                day       DATE   NOT NULL,
+                msg_count INT    NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_id, day)
+            );
+            CREATE INDEX IF NOT EXISTS idx_gmd_day ON group_message_days (day);
+
             -- pti_log is queried three ways on every hot path: recent-per-group
             -- (results/reminders), per-driver weekly counts (compliance), and
             -- signature lookups (recycled-video dedup on every submission).
@@ -222,15 +237,25 @@ async def get_active_units() -> set[str]:
     return {r["unit"] for r in rows}
 
 
-async def replace_active_units(units: list[str]) -> tuple[set[str], set[str]]:
-    """Swap the list wholesale. Returns (added, removed) for the confirmation.
+async def apply_units_sweep(
+    units: list[str], group_ids: list[int],
+) -> tuple[set[str], set[str], int]:
+    """Store the weekly list and retire the groups that fell off it — atomically.
 
-    Wholesale replacement, not a merge: the weekly list *is* the fleet, so a
-    truck that drops off it has to disappear here too, or retired units would
-    accumulate forever and the "is this unit active?" check would rot.
+    Returns ``(added, removed, deactivated_count)``.
+
+    One transaction on purpose. These were previously two independent writes, so
+    a failure between them left the list replaced but no group retired, while the
+    admin's screen still read "nothing has been saved yet" — the stored state and
+    the reported state disagreeing in the one flow that can deactivate trucks
+    fleet-wide. Either both land or neither does.
+
+    The updated-at stamp is written inside the transaction too: rolling back the
+    list while leaving the stamp fresh would suppress the next weekly ask.
     """
     pool = _pool_check()
     wanted = {u.strip() for u in units if u.strip()}
+    deactivated = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
             existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
@@ -241,8 +266,21 @@ async def replace_active_units(units: list[str]) -> tuple[set[str], set[str]]:
             if added:
                 await conn.executemany("INSERT INTO active_units (unit) VALUES ($1)",
                                        [(u,) for u in added])
-    await set_setting(ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat())
-    return added, removed
+            if group_ids:
+                rows = await conn.fetch(
+                    """UPDATE groups SET is_active = FALSE
+                        WHERE group_id = ANY($1::bigint[])
+                          AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    group_ids,
+                )
+                deactivated = len(rows)
+            await conn.execute(
+                """INSERT INTO app_settings (key, value) VALUES ($1, $2)
+                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
+                ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
+            )
+    return added, removed, deactivated
 
 
 async def active_units_updated_at() -> datetime | None:
@@ -784,6 +822,64 @@ async def set_group_active(group_id: int, active: bool):
     await _pool_check().execute(
         "UPDATE groups SET is_active = $1 WHERE group_id = $2", active, group_id,
     )
+
+
+async def bump_group_message_count(group_id: int) -> None:
+    """Count one human message against today's bucket for this group.
+
+    Written from the message middleware on every human message, so it must stay
+    a single cheap upsert. The day is the DB's own UTC date, matching the naive
+    UTC timestamps the rest of the app compares against.
+    """
+    await _pool_check().execute(
+        """INSERT INTO group_message_days (group_id, day, msg_count)
+                VALUES ($1, (NOW() AT TIME ZONE 'UTC')::date, 1)
+           ON CONFLICT (group_id, day)
+           DO UPDATE SET msg_count = group_message_days.msg_count + 1""",
+        group_id,
+    )
+
+
+async def get_group_message_counts(days: int) -> dict[int, int]:
+    """Human messages per group over the last ``days`` days, today included.
+
+    Groups with no traffic are simply absent — the caller treats a missing
+    group as zero, so a chat that has never spoken still reports as quiet.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT group_id, SUM(msg_count)::int AS total
+             FROM group_message_days
+            WHERE day > (NOW() AT TIME ZONE 'UTC')::date - $1::int
+         GROUP BY group_id""",
+        days,
+    )
+    return {r["group_id"]: r["total"] for r in rows}
+
+
+async def group_activity_since():
+    """The oldest day we still hold message counts for, or None if we hold none.
+
+    This is how the quiet report knows whether it has a full window to judge on.
+    Counting only ever runs forward, so for the first few days after the feature
+    ships every group looks silent — and that report sits next to the decision
+    that retires trucks. Comparing against this date turns "no data yet" into an
+    honest "still collecting" instead of a fleet-wide false alarm.
+    """
+    row = await _pool_check().fetchrow("SELECT MIN(day) AS since FROM group_message_days")
+    return row["since"] if row else None
+
+
+async def prune_group_message_days(keep_days: int = 14) -> int:
+    """Drop buckets older than the reporting window needs."""
+    rows = await _pool_check().fetch(
+        """DELETE FROM group_message_days
+            WHERE day < (NOW() AT TIME ZONE 'UTC')::date - $1::int
+        RETURNING group_id""",
+        keep_days,
+    )
+    return len(rows)
+
+
 
 
 # ---------- reminders / notifications (#8/#9/#10) ----------

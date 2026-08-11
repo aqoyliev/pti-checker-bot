@@ -9,11 +9,11 @@ from aiogram import types
 from aiogram.types import ContentType
 
 from data.config import PTI_AUTOCHECK_ENABLED
-from loader import dp
+from loader import bot, dp
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
-    set_truck_plate, set_trailer, set_truck_unit, find_open_vehicle_change,
+    set_truck_plate, set_trailer, set_truck_unit,
     reset_group_reminders,
 )
 from utils.pti_processor import process_mixed_media
@@ -22,10 +22,11 @@ from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
-# When True, a detected TRUCK change holds the PTI for a 3-member vote before the
-# unit is updated (#5). A TRAILER change never votes — it is applied immediately
-# (see _reconcile_vehicles).
-TRUCK_CHANGE_CONFIRMATION = True
+# Vehicle changes are never put to a vote. A detected truck or trailer change is
+# applied straight from the PTI, guarded by the plate rather than by people —
+# see _reconcile_vehicles for the rule. (The 3-member proposal flow in
+# handlers/groups/proposals.py is no longer reached for vehicle changes; that
+# file still owns the setup-nag loop.)
 
 # When True, /check accepts media from ANYONE and attributes the PTI to whoever
 # sent it. When False (current), /check only runs on a registered driver's media
@@ -161,20 +162,42 @@ def _truck_log_fields(vehicles: list[dict]) -> tuple[str | None, str | None]:
     return primary.get("unit_number"), primary.get("plate")
 
 
-def _truck_change_suspected(group: dict | None, data: dict) -> tuple[str, str | None] | None:
-    """If Gemini reports a truck unit that differs from the registered one, return
-    (new_unit, new_plate). Otherwise None.
+def truck_verdict(
+    stored_unit: str | None, stored_plate: str | None,
+    seen_unit: str | None, seen_plate: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Decide what a PTI's truck reading means. Pure, so it can be tested directly.
+
+    Returns ``(action, unit, plate)`` where action is one of:
+
+    - ``"change"``  — a real truck swap; store ``unit`` and ``plate``.
+    - ``"plate"``   — same truck, new plate reading; store ``plate`` only.
+    - ``"misread"`` — the unit differs but the plate is identical. A plate is a
+      far more legible marking than a stencilled unit number, so a matching
+      plate outweighs a differing unit: this is the same truck filmed badly,
+      and adopting the unit would silently misattribute every later inspection.
+      Store nothing.
+    - ``"none"``    — nothing to do.
+
+    A differing unit with *no* plate to compare is treated as a real change: a
+    genuine swap is often filmed without a clear plate shot, and refusing to
+    move without plate evidence would leave those groups stuck on the old truck.
     """
-    if not group or not group.get("unit_number"):
-        return None
-    for v in _extract_vehicles(data):
-        if v["type"] != "truck":
-            continue
-        new_unit = (v.get("unit_number") or "").strip()
-        if new_unit and new_unit != group["unit_number"]:
-            new_plate = (v.get("plate") or "").strip() or None
-            return new_unit, new_plate
-    return None
+    seen_unit = (seen_unit or "").strip() or None
+    seen_plate = (seen_plate or "").strip() or None
+    stored_unit = (stored_unit or "").strip() or None
+    stored_plate = (stored_plate or "").strip() or None
+
+    if seen_unit and stored_unit and seen_unit != stored_unit:
+        if seen_plate and stored_plate and seen_plate == stored_plate:
+            return "misread", None, None
+        return "change", seen_unit, seen_plate
+
+    # Same unit (or nothing registered yet) — the plate is the only thing that
+    # can still be new.
+    if seen_plate and seen_plate != stored_plate:
+        return "plate", None, seen_plate
+    return "none", None, None
 
 
 async def _notify_vehicle_change(
@@ -208,14 +231,7 @@ async def _notify_vehicle_change(
         logging.exception("Failed to send vehicle-change notice")
 
 
-async def _reconcile_vehicles(
-    message: types.Message,
-    pti_log_id: int,
-    data: dict,
-    result_message_id: int | None,
-):
-    from handlers.groups.proposals import propose_vehicle_change
-
+async def _reconcile_vehicles(message: types.Message, data: dict):
     vehicles = _extract_vehicles(data)
     if not vehicles:
         return
@@ -242,12 +258,7 @@ async def _reconcile_vehicles(
     stored_trailer_unit = group.get("trailer_unit")
     stored_trailer_plate = group.get("trailer_plate")
 
-    truck_changed = bool(
-        stored_truck_unit and truck_unit and truck_unit != stored_truck_unit
-    )
-
-    # #5: a TRAILER change never goes to a vote — apply it immediately, whether or
-    # not the truck also changed.
+    # A TRAILER change is applied immediately, whether or not the truck changed.
     if trailer:
         if trailer_unit and trailer_unit != stored_trailer_unit:
             await set_trailer(message.chat.id, trailer_unit, trailer_plate)
@@ -256,37 +267,30 @@ async def _reconcile_vehicles(
         elif trailer_plate and trailer_plate != stored_trailer_plate:
             await set_trailer(message.chat.id, None, trailer_plate)
 
-    if truck_changed:
-        if not TRUCK_CHANGE_CONFIRMATION:
-            # Adopt the new truck silently.
-            await set_truck_unit(message.chat.id, truck_unit, truck_plate)
-            await _notify_vehicle_change(
-                message, stored_truck_unit, truck_unit, truck_plate,
-                trailer_unit, trailer_plate,
-            )
-            return
-        # #5: hold the PTI for a 3-member vote on the TRUCK change only. The
-        # trailer was already applied above, so nothing is bundled into the vote.
-        if await find_open_vehicle_change(message.chat.id, "truck"):
-            return
-        await propose_vehicle_change(
-            chat_id=message.chat.id,
-            kind="truck",
-            current_unit=stored_truck_unit,
-            new_unit=truck_unit,
-            new_plate=truck_plate,
-            pti_log_id=pti_log_id,
-            result_message_id=result_message_id,
-            bundled_trailer=None,
-        )
+    if not truck:
         return
 
-    # No truck change → reconcile the truck plate silently.
-    if truck:
-        if not stored_truck_unit and truck_plate and not stored_truck_plate:
-            await set_truck_plate(message.chat.id, truck_plate)
-        elif truck_plate and truck_plate != stored_truck_plate:
-            await set_truck_plate(message.chat.id, truck_plate)
+    action, new_unit, new_plate = truck_verdict(
+        stored_truck_unit, stored_truck_plate, truck_unit, truck_plate,
+    )
+
+    if action == "change":
+        await set_truck_unit(message.chat.id, new_unit, new_plate)
+        await _notify_vehicle_change(
+            message, stored_truck_unit, new_unit, new_plate,
+            trailer_unit, trailer_plate,
+        )
+    elif action == "plate":
+        await set_truck_plate(message.chat.id, new_plate)
+    elif action == "misread":
+        # Same plate, different unit — the unit number just wasn't legible.
+        # Deliberately silent in the group: telling drivers the bot ignored a
+        # misreading is noise, and nothing about their inspection changed.
+        logging.info(
+            "group %s: PTI read truck unit %s but plate %s matches registered "
+            "unit %s — treating the unit as a misread, not a change",
+            message.chat.id, truck_unit, truck_plate, stored_truck_unit,
+        )
 
 
 async def _handle_pti_result(
@@ -299,16 +303,14 @@ async def _handle_pti_result(
     media_signature: str | None = None,
     content_signature: str | None = None,
     result_message_id: int | None = None,
-    truck_change_pending: bool = False,
 ):
     if not text or not data:
         return
     passed = data.get("status") == "PASS"
     vehicles = _extract_vehicles(data)
     primary_unit, primary_plate = _truck_log_fields(vehicles)
-    pti_log_id = None
     if SAVE_PTI_LOGS:
-        pti_log_id = await log_pti(
+        await log_pti(
             group_id=message.chat.id,
             user_id=driver_user_id,
             passed=passed,
@@ -322,11 +324,10 @@ async def _handle_pti_result(
             driver_name=driver_name,
             content_signature=content_signature,
         )
-    await _reconcile_vehicles(message, pti_log_id, data, result_message_id)
+    await _reconcile_vehicles(message, data)
     # A driver submitting any PTI clears the overdue/escalation reminders (#9).
     await reset_group_reminders(message.chat.id)
-    if not truck_change_pending:
-        await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
+    await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
 
 
 # ---------- /check ----------
@@ -458,25 +459,12 @@ async def _run_pti(
     if text is None or data is None or status_msg is None:
         return  # error path; process_mixed_media already edited the status message
 
-    truck_change = _truck_change_suspected(group, data) if TRUCK_CHANGE_CONFIRMATION else None
-
-    if truck_change:
-        new_unit, _ = truck_change
-        try:
-            await status_msg.edit_text(
-                f"⏳ This PTI mentions truck unit <b>{new_unit}</b>, but the registered truck is "
-                f"<b>{group['unit_number']}</b>.\n"
-                f"Holding the result until 3 members confirm the vehicle change. "
-                f"If rejected, the PTI will be marked failed.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            logging.exception("Failed to set hold message on status_msg")
-    else:
-        try:
-            await status_msg.edit_text(text, parse_mode="HTML")
-        except Exception:
-            logging.exception("Failed to render PTI result")
+    # The result is always shown now: a truck change is resolved from the video
+    # itself, so there is nothing left to hold the driver's verdict for.
+    try:
+        await status_msg.edit_text(text, parse_mode="HTML")
+    except Exception:
+        logging.exception("Failed to render PTI result")
 
     await _handle_pti_result(
         message, text, data,
@@ -486,7 +474,6 @@ async def _run_pti(
         media_signature=signature,
         content_signature=content_sig,
         result_message_id=status_msg.message_id,
-        truck_change_pending=bool(truck_change),
     )
 
 
@@ -525,6 +512,31 @@ def _is_forwarded_from_other(message: types.Message, sender_uid: int) -> bool:
     return True
 
 
+_bot_id: int | None = None
+
+
+async def _replies_to_bot(message: types.Message) -> bool:
+    """True if this message is a reply to one of *our* bot's messages.
+
+    Matched on this bot's own id, not ``from_user.is_bot`` — another bot in the
+    group posting a message would otherwise become a trigger for inspections.
+    The id is fetched once and cached; a failed lookup answers False, so the
+    worst case is the pre-existing behaviour rather than an exception on a
+    message handler.
+    """
+    reply = message.reply_to_message
+    if reply is None or reply.from_user is None:
+        return False
+    global _bot_id
+    if _bot_id is None:
+        try:
+            _bot_id = (await bot.get_me()).id
+        except Exception:
+            logging.exception("could not resolve the bot's own id")
+            return False
+    return reply.from_user.id == _bot_id
+
+
 @dp.message_handler(
     content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT],
     chat_type=GROUP_TYPES,
@@ -536,8 +548,19 @@ async def handle_group_video(message: types.Message):
     # needed. Cheap guards first, DB lookups last. Stay silent (buffer only)
     # on anything that isn't an eligible standalone video so random group
     # media never triggers an inspection or an error reply.
-    if not PTI_AUTOCHECK_ENABLED and message.chat.id not in TEST_GROUP_IDS:
-        return  # auto-inspector off — /check only (TEST groups keep auto-checking)
+    #
+    # A video that REPLIES TO THE BOT is inspected even when the blanket
+    # auto-inspector is off. Replying to the bot's reminder with a video is how
+    # drivers actually answer it, and making them add /check turns a normal
+    # reply into a silent no-op. The reply is a deliberate address to the bot,
+    # so it doesn't reopen the "any video in the group runs an inspection"
+    # behaviour that PTI_AUTOCHECK_ENABLED=false exists to prevent.
+    if (
+        not PTI_AUTOCHECK_ENABLED
+        and message.chat.id not in TEST_GROUP_IDS
+        and not await _replies_to_bot(message)
+    ):
+        return  # auto-inspector off — /check or a reply to the bot only
     if message.media_group_id:
         return  # part of an album — needs an explicit /check
     items = _items_from_reply(message)

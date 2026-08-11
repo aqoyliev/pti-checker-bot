@@ -23,7 +23,7 @@ PTI_MAX_CONCURRENCY = env.int("PTI_MAX_CONCURRENCY", default=3)
 # (attention dilution); a focused pass catches it.
 # The focused pass used to over-flag INNER duals seen side-on in wide walkaround
 # frames (foreshortened/shadowed behind the outer dual, reading as falsely bald).
-# Mitigated by a CLOSE-UP / head-on requirement in test_pti.TIRE_SYSTEM_PROMPT:
+# Mitigated by a CLOSE-UP / head-on requirement in utils.gemini.TIRE_SYSTEM_PROMPT:
 # it now only flags a worn dual whose center tread face is clearly visible in a
 # close, roughly head-on shot (as when a driver films a problem tire up close) —
 # the real worn tires show up that way, the false positives were distant/oblique.
@@ -51,6 +51,17 @@ PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 # only controls whether the hourly loop sends overdue reminders to the group and
 # a summary to admins. False (default) = the loop does nothing at all.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
+
+# "Quiet group" reporting: a group counts as quiet when at most
+# GROUP_QUIET_MAX_MESSAGES human messages landed in it over the last
+# GROUP_QUIET_DAYS days. The threshold is a count, not zero, on purpose — a
+# stray "ok" or a sticker is not evidence a truck is in service.
+#
+# Reporting only. It never writes is_active (deactivation comes from the weekly
+# /units sweep) and never gates a reminder: a silent truck is a missing
+# inspection, so quiet groups stay in the compliance denominator.
+GROUP_QUIET_DAYS = env.int("GROUP_QUIET_DAYS", default=3)
+GROUP_QUIET_MAX_MESSAGES = env.int("GROUP_QUIET_MAX_MESSAGES", default=3)
 
 # Timezone the weekly PTI quota is anchored to. The week resets at midnight
 # Monday in this zone (DST-aware), not UTC — otherwise drivers' Sunday-evening

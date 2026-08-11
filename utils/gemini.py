@@ -657,7 +657,7 @@ def print_result(response) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python test_pti.py <path_to_video>")
+        print("Usage: python -m utils.gemini <path_to_video>")
         sys.exit(1)
 
     video_path = sys.argv[1]

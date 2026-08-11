@@ -21,7 +21,6 @@ from aiohttp import web
 
 from data.config import WEBAPP_PORT
 from loader import bot
-from test_pti import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 from utils.db import (
     add_admin,
     get_active_group_ids,
@@ -45,6 +44,7 @@ from utils.db import (
     set_setting,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
+from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 from webapp.auth import extract_user, parse_init_data, resolve_admin
 
 _INDEX_HTML = Path(__file__).parent / "static" / "index.html"

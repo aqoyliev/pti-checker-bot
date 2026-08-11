@@ -46,7 +46,7 @@ from utils.db import (
     set_setting,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
-from test_pti import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
+from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
 
 PAGE_SIZE = 8
 MENU_TEXT = "<b>🛠 PTI Admin Panel</b>\n\nChoose a section:"

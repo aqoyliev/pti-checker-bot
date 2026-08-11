@@ -19,9 +19,10 @@ issues) is posted back into the group.
 - **`utils/pti_processor.py`** — the media → frames → Gemini → formatted-result
   pipeline. Includes Gemini retry/backoff, "service overloaded" handling, a
   hallucination filter, and the concurrency gate (below).
-- **`test_pti.py`** — the low-level Gemini/ffmpeg functions (`extract_frames`,
-  `call_gemini`, `call_gemini_photos`, `parse_result`) plus a CLI for manually
-  checking a single video: `python test_pti.py <video.mp4>` (needs a Gemini key).
+- **`utils/gemini.py`** — the low-level Gemini/ffmpeg functions (`extract_frames`,
+  `call_gemini`, `call_gemini_photos`, `parse_result`), the model registry and the
+  API-key failover, plus a CLI for manually checking a single video:
+  `python -m utils.gemini <video.mp4>` (needs a Gemini key).
 - **`utils/scheduler.py` + `utils/enforcement.py`** — hourly compliance loop.
   **The bot never restricts a driver** (see Conventions).
 - **`webapp/`** — the web admin panel (Telegram Mini App). `server.py` is an
@@ -30,15 +31,18 @@ issues) is posted back into the group.
   env `ADMINS` ∪ admins table, same as the inline panel); `static/index.html`
   is the whole UI. `/admin` shows an "Open Web Panel" button once `WEBAPP_URL`
   (public HTTPS URL) is set.
-- **`handlers/groups/proposals.py`** — group voting/proposal flow + a "nag" loop
-  for still-unconfigured groups (the nag re-sends the onboarding prompt to
-  admins in DM; it does not message the group).
+- **`handlers/groups/proposals.py`** — the "nag" loop for still-unconfigured
+  groups (the nag re-sends the onboarding prompt to admins in DM; it does not
+  message the group). It also still holds the 3-vote proposal flow, which is
+  **no longer reached** — vehicle changes are decided from the video (below).
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
 - **`middlewares/throttling.py`** — anti-flood for text messages.
+- **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
+  "has this group gone quiet?" report (below).
 
 The **live PTI path** is `handlers/groups/pti.py` → `pti_processor.process_mixed_media`.
 The other `process_*` functions in `pti_processor.py` are legacy/unused.
@@ -129,6 +133,21 @@ title naming a retired truck reads as "not found". An admin refreshes that list
 weekly with `/units …` (replaced wholesale); an empty table disables the check
 rather than rejecting every unit.
 
+**The weekly list also retires groups.** Any active group whose `unit_number` is
+missing from the new list is deactivated (`groups_to_deactivate` →
+`apply_units_sweep`). Three rules keep that from going wrong:
+
+- **Preview, then confirm — then one transaction.** One pasted message
+  deactivating groups fleet-wide is precisely how `is_active` once went FALSE
+  across the fleet, so `/units` shows what would be retired and writes *nothing*
+  — not even the list — until the admin confirms. The confirmed write stores the
+  list and retires the groups in a **single transaction** (`apply_units_sweep`),
+  so the stored state can never disagree with what the admin was told happened.
+- **Deactivate only.** A unit reappearing on a later list never reactivates its
+  group; that stays a manual panel decision.
+- **No unit ⇒ untouched.** A group still awaiting onboarding has no unit to
+  match, and "not in the list" must not mean "retired" for it.
+
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
 
@@ -153,6 +172,85 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+## Retired vs. quiet groups
+
+Two different things, deliberately kept apart:
+
+- **`groups.is_active`** is an administrative switch — the weekly `/units` sweep
+  and the panel's Deactivate/Reactivate set it. It says whether a group *should*
+  still be running, not whether anyone is using it.
+- **Quiet** is derived from traffic: at most `GROUP_QUIET_MAX_MESSAGES` (env,
+  default **3**) human messages in `GROUP_QUIET_DAYS` (env, default **3**) days.
+  `middlewares/group_activity.py` counts one per human message into
+  `group_message_days`; `utils/group_activity.py` holds the pure threshold half.
+
+The threshold is a **count, not zero**: a stray "ok" or a sticker is not evidence
+a truck is in service. Bot chatter is excluded (it would make every nagged group
+look alive), as are join/leave/pin service messages — but an anonymous admin
+counts (`from_user` is GroupAnonymousBot **with** `sender_chat`).
+
+Storage is one row per group per day, not per message: the only question ever
+asked is "how many in the last few days", so a daily counter answers it with one
+small row instead of thousands, and pruning is a single `DELETE`. That is also
+why the middleware is **not** throttled — a count needs every message.
+
+Quiet is a **reporting** status, surfaced by `/quiet` in DM and appended to the
+weekly units ask. Two rules:
+
+- It never writes `is_active`. Deactivation belongs to the `/units` sweep, where
+  a human confirms it; quiet is evidence, not a decision.
+- It never gates a reminder or a broadcast. A group nobody has posted in for
+  three days is exactly the one the overdue reminder is for, and a silent truck
+  is a missing inspection — so quiet groups stay in the compliance denominator.
+
+## What triggers an inspection
+
+Three ways, in `handlers/groups/pti.py`:
+
+1. `/check` replying to a video or photo — always works.
+2. A registered driver's standalone video, when `PTI_AUTOCHECK_ENABLED` is on.
+   **It is off in production**, so this is normally inert.
+3. A registered driver's video **replying to one of the bot's messages** — this
+   works regardless of `PTI_AUTOCHECK_ENABLED`.
+
+Rule 3 exists because replying to the bot's reminder with a video is how drivers
+actually answer it; requiring `/check` turned a natural reply into a silent
+no-op. It does not reopen blanket auto-checking — a reply is a deliberate
+address to the bot, whereas the flag is off precisely so that *any* video in the
+group doesn't start an inspection.
+
+`_replies_to_bot` matches **this bot's own id** (cached from `get_me`), not
+`from_user.is_bot`; otherwise another bot in the group could make its messages
+into inspection triggers. Every other guard still applies to rules 2 and 3:
+registered driver, not forwarded from someone else, not an album, group
+setup-complete.
+
+## Vehicle changes: decided by the plate, not by a vote
+
+A truck or trailer swap is applied straight from the PTI — there is no
+confirmation vote. Trailers were always applied immediately; trucks now are too,
+guarded by `truck_verdict` in `handlers/groups/pti.py`:
+
+| Registered vs. filmed | Result |
+| --- | --- |
+| unit differs, **plate identical** | **misread — store nothing** |
+| unit differs, plate differs *or* no plate filmed | real change — store unit + plate |
+| unit same, plate differs | store the plate |
+
+The misread rule is the point of the whole thing. A plate is a far more legible
+marking than a stencilled unit number, so a matching plate outweighs a differing
+unit: that is one truck filmed badly, and adopting the unit would silently
+misattribute every later inspection in the group. It stays silent in the chat —
+nothing about the driver's inspection changed — and logs instead.
+
+A differing unit with *no* plate to compare is treated as a real change on
+purpose: genuine swaps are often filmed without a clear plate shot, and
+demanding plate evidence would strand those groups on the old truck.
+
+Because the change resolves from the video, the driver's result is never held
+back. Don't reintroduce the vote: `PROPOSAL_REMINDERS_ENABLED` and the `pv:`
+callbacks in `proposals.py` are dead for vehicle changes.
 
 ## Behavior under high load
 
