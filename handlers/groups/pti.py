@@ -9,7 +9,7 @@ from aiogram import types
 from aiogram.types import ContentType
 
 from data.config import PTI_AUTOCHECK_ENABLED
-from loader import dp
+from loader import bot, dp
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
@@ -512,6 +512,31 @@ def _is_forwarded_from_other(message: types.Message, sender_uid: int) -> bool:
     return True
 
 
+_bot_id: int | None = None
+
+
+async def _replies_to_bot(message: types.Message) -> bool:
+    """True if this message is a reply to one of *our* bot's messages.
+
+    Matched on this bot's own id, not ``from_user.is_bot`` — another bot in the
+    group posting a message would otherwise become a trigger for inspections.
+    The id is fetched once and cached; a failed lookup answers False, so the
+    worst case is the pre-existing behaviour rather than an exception on a
+    message handler.
+    """
+    reply = message.reply_to_message
+    if reply is None or reply.from_user is None:
+        return False
+    global _bot_id
+    if _bot_id is None:
+        try:
+            _bot_id = (await bot.get_me()).id
+        except Exception:
+            logging.exception("could not resolve the bot's own id")
+            return False
+    return reply.from_user.id == _bot_id
+
+
 @dp.message_handler(
     content_types=[ContentType.VIDEO, ContentType.VIDEO_NOTE, ContentType.DOCUMENT],
     chat_type=GROUP_TYPES,
@@ -523,8 +548,19 @@ async def handle_group_video(message: types.Message):
     # needed. Cheap guards first, DB lookups last. Stay silent (buffer only)
     # on anything that isn't an eligible standalone video so random group
     # media never triggers an inspection or an error reply.
-    if not PTI_AUTOCHECK_ENABLED and message.chat.id not in TEST_GROUP_IDS:
-        return  # auto-inspector off — /check only (TEST groups keep auto-checking)
+    #
+    # A video that REPLIES TO THE BOT is inspected even when the blanket
+    # auto-inspector is off. Replying to the bot's reminder with a video is how
+    # drivers actually answer it, and making them add /check turns a normal
+    # reply into a silent no-op. The reply is a deliberate address to the bot,
+    # so it doesn't reopen the "any video in the group runs an inspection"
+    # behaviour that PTI_AUTOCHECK_ENABLED=false exists to prevent.
+    if (
+        not PTI_AUTOCHECK_ENABLED
+        and message.chat.id not in TEST_GROUP_IDS
+        and not await _replies_to_bot(message)
+    ):
+        return  # auto-inspector off — /check or a reply to the bot only
     if message.media_group_id:
         return  # part of an album — needs an explicit /check
     items = _items_from_reply(message)

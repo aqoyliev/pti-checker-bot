@@ -169,6 +169,28 @@ group the account is not in all yield "no member buttons", not an exception.
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
 
+## What triggers an inspection
+
+Three ways, in `handlers/groups/pti.py`:
+
+1. `/check` replying to a video or photo — always works.
+2. A registered driver's standalone video, when `PTI_AUTOCHECK_ENABLED` is on.
+   **It is off in production**, so this is normally inert.
+3. A registered driver's video **replying to one of the bot's messages** — this
+   works regardless of `PTI_AUTOCHECK_ENABLED`.
+
+Rule 3 exists because replying to the bot's reminder with a video is how drivers
+actually answer it; requiring `/check` turned a natural reply into a silent
+no-op. It does not reopen blanket auto-checking — a reply is a deliberate
+address to the bot, whereas the flag is off precisely so that *any* video in the
+group doesn't start an inspection.
+
+`_replies_to_bot` matches **this bot's own id** (cached from `get_me`), not
+`from_user.is_bot`; otherwise another bot in the group could make its messages
+into inspection triggers. Every other guard still applies to rules 2 and 3:
+registered driver, not forwarded from someone else, not an album, group
+setup-complete.
+
 ## Vehicle changes: decided by the plate, not by a vote
 
 A truck or trailer swap is applied straight from the PTI — there is no
