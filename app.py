@@ -12,7 +12,7 @@ from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
 from handlers.admin.units import units_refresh_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
-from test_pti import set_active_model
+from utils.gemini import set_active_model
 from webapp.server import start_webapp
 
 

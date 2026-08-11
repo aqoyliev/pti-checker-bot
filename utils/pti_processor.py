@@ -27,7 +27,7 @@ def _is_service_overload(e: Exception) -> bool:
 
 from data import config
 from loader import bot
-from test_pti import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, get_api_keys, VideoTooLongError, MAX_FRAMES
+from utils.gemini import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, get_api_keys, VideoTooLongError, MAX_FRAMES
 
 # Global cap on concurrent PTI analyses (frame extraction + Gemini). Bounds CPU,
 # memory, disk, thread-pool, and Gemini-quota pressure when submissions arrive in
@@ -362,7 +362,7 @@ _MAX_TIRE_PROMOTE = 3
 
 
 def merge_tire_pass(data: dict, tire_data: dict | None) -> int:
-    """Fold a focused tire-only pass (test_pti.call_gemini_tires) into the main result.
+    """Fold a focused tire-only pass (utils.gemini.call_gemini_tires) into the main result.
 
     The broad PTI pass juggles 8 areas over 150+ frames and reliably overlooks a
     single worn tire (attention dilution); a narrow tire-only pass over the same

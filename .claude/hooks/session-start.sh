@@ -16,7 +16,7 @@ fi
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # --- system deps -------------------------------------------------------------
-# ffmpeg/ffprobe are required by test_pti.extract_frames (video → frames).
+# ffmpeg/ffprobe are required by utils.gemini.extract_frames (video → frames).
 # Best-effort: a blocked package mirror under a strict network policy shouldn't
 # abort the whole session — only the video path would be affected.
 if ! command -v ffmpeg >/dev/null 2>&1; then
