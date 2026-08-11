@@ -52,6 +52,17 @@ PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 # a summary to admins. False (default) = the loop does nothing at all.
 ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
 
+# "Quiet group" reporting: a group counts as quiet when at most
+# GROUP_QUIET_MAX_MESSAGES human messages landed in it over the last
+# GROUP_QUIET_DAYS days. The threshold is a count, not zero, on purpose — a
+# stray "ok" or a sticker is not evidence a truck is in service.
+#
+# Reporting only. It never writes is_active (deactivation comes from the weekly
+# /units sweep) and never gates a reminder: a silent truck is a missing
+# inspection, so quiet groups stay in the compliance denominator.
+GROUP_QUIET_DAYS = env.int("GROUP_QUIET_DAYS", default=3)
+GROUP_QUIET_MAX_MESSAGES = env.int("GROUP_QUIET_MAX_MESSAGES", default=3)
+
 # Timezone the weekly PTI quota is anchored to. The week resets at midnight
 # Monday in this zone (DST-aware), not UTC — otherwise drivers' Sunday-evening
 # and Monday-morning submissions land in the wrong week. Timestamps stay stored

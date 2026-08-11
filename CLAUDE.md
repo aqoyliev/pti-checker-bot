@@ -41,6 +41,8 @@ issues) is posted back into the group.
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
 - **`middlewares/throttling.py`** — anti-flood for text messages.
+- **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
+  "has this group gone quiet?" report (below).
 
 The **live PTI path** is `handlers/groups/pti.py` → `pti_processor.process_mixed_media`.
 The other `process_*` functions in `pti_processor.py` are legacy/unused.
@@ -168,6 +170,37 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+## Retired vs. quiet groups
+
+Two different things, deliberately kept apart:
+
+- **`groups.is_active`** is an administrative switch — the weekly `/units` sweep
+  and the panel's Deactivate/Reactivate set it. It says whether a group *should*
+  still be running, not whether anyone is using it.
+- **Quiet** is derived from traffic: at most `GROUP_QUIET_MAX_MESSAGES` (env,
+  default **3**) human messages in `GROUP_QUIET_DAYS` (env, default **3**) days.
+  `middlewares/group_activity.py` counts one per human message into
+  `group_message_days`; `utils/group_activity.py` holds the pure threshold half.
+
+The threshold is a **count, not zero**: a stray "ok" or a sticker is not evidence
+a truck is in service. Bot chatter is excluded (it would make every nagged group
+look alive), as are join/leave/pin service messages — but an anonymous admin
+counts (`from_user` is GroupAnonymousBot **with** `sender_chat`).
+
+Storage is one row per group per day, not per message: the only question ever
+asked is "how many in the last few days", so a daily counter answers it with one
+small row instead of thousands, and pruning is a single `DELETE`. That is also
+why the middleware is **not** throttled — a count needs every message.
+
+Quiet is a **reporting** status, surfaced by `/quiet` in DM and appended to the
+weekly units ask. Two rules:
+
+- It never writes `is_active`. Deactivation belongs to the `/units` sweep, where
+  a human confirms it; quiet is evidence, not a decision.
+- It never gates a reminder or a broadcast. A group nobody has posted in for
+  three days is exactly the one the overdue reminder is for, and a silent truck
+  is a missing inspection — so quiet groups stay in the compliance denominator.
 
 ## What triggers an inspection
 

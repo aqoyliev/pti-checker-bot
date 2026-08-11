@@ -155,6 +155,21 @@ async def init_db():
             -- get_chat round-trip per group.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS title TEXT;
 
+            -- How many HUMAN messages landed in each group each day
+            -- (middlewares/group_activity.py). Daily buckets rather than one row
+            -- per message: the question is only ever "how many in the last few
+            -- days", so a counter per group per day answers it with one small
+            -- row instead of thousands, and pruning is a single DELETE.
+            -- Bot chatter is excluded at the middleware, so a nagged-but-dead
+            -- group can't look alive. See utils/group_activity.py.
+            CREATE TABLE IF NOT EXISTS group_message_days (
+                group_id  BIGINT NOT NULL,
+                day       DATE   NOT NULL,
+                msg_count INT    NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_id, day)
+            );
+            CREATE INDEX IF NOT EXISTS idx_gmd_day ON group_message_days (day);
+
             -- pti_log is queried three ways on every hot path: recent-per-group
             -- (results/reminders), per-driver weekly counts (compliance), and
             -- signature lookups (recycled-video dedup on every submission).
@@ -784,6 +799,49 @@ async def set_group_active(group_id: int, active: bool):
     await _pool_check().execute(
         "UPDATE groups SET is_active = $1 WHERE group_id = $2", active, group_id,
     )
+
+
+async def bump_group_message_count(group_id: int) -> None:
+    """Count one human message against today's bucket for this group.
+
+    Written from the message middleware on every human message, so it must stay
+    a single cheap upsert. The day is the DB's own UTC date, matching the naive
+    UTC timestamps the rest of the app compares against.
+    """
+    await _pool_check().execute(
+        """INSERT INTO group_message_days (group_id, day, msg_count)
+                VALUES ($1, (NOW() AT TIME ZONE 'UTC')::date, 1)
+           ON CONFLICT (group_id, day)
+           DO UPDATE SET msg_count = group_message_days.msg_count + 1""",
+        group_id,
+    )
+
+
+async def get_group_message_counts(days: int) -> dict[int, int]:
+    """Human messages per group over the last ``days`` days, today included.
+
+    Groups with no traffic are simply absent — the caller treats a missing
+    group as zero, so a chat that has never spoken still reports as quiet.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT group_id, SUM(msg_count)::int AS total
+             FROM group_message_days
+            WHERE day > (NOW() AT TIME ZONE 'UTC')::date - $1::int
+         GROUP BY group_id""",
+        days,
+    )
+    return {r["group_id"]: r["total"] for r in rows}
+
+
+async def prune_group_message_days(keep_days: int = 14) -> int:
+    """Drop buckets older than the reporting window needs."""
+    rows = await _pool_check().fetch(
+        """DELETE FROM group_message_days
+            WHERE day < (NOW() AT TIME ZONE 'UTC')::date - $1::int
+        RETURNING group_id""",
+        keep_days,
+    )
+    return len(rows)
 
 
 async def deactivate_groups(group_ids: list[int]) -> int:

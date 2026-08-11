@@ -49,11 +49,14 @@ from utils.db import (
     deactivate_groups,
     get_active_units,
     get_all_groups,
+    get_group_message_counts,
     get_setting,
     normalize_unit,
+    prune_group_message_days,
     replace_active_units,
     set_setting,
 )
+from utils.group_activity import GROUP_QUIET_DAYS, quiet_groups
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
@@ -236,6 +239,30 @@ async def units_confirm_callback(query: types.CallbackQuery):
     await query.answer()
 
 
+async def _quiet_report() -> str:
+    """The quiet-groups list, as HTML. Safe to call even with no traffic data."""
+    groups = await get_all_groups()
+    counts = await get_group_message_counts(GROUP_QUIET_DAYS)
+    quiet = quiet_groups(groups, counts)
+    if not quiet:
+        return (f"🟢 <b>No quiet groups</b> — every active group has been used in "
+                f"the last {GROUP_QUIET_DAYS} days.")
+
+    lines = [f"🌙 <b>{len(quiet)} quiet group(s)</b> — little or no human traffic "
+             f"in the last {GROUP_QUIET_DAYS} days:", ""]
+    lines += [_group_line(g) for g in quiet[:_PREVIEW_LIMIT]]
+    if len(quiet) > _PREVIEW_LIMIT:
+        lines.append(f"…and {len(quiet) - _PREVIEW_LIMIT} more.")
+    return "\n".join(lines)
+
+
+@dp.message_handler(commands=["quiet"], chat_type=types.ChatType.PRIVATE)
+async def cmd_quiet(message: types.Message):
+    if message.from_user.id not in _ADMIN_IDS:
+        return
+    await message.answer(await _quiet_report(), parse_mode="HTML")
+
+
 async def _last_asked_at() -> datetime | None:
     raw = await get_setting(_LAST_ASKED_KEY)
     if not raw:
@@ -263,10 +290,19 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
     if asked is not None and now - asked < REFRESH_AFTER:
         return False
 
+    # The quiet list rides along with the ask: which trucks went silent is
+    # exactly the question being answered when deciding what goes on the new
+    # list. A failure to build it must not cost the ask itself.
+    try:
+        body = f"{_ASK_TEXT}\n\n{await _quiet_report()}"
+    except Exception:
+        logging.exception("could not build the quiet-groups report")
+        body = _ASK_TEXT
+
     sent = False
     for admin_id in _ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, _ASK_TEXT, parse_mode="HTML")
+            await bot.send_message(admin_id, body, parse_mode="HTML")
             sent = True
         except Exception:
             logging.exception("could not ask admin %s for the units list", admin_id)
@@ -277,7 +313,8 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
 
 
 async def units_refresh_loop():
-    """Background loop: nudge the admins when the units list goes stale."""
+    """Background loop: nudge the admins when the units list goes stale, and
+    keep the message-count buckets from growing without bound."""
     import asyncio
 
     while True:
@@ -285,4 +322,8 @@ async def units_refresh_loop():
             await ask_for_units_if_stale()
         except Exception:
             logging.exception("units refresh loop failed")
+        try:
+            await prune_group_message_days()
+        except Exception:
+            logging.exception("pruning group message buckets failed")
         await asyncio.sleep(CHECK_INTERVAL.total_seconds())
