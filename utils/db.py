@@ -595,6 +595,24 @@ async def is_registered_driver(group_id: int, user_id: int) -> bool:
     return row is not None
 
 
+async def get_driver_memberships(user_id: int) -> list[dict]:
+    """Every group this user is a registered driver of, newest group last.
+
+    Used by /whois: a phone number resolves to a user_id, and the first thing
+    worth knowing about that user_id is whether the fleet already has them.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT gd.group_id, gd.name, g.unit_number, g.title,
+                  COALESCE(g.is_active, TRUE) AS is_active
+             FROM group_drivers gd
+             LEFT JOIN groups g ON g.group_id = gd.group_id
+            WHERE gd.user_id = $1
+            ORDER BY g.unit_number NULLS LAST, gd.group_id""",
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
 async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
     """Overwrite a group's drivers with `drivers` ([{user_id, name}, ...]) in one
     transaction and flip setup_complete. Used by the verification flow to commit

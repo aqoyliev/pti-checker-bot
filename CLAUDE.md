@@ -40,6 +40,9 @@ issues) is posted back into the group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
+- **`utils/phone_lookup.py`** — a *second*, write-capable user session: phone
+  number → account (`/whois`, `scripts/tg_phone_lookup.py`). Separate account on
+  purpose (below).
 - **`middlewares/throttling.py`** — anti-flood for text messages.
 - **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
   "has this group gone quiet?" report (below).
@@ -98,19 +101,52 @@ then works the setup out on its own:
 
 1. guess the unit from the chat **title**, falling back to the **description**;
 2. read the member roster through `utils/userbot.py`;
-3. DM the admins the title, the About text, the unit guess *and where it came
-   from*, and one button per member.
+3. resolve the phone numbers in the About text into accounts, and configure the
+   group outright if everything checks out (below);
+4. otherwise DM the admins the title, the About text, the unit guess *and where
+   it came from*, the reason step 3 declined, and one button per member.
 
 The admin taps the drivers (this is how their `user_id` is captured), confirms
-the unit and presses Save. **Nothing is written to the DB until Save.**
+the unit and presses Save. **Nothing is written to the DB until Save** — on the
+picker path.
+
+### Configuring from the About text
+
+The fleet writes both drivers' phone numbers into the group's About text (144 of
+147 active groups, almost always exactly two), and a number resolves to a
+`user_id` through `utils/phone_lookup.py`. `utils/auto_onboard.plan_auto_config`
+decides whether that is enough to skip the admin, and the admin is *told* rather
+than asked: a DM naming the unit, both drivers and the number each came from,
+with one **Edit / undo** button that reopens the normal picker with the stored
+drivers pre-selected (`ob:e:`).
+
+The decision is pure — the caller does the roster read, the lookup and the
+writes — because it is the part that must not go wrong quietly. **Every one of
+these must hold, or the picker is sent instead:** a unit parsed *and* on the
+active list; exactly as many numbers in the About text as a group has drivers;
+every number resolving to an account; every account being a member of the group
+and not a bot; the accounts distinct. Three numbers means one belongs to
+dispatch and guessing which is the failure this exists to avoid; an account that
+is not in the chat can never post a PTI, so registering it would create a driver
+who is permanently overdue.
+
+Declining is not a failure — it is the ordinary prompt with a line saying which
+check stopped it. That includes `LookupUnavailable`: a rate-limited lookup
+account may cost an automatic setup, never a wrong one. With no lookup session
+configured the whole step is skipped silently.
+
+Nobody is marked as a non-driver on this path — only people actually shown a
+picker count as passed over.
 
 Three rules that are easy to undo by accident:
 
 - **The parsed unit is a suggestion, never a value.** Measured across the 158
   groups whose `unit_number` was already known, a naive digit-run regex scored
   79.5% — and six titles yielded a *different valid unit* rather than nothing. A
-  wrong unit silently misattributes inspections, so a human confirms it. Do not
-  wire `parse_unit` straight into `set_group_unit`.
+  wrong unit silently misattributes inspections, so it is only ever written
+  without a human when the auto-config path's *other* checks corroborate it —
+  two phone numbers that resolve to two members of that very group. Do not wire
+  `parse_unit` straight into `set_group_unit`.
 - **Descriptions are parsed more strictly than titles** — labelled forms only
   (`UNIT 1216`, `TRUCK# 147085`, `SUB x // y`). About text is free prose, where
   the title's bare-leading-number rule would read a phone number, a street
@@ -172,6 +208,50 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+## Phone number → account: the second userbot
+
+`utils/phone_lookup.py` answers "whose Telegram account owns this number?",
+used by `/whois <phone…>` (admin DM) and `scripts/tg_phone_lookup.py`. Driver
+lists arrive as names and phone numbers while everything here is keyed on
+`user_id`, so this is the bridge between the two; a resolved id is also checked
+against `group_drivers` (`get_driver_memberships`) to answer "are they already
+registered somewhere?".
+
+It is a **separate module on a separate account** (`TELEGRAM_LOOKUP_SESSION`),
+and both halves of that matter:
+
+- **It writes.** There is no read-only way to do this — Telegram only names the
+  owner of a number if you import it as a contact (`contacts.importContacts`).
+  Every imported contact is deleted again in a `finally`, so the contact list is
+  left as found, but the call is still a write and must not live in
+  `utils/userbot.py`. A test asserts that module stays free of writes.
+- **It is the most rate-limited thing a user account can do.** The roster
+  session is load-bearing for onboarding; a contact-import limit picked up while
+  answering `/whois` must not be able to take member lookup down with it.
+
+Three outcomes, and conflating the last two is the bug to avoid:
+
+| Telegram's response | Meaning |
+| --- | --- |
+| imported, user returned | match |
+| neither imported nor `retry_contacts` | no visible account — not registered, **or** hidden by "Who can find me by my phone number". Indistinguishable. |
+| `retry_contacts` forever, nothing imported | the *lookup* failed (account is contact-import limited) → `LookupUnavailable`, never "no match" |
+
+Reporting a refusal as "not on Telegram" would send an admin chasing a driver
+who is perfectly reachable, so the refusal raises. Observed live on 2026-08-12:
+the `Safety` account (`8554521339`) returns `retry_contacts` for every number
+including a control, which is why lookup gets its own, older account.
+
+The one-session-per-host rule applies here too: `lookup_userbot` is the Railway
+session, `lookup_local` is for `scripts/tg_phone_lookup.py`, and they are
+different sessions.
+
+```bash
+railway run py -3.11 scripts/tg_login.py --name lookup_userbot
+railway run py -3.11 scripts/tg_session_to_railway.py \
+    --session lookup_userbot --var TELEGRAM_LOOKUP_SESSION
+```
 
 ## Retired vs. quiet groups
 
