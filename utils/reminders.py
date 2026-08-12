@@ -89,7 +89,7 @@ def _overdue_text(drivers: list[dict]) -> str:
 def _escalation_text(drivers: list[dict]) -> str:
     return (
         f"🚨 {_driver_names(drivers)}, your PTI is still overdue. Please send a PTI video "
-        f"now. {_HOW}\nThis reminder repeats every 12 hours until you do."
+        f"now. {_HOW}"
     )
 
 
