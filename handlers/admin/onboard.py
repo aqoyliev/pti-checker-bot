@@ -28,14 +28,16 @@ from aiogram.utils.exceptions import MessageNotModified
 
 from data.config import ADMINS
 from loader import bot, dp
-from utils import userbot
+from utils import phone_lookup, userbot
+from utils.auto_onboard import plan_auto_config
 from utils.db import (
-    add_driver,
     clear_non_drivers,
     get_active_units,
+    get_drivers,
     get_group,
     get_non_driver_ids,
     mark_non_drivers,
+    replace_drivers,
     set_group_unit,
     unmark_non_drivers,
     upsert_group,
@@ -167,6 +169,11 @@ def _text(admin_id: int, group_id: int) -> str:
     if st["retired_marker"]:
         lines.append("⚠️ The title says this group is inactive/moved — check "
                      "it is really the live chat before saving.")
+    # Why this group is being asked about rather than configured from the
+    # About text's phone numbers. Without it, "why am I still tapping names?"
+    # has no answer short of reading the logs.
+    if st.get("auto_note"):
+        lines.append(f"ℹ️ Couldn't do this automatically: {escape(st['auto_note'])}.")
     if not st["members"]:
         lines.append("\n⚠️ No member list available — the userbot account is "
                      "probably not in this group. Add it, then tap "
@@ -185,6 +192,53 @@ def _text(admin_id: int, group_id: int) -> str:
     return "\n".join(lines)
 
 
+async def _try_auto_config(group_id: int, unit: str | None, description: str,
+                           members: list) -> tuple[object | None, str]:
+    """Resolve the About text's phone numbers into drivers. (plan, reason).
+
+    Every failure is an ordinary "ask the admin instead", including the lookup
+    being unavailable -- a rate-limited account must never be the reason a
+    group gets configured wrongly, only the reason it gets configured by hand.
+    """
+    if not phone_lookup.is_configured():
+        return None, ""
+    phones = phone_lookup.extract_phones(description)
+    if not phones:
+        return None, "no phone numbers in the About text"
+    try:
+        resolved = await phone_lookup.lookup(phones)
+    except phone_lookup.LookupUnavailable as e:
+        logging.warning("auto-config for %s fell back to the picker: %s", group_id, e)
+        return None, f"phone lookup unavailable ({e})"
+    return plan_auto_config(unit, phones, resolved, members)
+
+
+def _auto_keyboard(group_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("✏️ Edit / undo",
+                                callback_data=f"ob:e:{group_id}:0"))
+    return kb
+
+
+async def _apply_auto_config(group_id: int, plan) -> str:
+    """Write the unit and drivers, and return the notice for the admins."""
+    await set_group_unit(group_id, plan.unit)
+    await replace_drivers(group_id, [{"user_id": uid, "name": label}
+                                     for uid, label in plan.drivers])
+    # Being chosen as a driver outranks a stale "not a driver" row, exactly as
+    # it does on the Save path. Nobody was shown a picker here, so nobody is
+    # marked as a non-driver: only people actually passed over count.
+    await unmark_non_drivers([uid for uid, _ in plan.drivers])
+
+    lines = [f"🤖 <b>Unit {escape(plan.unit)} configured automatically.</b>"]
+    for user_id, label in plan.drivers:
+        lines.append(f"• {escape(label)} — <code>{user_id}</code> "
+                     f"(from {escape(plan.sources[user_id])})")
+    lines.append("\n<i>Drivers were read from the phone numbers in the group's "
+                 "About text. Tap Edit if any of this is wrong.</i>")
+    return "\n".join(lines)
+
+
 async def start_onboarding(group_id: int, title: str) -> bool:
     """Called when the bot joins a group. Never messages the group itself.
 
@@ -199,6 +253,25 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     unit, unit_source = await _checked_guess(title, description)
     hidden = await get_non_driver_ids()
 
+    # The About text usually names both drivers by phone number. When all of it
+    # checks out the group configures itself and the admins are told; anything
+    # unclear falls through to the prompt below, with the reason attached.
+    plan, auto_note = await _try_auto_config(group_id, unit, description, drivers_pool)
+    if plan is not None:
+        notice = await _apply_auto_config(group_id, plan)
+        delivered = False
+        for admin_id in _ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, notice, parse_mode="HTML",
+                                       reply_markup=_auto_keyboard(group_id))
+                delivered = True
+            except Exception:
+                logging.exception("could not tell admin %s about the auto-config "
+                                  "of %s", admin_id, group_id)
+        # The group is configured either way; an unreachable admin is not a
+        # reason to leave it unconfigured, and there is nothing to nag about.
+        return True
+
     delivered = False
     for admin_id in _ADMIN_IDS:
         key = _key(admin_id, group_id)
@@ -212,6 +285,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
             "hidden": hidden,
             "show_all": False,
             "selected": [],
+            "auto_note": auto_note,
         }
         try:
             await bot.send_message(
@@ -257,6 +331,7 @@ async def _rebuild_pending(admin_id: int, group_id: int) -> dict | None:
         "hidden": await get_non_driver_ids(),
         "show_all": False,
         "selected": [],
+        "auto_note": "",
     }
     _pending[_key(admin_id, group_id)] = st
     return st
@@ -330,6 +405,21 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
                 "first, then tap Refresh again.", show_alert=True)
         return
 
+    if action == "e":
+        # Edit/undo on an auto-configured group. The stored drivers are
+        # pre-selected, so the admin corrects a pick rather than redoing the
+        # group from scratch; nothing is unwritten until they Save.
+        stored = await get_drivers(group_id)
+        present = {m.user_id for m in st["members"]}
+        st["selected"] = [d["user_id"] for d in stored
+                          if d["user_id"] in present][:MAX_DRIVERS]
+        st["auto_note"] = ""
+        await call.message.edit_text(
+            _text(call.from_user.id, group_id), parse_mode="HTML",
+            reply_markup=_keyboard(call.from_user.id, group_id))
+        await call.answer("Change the picks, then Save.")
+        return
+
     if action == "a":
         st["show_all"] = not st.get("show_all")
         await call.message.edit_text(
@@ -361,11 +451,16 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
 
         await set_group_unit(group_id, st["unit"])
         names = []
+        picked = []
         for uid in st["selected"]:
             m = next((x for x in st["members"] if x.user_id == uid), None)
             name = m.label if m else str(uid)
-            await add_driver(group_id, uid, name)
+            picked.append({"user_id": uid, "name": name})
             names.append(name)
+        # Replace rather than add: this prompt is also the Edit path for a group
+        # that configured itself from the About text, and a correction there has
+        # to remove the driver it is correcting, not sit alongside them.
+        await replace_drivers(group_id, picked)
 
         # Everyone the admin looked at and passed over is a non-driver —
         # dispatch, safety, the owner — and they recur across groups, so

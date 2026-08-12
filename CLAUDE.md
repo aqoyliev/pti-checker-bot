@@ -101,19 +101,52 @@ then works the setup out on its own:
 
 1. guess the unit from the chat **title**, falling back to the **description**;
 2. read the member roster through `utils/userbot.py`;
-3. DM the admins the title, the About text, the unit guess *and where it came
-   from*, and one button per member.
+3. resolve the phone numbers in the About text into accounts, and configure the
+   group outright if everything checks out (below);
+4. otherwise DM the admins the title, the About text, the unit guess *and where
+   it came from*, the reason step 3 declined, and one button per member.
 
 The admin taps the drivers (this is how their `user_id` is captured), confirms
-the unit and presses Save. **Nothing is written to the DB until Save.**
+the unit and presses Save. **Nothing is written to the DB until Save** — on the
+picker path.
+
+### Configuring from the About text
+
+The fleet writes both drivers' phone numbers into the group's About text (144 of
+147 active groups, almost always exactly two), and a number resolves to a
+`user_id` through `utils/phone_lookup.py`. `utils/auto_onboard.plan_auto_config`
+decides whether that is enough to skip the admin, and the admin is *told* rather
+than asked: a DM naming the unit, both drivers and the number each came from,
+with one **Edit / undo** button that reopens the normal picker with the stored
+drivers pre-selected (`ob:e:`).
+
+The decision is pure — the caller does the roster read, the lookup and the
+writes — because it is the part that must not go wrong quietly. **Every one of
+these must hold, or the picker is sent instead:** a unit parsed *and* on the
+active list; exactly as many numbers in the About text as a group has drivers;
+every number resolving to an account; every account being a member of the group
+and not a bot; the accounts distinct. Three numbers means one belongs to
+dispatch and guessing which is the failure this exists to avoid; an account that
+is not in the chat can never post a PTI, so registering it would create a driver
+who is permanently overdue.
+
+Declining is not a failure — it is the ordinary prompt with a line saying which
+check stopped it. That includes `LookupUnavailable`: a rate-limited lookup
+account may cost an automatic setup, never a wrong one. With no lookup session
+configured the whole step is skipped silently.
+
+Nobody is marked as a non-driver on this path — only people actually shown a
+picker count as passed over.
 
 Three rules that are easy to undo by accident:
 
 - **The parsed unit is a suggestion, never a value.** Measured across the 158
   groups whose `unit_number` was already known, a naive digit-run regex scored
   79.5% — and six titles yielded a *different valid unit* rather than nothing. A
-  wrong unit silently misattributes inspections, so a human confirms it. Do not
-  wire `parse_unit` straight into `set_group_unit`.
+  wrong unit silently misattributes inspections, so it is only ever written
+  without a human when the auto-config path's *other* checks corroborate it —
+  two phone numbers that resolve to two members of that very group. Do not wire
+  `parse_unit` straight into `set_group_unit`.
 - **Descriptions are parsed more strictly than titles** — labelled forms only
   (`UNIT 1216`, `TRUCK# 147085`, `SUB x // y`). About text is free prose, where
   the title's bare-leading-number rule would read a phone number, a street
