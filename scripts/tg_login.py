@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 from telethon.sync import TelegramClient
@@ -49,6 +50,16 @@ def main() -> None:
             "Either run this under `railway run --service pti-checker-bot`, "
             "or get them from https://my.telegram.org and export them."
         )
+
+    # Telethon prompts for the phone, the code and the 2FA password on stdin.
+    # Without a terminal that prompt hits EOF and dies mid-login, leaving an
+    # unauthorized .session stub behind -- which is what running this through
+    # an agent's shell (or any pipe) does. Say so instead.
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "This login is interactive and there is no terminal attached.\n"
+            "Run it yourself in a real terminal window:\n"
+            f"  railway run py -3.11 scripts/tg_login.py --name {args.name}")
 
     SESSION_DIR.mkdir(mode=0o700, exist_ok=True)
 

@@ -44,6 +44,9 @@ def main() -> None:
     ap.add_argument("--session", default="bot_userbot",
                     help="session name under ~/.pti-tg. Must NOT be one you use "
                          "locally (default: bot_userbot)")
+    ap.add_argument("--var", default="TELEGRAM_SESSION",
+                    help="Railway variable to set. Use TELEGRAM_LOOKUP_SESSION "
+                         "for the phone-lookup account (default: TELEGRAM_SESSION)")
     ap.add_argument("--print-only", action="store_true",
                     help="print the value instead of setting it (avoid: it is a credential)")
     args = ap.parse_args()
@@ -61,9 +64,21 @@ def main() -> None:
     if not api_id or not api_hash:
         raise SystemExit("TELEGRAM_API_ID / TELEGRAM_API_HASH not set (use `railway run`).")
 
-    with TelegramClient(str(session), int(api_id), api_hash) as client:
+    # connect(), not start(): start() would try to *log in* when the session is
+    # not authorized, and an interrupted tg_login leaves exactly such a stub
+    # behind. Prompting for a phone number here would be the wrong tool asking.
+    client = TelegramClient(str(session), int(api_id), api_hash)
+    client.connect()
+    try:
+        if not client.is_user_authorized():
+            raise SystemExit(
+                f"{session}.session exists but is not logged in — finish the "
+                f"login first, in a real terminal:\n"
+                f"  railway run py -3.11 scripts/tg_login.py --name {args.session}")
         me = client.get_me()
         value = StringSession.save(client.session)
+    finally:
+        client.disconnect()
 
     print(f"session belongs to {me.first_name} (id {me.id}); {len(value)} chars")
 
@@ -73,14 +88,14 @@ def main() -> None:
 
     proc = subprocess.run(
         ["railway", "variables", "--service", args.service,
-         "--set", f"TELEGRAM_SESSION={value}"],
+         "--set", f"{args.var}={value}"],
         capture_output=True, text=True, shell=(sys.platform == "win32"),
     )
     if proc.returncode != 0:
         # Never echo the command: it contains the session.
         print("railway variables failed:", proc.stderr.strip()[:400])
         raise SystemExit(1)
-    print(f"TELEGRAM_SESSION set on {args.service}. Railway will redeploy.")
+    print(f"{args.var} set on {args.service}. Railway will redeploy.")
 
 
 if __name__ == "__main__":

@@ -104,3 +104,13 @@ TELEGRAM_API_HASH = env.str("TELEGRAM_API_HASH", default="")
 # the account it was made from.
 TELEGRAM_SESSION = env.str("TELEGRAM_SESSION", default="")
 TELEGRAM_SESSION_FILE = env.str("TELEGRAM_SESSION_FILE", default="")
+
+# --- lookup userbot (phone number -> account) ---
+# A *second*, separate user session, used only by utils/phone_lookup.py. It is
+# separate for two reasons: resolving a phone number means importing a contact,
+# which is a write, and utils/userbot.py is strictly read-only; and contact
+# import is the most heavily rate-limited thing a user account can do, so it
+# must not be able to get the roster session limited. Same API credentials, a
+# different account. Absent config disables the feature.
+TELEGRAM_LOOKUP_SESSION = env.str("TELEGRAM_LOOKUP_SESSION", default="")
+TELEGRAM_LOOKUP_SESSION_FILE = env.str("TELEGRAM_LOOKUP_SESSION_FILE", default="")

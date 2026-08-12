@@ -40,6 +40,9 @@ issues) is posted back into the group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
+- **`utils/phone_lookup.py`** — a *second*, write-capable user session: phone
+  number → account (`/whois`, `scripts/tg_phone_lookup.py`). Separate account on
+  purpose (below).
 - **`middlewares/throttling.py`** — anti-flood for text messages.
 - **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
   "has this group gone quiet?" report (below).
@@ -172,6 +175,50 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+## Phone number → account: the second userbot
+
+`utils/phone_lookup.py` answers "whose Telegram account owns this number?",
+used by `/whois <phone…>` (admin DM) and `scripts/tg_phone_lookup.py`. Driver
+lists arrive as names and phone numbers while everything here is keyed on
+`user_id`, so this is the bridge between the two; a resolved id is also checked
+against `group_drivers` (`get_driver_memberships`) to answer "are they already
+registered somewhere?".
+
+It is a **separate module on a separate account** (`TELEGRAM_LOOKUP_SESSION`),
+and both halves of that matter:
+
+- **It writes.** There is no read-only way to do this — Telegram only names the
+  owner of a number if you import it as a contact (`contacts.importContacts`).
+  Every imported contact is deleted again in a `finally`, so the contact list is
+  left as found, but the call is still a write and must not live in
+  `utils/userbot.py`. A test asserts that module stays free of writes.
+- **It is the most rate-limited thing a user account can do.** The roster
+  session is load-bearing for onboarding; a contact-import limit picked up while
+  answering `/whois` must not be able to take member lookup down with it.
+
+Three outcomes, and conflating the last two is the bug to avoid:
+
+| Telegram's response | Meaning |
+| --- | --- |
+| imported, user returned | match |
+| neither imported nor `retry_contacts` | no visible account — not registered, **or** hidden by "Who can find me by my phone number". Indistinguishable. |
+| `retry_contacts` forever, nothing imported | the *lookup* failed (account is contact-import limited) → `LookupUnavailable`, never "no match" |
+
+Reporting a refusal as "not on Telegram" would send an admin chasing a driver
+who is perfectly reachable, so the refusal raises. Observed live on 2026-08-12:
+the `Safety` account (`8554521339`) returns `retry_contacts` for every number
+including a control, which is why lookup gets its own, older account.
+
+The one-session-per-host rule applies here too: `lookup_userbot` is the Railway
+session, `lookup_local` is for `scripts/tg_phone_lookup.py`, and they are
+different sessions.
+
+```bash
+railway run py -3.11 scripts/tg_login.py --name lookup_userbot
+railway run py -3.11 scripts/tg_session_to_railway.py \
+    --session lookup_userbot --var TELEGRAM_LOOKUP_SESSION
+```
 
 ## Retired vs. quiet groups
 

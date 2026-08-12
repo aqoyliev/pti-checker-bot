@@ -17,7 +17,10 @@ async def set_default_commands(dp):
     await dp.bot.set_my_commands(_DEFAULT_COMMANDS)
 
     # Add /admin only in each admin's private chat, so drivers never see it.
-    admin_commands = _DEFAULT_COMMANDS + [types.BotCommand("admin", "Open the admin panel")]
+    admin_commands = _DEFAULT_COMMANDS + [
+        types.BotCommand("admin", "Open the admin panel"),
+        types.BotCommand("whois", "Look up a phone number's Telegram account"),
+    ]
     for admin in ADMINS:
         try:
             await dp.bot.set_my_commands(
