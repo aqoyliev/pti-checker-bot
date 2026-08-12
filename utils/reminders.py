@@ -42,7 +42,26 @@ def _driver_names_plain(drivers: list[dict]) -> str:
 
 
 def _driver_names(drivers: list[dict]) -> str:
-    return escape(_driver_names_plain(drivers))
+    """The drivers as tappable @-mentions, so a reminder actually notifies them.
+
+    ``tg://user?id=`` is the only mention form that works without a username --
+    most drivers don't have one, and a plain name is just text the app never
+    pings. Telegram resolves the id against the group's own members, so this
+    only notifies people already in the chat.
+
+    A driver row with no user_id (or no name) falls back to escaped text rather
+    than being dropped: a reminder naming everyone un-tappably is still a
+    reminder, one that silently omits a driver is not.
+    """
+    parts = []
+    for d in drivers:
+        name = d.get("name")
+        if not name:
+            continue
+        uid = d.get("user_id")
+        parts.append(f'<a href="tg://user?id={int(uid)}">{escape(name)}</a>'
+                     if uid else escape(name))
+    return ", ".join(parts) if parts else "Driver"
 
 
 # Every reminder spells out the submission step: send the video, then reply
