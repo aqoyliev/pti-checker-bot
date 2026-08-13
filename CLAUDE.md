@@ -138,6 +138,18 @@ configured the whole step is skipped silently.
 Nobody is marked as a non-driver on this path — only people actually shown a
 picker count as passed over.
 
+**The stored name is the fleet's, not Telegram's.** The About text names the
+drivers on their own line (`Name: ZAMA, EMILE / FLEURMOND, JACQUES`), and
+`parse_driver_names` reads it: a Telegram profile says "Emile ✈️" or
+`@jacques_f`, which nobody can match against a driver list. Names pair with
+phone numbers **by position**, so any other count is not a pairing at all and
+the Telegram names are kept instead of guessing — the name is a label, never a
+reason to decline an otherwise-clean setup. The admin notice shows the Telegram
+name beside the stored one when they differ, because that is the line on which a
+swapped pair becomes visible. The picker's Save keeps whatever name a driver is
+already stored with, so editing one pick can't quietly swap the other back to a
+Telegram handle.
+
 Three rules that are easy to undo by accident:
 
 - **The parsed unit is a suggestion, never a value.** Measured across the 158

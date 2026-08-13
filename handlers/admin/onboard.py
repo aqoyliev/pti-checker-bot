@@ -29,7 +29,7 @@ from aiogram.utils.exceptions import MessageNotModified
 from data.config import ADMINS
 from loader import bot, dp
 from utils import phone_lookup, userbot
-from utils.auto_onboard import plan_auto_config
+from utils.auto_onboard import parse_driver_names, plan_auto_config
 from utils.db import (
     clear_non_drivers,
     get_active_units,
@@ -210,7 +210,8 @@ async def _try_auto_config(group_id: int, unit: str | None, description: str,
     except phone_lookup.LookupUnavailable as e:
         logging.warning("auto-config for %s fell back to the picker: %s", group_id, e)
         return None, f"phone lookup unavailable ({e})"
-    return plan_auto_config(unit, phones, resolved, members)
+    return plan_auto_config(unit, phones, resolved, members,
+                            parse_driver_names(description))
 
 
 def _auto_keyboard(group_id: int) -> InlineKeyboardMarkup:
@@ -231,9 +232,14 @@ async def _apply_auto_config(group_id: int, plan) -> str:
     await unmark_non_drivers([uid for uid, _ in plan.drivers])
 
     lines = [f"🤖 <b>Unit {escape(plan.unit)} configured automatically.</b>"]
-    for user_id, label in plan.drivers:
-        lines.append(f"• {escape(label)} — <code>{user_id}</code> "
-                     f"(from {escape(plan.sources[user_id])})")
+    for user_id, name in plan.drivers:
+        # The stored name is the fleet's, so the Telegram one is shown beside it
+        # when they differ: names and numbers are paired by position, and this
+        # is the line on which a swapped pair becomes visible.
+        tg = plan.tg_labels.get(user_id)
+        also = f", Telegram: {escape(tg)}" if tg and tg != name else ""
+        lines.append(f"• {escape(name)} — <code>{user_id}</code> "
+                     f"(from {escape(plan.sources[user_id])}{also})")
     lines.append("\n<i>Drivers were read from the phone numbers in the group's "
                  "About text. Tap Edit if any of this is wrong.</i>")
     return "\n".join(lines)
@@ -450,11 +456,17 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
             return
 
         await set_group_unit(group_id, st["unit"])
+        # A driver already registered here keeps the name they were stored with.
+        # This prompt is also the Edit path for a group configured from its
+        # About text, where the stored name is the fleet's -- re-saving to fix
+        # the *other* pick must not quietly swap it back to a Telegram handle.
+        kept = {d["user_id"]: d["name"] for d in await get_drivers(group_id)
+                if d.get("name")}
         names = []
         picked = []
         for uid in st["selected"]:
             m = next((x for x in st["members"] if x.user_id == uid), None)
-            name = m.label if m else str(uid)
+            name = kept.get(uid) or (m.label if m else str(uid))
             picked.append({"user_id": uid, "name": name})
             names.append(name)
         # Replace rather than add: this prompt is also the Edit path for a group
