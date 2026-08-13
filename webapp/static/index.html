@@ -505,20 +505,49 @@ async function renderTools() {
 
 // ---------- admins ----------
 
+// Names come from Telegram, not the admins table, so either may be missing:
+// the bot can only resolve someone it has a DM with.
+const adminName = a => a.name || (a.username ? "@" + a.username : String(a.user_id));
+
+function adminSub(a) {
+  const bits = [];
+  if (a.username) bits.push("@" + a.username);
+  if (adminName(a) !== String(a.user_id)) bits.push(String(a.user_id));
+  if (!a.name && !a.username) bits.push("never messaged the bot");
+  return bits.join(" · ");
+}
+
+// Opening an account needs a t.me link, which needs a public @username.
+// Without one tg://user?id= resolves only for accounts the client already
+// knows, so it can silently do nothing — copy the id instead of offering a
+// link that looks live and isn't.
+function openAccount(a) {
+  if (!a.username) {
+    if (navigator.clipboard) navigator.clipboard.writeText(String(a.user_id)).catch(() => {});
+    return toast("No @username — id copied");
+  }
+  const url = "https://t.me/" + a.username;
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, "_blank");
+}
+
 async function renderAdmins() {
   view.innerHTML = '<div class="center">Loading…</div>';
   let admins;
   try { admins = await api("/api/admins"); }
   catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
+  const byId = Object.fromEntries(admins.map(a => [String(a.user_id), a]));
 
   view.innerHTML =
     '<div class="card"><b>🛡 Admins</b><div class="hint" style="margin:4px 0 2px">' +
-      'Regular admins can use the panel; only super-admins manage admins.</div>' +
+      'Regular admins can use the panel; only super-admins manage admins. ' +
+      'Tap a name to open their Telegram account.</div>' +
       admins.map(a =>
         '<div class="item" style="cursor:default"><div class="row">' +
-        '<div class="grow"><code>' + a.user_id + '</code> ' +
+        '<div class="grow ellip" data-open="' + a.user_id + '" style="cursor:pointer">' +
+        '<b>' + esc(adminName(a)) + '</b> ' +
         (a.is_super_admin ? '<span class="chip ok">★ super</span>' : '<span class="chip mut">admin</span>') +
-        '</div>' +
+        '<div class="hint ellip">' + esc(adminSub(a)) + '</div></div>' +
         (a.is_super_admin ? "" :
           '<button class="btn danger inline" data-rma="' + a.user_id + '">Remove</button>') +
         '</div></div>'
@@ -528,8 +557,11 @@ async function renderAdmins() {
       '<div class="row"><input type="text" id="newAdmin" inputmode="numeric" placeholder="123456789">' +
       '<button class="btn inline" id="addAdmin">Add</button></div></div>';
 
+  view.querySelectorAll("[data-open]").forEach(el =>
+    el.onclick = () => openAccount(byId[el.dataset.open]));
+
   view.querySelectorAll("[data-rma]").forEach(b => b.onclick = async () => {
-    if (!await confirmDlg("Remove admin " + b.dataset.rma + "?")) return;
+    if (!await confirmDlg("Remove admin " + adminName(byId[b.dataset.rma]) + "?")) return;
     try { await api("/api/admins/" + b.dataset.rma, { method: "DELETE" }); toast("Admin removed"); renderAdmins(); }
     catch (e) { toast(e.message); }
   });
