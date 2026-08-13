@@ -264,6 +264,16 @@ missing from the new list is deactivated (`groups_to_deactivate` →
 - **No unit ⇒ untouched.** A group still awaiting onboarding has no unit to
   match, and "not in the list" must not mean "retired" for it.
 
+**And the reverse question.** `units_without_groups` answers "which units on
+this list have no active group?" — trucks whose chat was never created, never
+had the bot added, or is still un-onboarded with no unit stored. Every other
+report is driven off the groups the bot already knows, so those trucks are
+invisible to all of them, which is exactly what makes them worth naming: nothing
+can be inspected for them. A unit held only by a *deactivated* group is listed
+with that group attached, because the fix there is a reactivation, not a new
+chat. It is reported on both paths, including the quiet one where nothing is
+written — a truck with no chat is news either way.
+
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
 

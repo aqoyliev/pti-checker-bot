@@ -31,6 +31,12 @@ confirmed sweep below. It runs unattended, so it reads the titles fresh from
 Telegram and skips every group it cannot read: "couldn't fetch" must never be
 mistaken for "the truck is gone".
 
+The paste is also answered with the reverse question: which units on the list
+have *no* active group (``units_without_groups``). Every other report here is
+driven off the groups the bot already knows, so a truck whose chat was never
+created — or never had the bot added — is invisible to all of them, and that is
+precisely a truck nobody is inspecting.
+
 Two deliberate asymmetries:
 
 - **Deactivate only.** A unit reappearing on a later list does not reactivate
@@ -256,6 +262,46 @@ def apply_renames(groups: list[dict], renames: list[dict]) -> list[dict]:
             for g in groups]
 
 
+def units_without_groups(groups: list[dict], units: list[str]) -> list[dict]:
+    """Units on the new list that no active group is filed under.
+
+    The other half of the weekly reconciliation: ``groups_to_deactivate`` finds
+    chats whose truck is gone, this finds trucks whose chat is missing. Those are
+    the units that can never produce an inspection -- the group was never
+    created, the bot was never added, or it is sitting there un-onboarded with no
+    unit stored -- and nothing else in the bot would ever mention them, because
+    everything is driven off the groups it already knows.
+
+    Returns ``[{"unit": str, "inactive": group|None}]`` in the order the admin
+    pasted them. A unit held only by a *deactivated* group is reported with that
+    group attached, because the fix there is a reactivation rather than a new
+    chat, and telling the two apart is the whole value of the line.
+
+    Pure. Run on post-rename rows, or a truck that just moved reads as missing
+    under the number it no longer has.
+    """
+    live: set[str] = set()
+    retired: dict[str, dict] = {}
+    for g in groups:
+        unit = normalize_unit(g.get("unit_number"))
+        if not unit:
+            continue
+        if g.get("is_active", True):
+            live.add(unit)
+        else:
+            retired.setdefault(unit, g)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in units:
+        unit = normalize_unit(raw)
+        if not unit or unit in live or unit in seen:
+            continue
+        seen.add(unit)
+        out.append({"unit": unit, "inactive": retired.get(unit)})
+    return out
+
+
 def _group_line(g: dict) -> str:
     unit = escape(normalize_unit(g.get("unit_number")) or "—")
     title = escape(g.get("title") or str(g["group_id"]))
@@ -267,8 +313,29 @@ def _rename_line(r: dict) -> str:
     return f"• <b>{escape(r['old'])} → {escape(r['new'])}</b> — {title}"
 
 
+def _missing_block(missing: list[dict]) -> list[str]:
+    """The 'trucks with no chat' section, shared by the preview and the result."""
+    if not missing:
+        return []
+    shown = missing[:_PREVIEW_LIMIT]
+    lines = [f"📭 <b>{len(missing)} unit(s) on this list have no active group</b> "
+             f"— nothing can be inspected for them:", ""]
+    for m in shown:
+        dead = m["inactive"]
+        if dead is None:
+            lines.append(f"• <b>{escape(m['unit'])}</b>")
+        else:
+            title = escape(dead.get("title") or str(dead["group_id"]))
+            lines.append(f"• <b>{escape(m['unit'])}</b> — group exists but is "
+                         f"deactivated: {title}")
+    if len(missing) > len(shown):
+        lines.append(f"…and {len(missing) - len(shown)} more.")
+    return lines
+
+
 def _confirm_text(units: list[str], casualties: list[dict],
-                  renames: list[dict] | None = None) -> str:
+                  renames: list[dict] | None = None,
+                  missing: list[dict] | None = None) -> str:
     renames = renames or []
     lines = [f"📋 <b>{len(units)} active units</b> ready to store.", ""]
 
@@ -295,6 +362,10 @@ def _confirm_text(units: list[str], casualties: list[dict],
         if len(casualties) > len(shown):
             lines.append(f"…and {len(casualties) - len(shown)} more.")
         lines.append("")
+
+    block = _missing_block(missing or [])
+    if block:
+        lines += block + [""]
 
     lines.append("Nothing has been saved yet. Confirm to store the list"
                  + (", re-file the renamed groups" if renames else "")
@@ -341,7 +412,11 @@ async def cmd_units(message: types.Message):
     # number changed this week is still running, and judging it on the number it
     # no longer has would deactivate a live group.
     renames = title_unit_changes(groups, units)
-    casualties = groups_to_deactivate(apply_renames(groups, renames), units)
+    moved = apply_renames(groups, renames)
+    casualties = groups_to_deactivate(moved, units)
+    # Reported either way, including on the quiet path where nothing changes:
+    # "this truck has no chat" is news whether or not anything is being written.
+    missing = units_without_groups(moved, units)
 
     if casualties or renames:
         # Nothing is written yet — not the list, not the renames, not the
@@ -350,17 +425,19 @@ async def cmd_units(message: types.Message):
             "units": units,
             "casualties": casualties,
             "renames": renames,
+            "missing": missing,
             "at": monotonic(),
         }
-        await message.answer(_confirm_text(units, casualties, renames),
+        await message.answer(_confirm_text(units, casualties, renames, missing),
                              parse_mode="HTML", reply_markup=_confirm_kb())
         return
 
-    await message.answer(await _apply(units, [], []), parse_mode="HTML")
+    await message.answer(await _apply(units, [], [], missing), parse_mode="HTML")
 
 
 async def _apply(units: list[str], casualties: list[dict],
-                 renames: list[dict] | None = None) -> str:
+                 renames: list[dict] | None = None,
+                 missing: list[dict] | None = None) -> str:
     """Re-file renamed groups, store the list, retire what fell off it.
 
     All three writes happen in one transaction (``apply_units_sweep``), so the
@@ -391,6 +468,12 @@ async def _apply(units: list[str], casualties: list[dict],
         lines.append(f"\n💤 <b>{deactivated} group(s) deactivated</b> — unit no "
                      f"longer on the list.")
         logging.info("units sweep deactivated %s groups: %s", deactivated, group_ids)
+
+    block = _missing_block(missing or [])
+    if block:
+        lines += [""] + block
+        logging.info("units sweep: %s listed unit(s) have no active group: %s",
+                     len(missing), [m["unit"] for m in missing])
     return "\n".join(lines)
 
 
@@ -419,7 +502,7 @@ async def units_confirm_callback(query: types.CallbackQuery):
     # yet", with no way to tell whether the sweep ran.
     try:
         text = await _apply(state["units"], state["casualties"],
-                            state.get("renames", []))
+                            state.get("renames", []), state.get("missing", []))
     except Exception:
         logging.exception("units sweep failed for admin %s", uid)
         await query.message.edit_text(
