@@ -169,6 +169,18 @@ title naming a retired truck reads as "not found". An admin refreshes that list
 weekly with `/units …` (replaced wholesale); an empty table disables the check
 rather than rejecting every unit.
 
+**The weekly list first re-files, then retires.** `/units` runs
+`title_unit_changes` before `groups_to_deactivate`, because the fleet renames a
+group when its truck changes — so a group still filed under the old number would
+be retired for a unit that merely moved. Both land in one `apply_units_sweep`
+transaction, renames applied first.
+
+A title parse is still only a suggestion, so a rename is offered only when the
+group is already configured, its title doesn't read as retired, and — the real
+corroboration — **the parsed number is on the incoming list**. Collisions (two
+titles claiming one unit, or a unit another active group already holds) are
+dropped rather than guessed at. Nothing is written without the admin confirming.
+
 **The weekly list also retires groups.** Any active group whose `unit_number` is
 missing from the new list is deactivated (`groups_to_deactivate` →
 `apply_units_sweep`). Three rules keep that from going wrong:

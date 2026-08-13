@@ -155,3 +155,4 @@ tg_dialogs.json
 add_bot_log.jsonl
 *.session
 dormant_units.csv
+gap_units.txt

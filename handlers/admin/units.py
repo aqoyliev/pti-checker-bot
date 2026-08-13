@@ -57,6 +57,7 @@ from utils.db import (
     set_setting,
 )
 from utils.group_activity import GROUP_QUIET_DAYS, has_full_window, quiet_groups
+from utils.unit_parse import looks_retired, parse_unit
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
@@ -118,26 +119,114 @@ def groups_to_deactivate(groups: list[dict], units: list[str]) -> list[dict]:
     return out
 
 
+def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
+    """Active groups whose title now names a different unit than the one on file.
+
+    Returns ``[{"group": g, "old": str, "new": str}]``, oldest unit first.
+
+    The fleet renames a group when its truck changes, so the title is the
+    earliest signal a swap happened -- and a group still filed under the old
+    number would be retired by the sweep below for a unit that simply moved.
+    Refreshing first is what keeps a live truck from being deactivated.
+
+    A parsed title is only a *suggestion* (a bare digit-run regex measured 79.5%
+    across the fleet, and six titles produced a different valid unit rather than
+    nothing), so three things must all hold before one is offered, and even then
+    an admin confirms it:
+
+    * the group is already configured -- an un-onboarded group belongs to
+      onboarding, which asks a human about the very same guess;
+    * the title does not read as retired ("INACTIVE", "moved") -- those are
+      about to be deactivated anyway, and their titles are the least reliable;
+    * the parsed number is on the incoming weekly list. This is the real
+      corroboration: it means the title names a truck the fleet says is running,
+      not a phone number, a year or a typo.
+
+    Collisions are dropped rather than guessed at: if two groups' titles claim
+    the same unit, or the claimed unit is already another active group's, none
+    of them move. Two groups filed under one unit is the failure this avoids.
+    """
+    wanted = {normalize_unit(u) for u in units}
+    active = [g for g in groups if g.get("is_active", True)]
+    taken = {normalize_unit(g.get("unit_number")) for g in active}
+
+    candidates: list[dict] = []
+    for g in active:
+        stored = normalize_unit(g.get("unit_number"))
+        if not stored:
+            continue
+        title = g.get("title")
+        if not title or looks_retired(title):
+            continue
+        parsed = normalize_unit(parse_unit(title) or "")
+        if not parsed or parsed == stored or parsed not in wanted:
+            continue
+        candidates.append({"group": g, "old": stored, "new": parsed})
+
+    claims: dict[str, int] = {}
+    for c in candidates:
+        claims[c["new"]] = claims.get(c["new"], 0) + 1
+
+    out = [c for c in candidates
+           if claims[c["new"]] == 1 and c["new"] not in taken]
+    out.sort(key=lambda c: c["old"])
+    return out
+
+
+def apply_renames(groups: list[dict], renames: list[dict]) -> list[dict]:
+    """Group rows as they will be *after* the renames land.
+
+    The deactivation sweep has to run on post-rename units, or a truck whose
+    number changed this week gets retired under the number it no longer has.
+    """
+    moved = {r["group"]["group_id"]: r["new"] for r in renames}
+    return [{**g, "unit_number": moved.get(g["group_id"], g.get("unit_number"))}
+            for g in groups]
+
+
 def _group_line(g: dict) -> str:
     unit = escape(normalize_unit(g.get("unit_number")) or "—")
     title = escape(g.get("title") or str(g["group_id"]))
     return f"• <b>{unit}</b> — {title}"
 
 
-def _confirm_text(units: list[str], casualties: list[dict]) -> str:
-    shown = casualties[:_PREVIEW_LIMIT]
-    lines = [
-        f"📋 <b>{len(units)} active units</b> ready to store.",
-        "",
-        f"⚠️ <b>{len(casualties)} group(s) would be deactivated</b> — their unit "
-        f"is not on this list:",
-        "",
-        *[_group_line(g) for g in shown],
-    ]
-    if len(casualties) > len(shown):
-        lines.append(f"…and {len(casualties) - len(shown)} more.")
-    lines += ["", "Nothing has been saved yet. Confirm to store the list and "
-                  "deactivate these groups."]
+def _rename_line(r: dict) -> str:
+    title = escape(r["group"].get("title") or str(r["group"]["group_id"]))
+    return f"• <b>{escape(r['old'])} → {escape(r['new'])}</b> — {title}"
+
+
+def _confirm_text(units: list[str], casualties: list[dict],
+                  renames: list[dict] | None = None) -> str:
+    renames = renames or []
+    lines = [f"📋 <b>{len(units)} active units</b> ready to store.", ""]
+
+    if renames:
+        shown = renames[:_PREVIEW_LIMIT]
+        lines += [
+            f"🔄 <b>{len(renames)} group(s) renamed their unit</b> — the title now "
+            f"names a truck on this list, so they'd be re-filed first:",
+            "",
+            *[_rename_line(r) for r in shown],
+        ]
+        if len(renames) > len(shown):
+            lines.append(f"…and {len(renames) - len(shown)} more.")
+        lines.append("")
+
+    if casualties:
+        shown = casualties[:_PREVIEW_LIMIT]
+        lines += [
+            f"⚠️ <b>{len(casualties)} group(s) would be deactivated</b> — their unit "
+            f"is not on this list:",
+            "",
+            *[_group_line(g) for g in shown],
+        ]
+        if len(casualties) > len(shown):
+            lines.append(f"…and {len(casualties) - len(shown)} more.")
+        lines.append("")
+
+    lines.append("Nothing has been saved yet. Confirm to store the list"
+                 + (", re-file the renamed groups" if renames else "")
+                 + (" and deactivate these groups." if casualties else "."))
     return "\n".join(lines)
 
 
@@ -175,30 +264,41 @@ async def cmd_units(message: types.Message):
                              parse_mode="HTML")
         return
 
-    casualties = groups_to_deactivate(await get_all_groups(), units)
-    if casualties:
-        # Nothing is written yet — not the list, not the groups. Both land
-        # together in _apply(), or neither does.
+    groups = await get_all_groups()
+    # Order matters: re-file first, then decide what to retire. A truck whose
+    # number changed this week is still running, and judging it on the number it
+    # no longer has would deactivate a live group.
+    renames = title_unit_changes(groups, units)
+    casualties = groups_to_deactivate(apply_renames(groups, renames), units)
+
+    if casualties or renames:
+        # Nothing is written yet — not the list, not the renames, not the
+        # deactivations. They all land together in _apply(), or none do.
         _pending[message.from_user.id] = {
             "units": units,
             "casualties": casualties,
+            "renames": renames,
             "at": monotonic(),
         }
-        await message.answer(_confirm_text(units, casualties), parse_mode="HTML",
-                             reply_markup=_confirm_kb())
+        await message.answer(_confirm_text(units, casualties, renames),
+                             parse_mode="HTML", reply_markup=_confirm_kb())
         return
 
-    await message.answer(await _apply(units, []), parse_mode="HTML")
+    await message.answer(await _apply(units, [], []), parse_mode="HTML")
 
 
-async def _apply(units: list[str], casualties: list[dict]) -> str:
-    """Store the list and retire the groups that fell off it. Returns the reply.
+async def _apply(units: list[str], casualties: list[dict],
+                 renames: list[dict] | None = None) -> str:
+    """Re-file renamed groups, store the list, retire what fell off it.
 
-    Both writes happen in one transaction (``apply_units_sweep``), so the stored
-    state can never disagree with what the admin is told happened.
+    All three writes happen in one transaction (``apply_units_sweep``), so the
+    stored state can never disagree with what the admin is told happened.
     """
+    renames = renames or []
     group_ids = [g["group_id"] for g in casualties]
-    added, removed, deactivated = await apply_units_sweep(units, group_ids)
+    pairs = [(r["group"]["group_id"], r["new"]) for r in renames]
+    added, removed, deactivated, refiled = await apply_units_sweep(
+        units, group_ids, pairs)
 
     lines = [f"✅ <b>{len(units)} active units stored.</b>"]
     if added:
@@ -209,6 +309,11 @@ async def _apply(units: list[str], casualties: list[dict]) -> str:
                      + (" …" if len(removed) > 20 else ""))
     if not added and not removed:
         lines.append("No change from the previous list.")
+
+    if pairs:
+        lines.append(f"\n🔄 <b>{refiled} group(s) re-filed</b> from their title:")
+        lines += [f"  {escape(r['old'])} → {escape(r['new'])}" for r in renames[:20]]
+        logging.info("units sweep re-filed %s groups from titles: %s", refiled, pairs)
 
     if group_ids:
         lines.append(f"\n💤 <b>{deactivated} group(s) deactivated</b> — unit no "
@@ -241,7 +346,8 @@ async def units_confirm_callback(query: types.CallbackQuery):
     # handler leaves the preview on screen still reading "nothing has been saved
     # yet", with no way to tell whether the sweep ran.
     try:
-        text = await _apply(state["units"], state["casualties"])
+        text = await _apply(state["units"], state["casualties"],
+                            state.get("renames", []))
     except Exception:
         logging.exception("units sweep failed for admin %s", uid)
         await query.message.edit_text(
