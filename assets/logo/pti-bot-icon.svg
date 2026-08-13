@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Gürman PTI Checker — icon (light backgrounds)</title>
+  <linearGradient id="coral" gradientUnits="userSpaceOnUse"
+                  x1="0" y1="0" x2="512" y2="512">
+    <stop offset="0" stop-color="#F76044"/>
+    <stop offset="1" stop-color="#E83426"/>
+  </linearGradient>
+  <g transform="translate(2.24 14.24) scale(0.96)">
+    <circle cx="146" cy="142" r="33" fill="#C9271D"/>
+    <circle cx="414" cy="356" r="33" fill="#C9271D"/>
+    <path d="M126 266 L212 354 L386 152" fill="none" stroke="url(#coral)"
+          stroke-width="78" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M144.2 284.6 L212 354 L369 171.7" fill="none" stroke="#FFFFFF"
+          stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

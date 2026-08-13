@@ -111,6 +111,45 @@ async def _chat_titles(group_ids: list[int]) -> dict[int, str]:
     return dict(await asyncio.gather(*(one(g) for g in group_ids)))
 
 
+# ---------- user-profile cache ----------
+# The admins table stores ids only, so a name has to come from Telegram.
+# get_chat answers for anyone who has ever opened a DM with the bot, which is
+# every admin — that DM is how onboarding reaches them. It is still one network
+# call per admin, so results are cached, and a failure is cached too: an admin
+# the bot can't resolve degrades to a bare id, never to an error.
+
+_USER_TTL = 600.0
+_user_cache: dict[int, tuple[float, dict]] = {}
+
+
+async def _user_card(user_id: int) -> dict:
+    """{name, username} for a user id. Both may be None."""
+    hit = _user_cache.get(user_id)
+    if hit and time.monotonic() - hit[0] < _USER_TTL:
+        return hit[1]
+    card: dict = {"name": None, "username": None}
+    try:
+        chat = await bot.get_chat(user_id)
+        card = {
+            "name": " ".join(filter(None, [chat.first_name, chat.last_name])).strip() or None,
+            "username": chat.username or None,
+        }
+    except Exception:
+        logging.info("web panel: no Telegram profile for user %s", user_id)
+    _user_cache[user_id] = (time.monotonic(), card)
+    return card
+
+
+async def _user_cards(user_ids: list[int]) -> dict[int, dict]:
+    sem = asyncio.Semaphore(8)
+
+    async def one(uid: int) -> tuple[int, dict]:
+        async with sem:
+            return uid, await _user_card(uid)
+
+    return dict(await asyncio.gather(*(one(u) for u in user_ids)))
+
+
 # ---------- middleware ----------
 
 @web.middleware
@@ -374,9 +413,13 @@ async def api_model_set(request: web.Request) -> web.Response:
 async def api_admins(request: web.Request) -> web.Response:
     if resp := _require_super(request):
         return resp
+    admins = await get_admins()
+    cards = await _user_cards([a["user_id"] for a in admins])
     return _json([
-        {"user_id": a["user_id"], "is_super_admin": bool(a.get("is_super_admin"))}
-        for a in await get_admins()
+        {"user_id": a["user_id"],
+         "is_super_admin": bool(a.get("is_super_admin")),
+         **cards[a["user_id"]]}
+        for a in admins
     ])
 
 
