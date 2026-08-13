@@ -22,6 +22,13 @@ once flipped ``is_active`` FALSE across the fleet -- so the sweep is *previewed*
 and only runs once the admin confirms. Nothing is written until then, not even
 the list itself.
 
+Between two lists, the titles are swept on their own three times a week
+(Mon/Wed/Fri, ``run_title_sweep``): a title naming a different unit *from the
+stored active list* re-files the group, a title that has stopped naming a unit
+retires it, and an unchanged title is silent. That one runs unattended, so it
+reads the titles fresh from Telegram and skips every group it cannot read --
+"couldn't fetch" must never be mistaken for "the truck is gone".
+
 Two deliberate asymmetries:
 
 - **Deactivate only.** A unit reappearing on a later list does not reactivate
@@ -33,9 +40,10 @@ Two deliberate asymmetries:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
 from time import monotonic
 
@@ -46,6 +54,7 @@ from data.config import ADMINS
 from loader import bot, dp
 from utils.db import (
     active_units_updated_at,
+    apply_title_sweep,
     apply_units_sweep,
     get_active_units,
     get_all_groups,
@@ -54,6 +63,7 @@ from utils.db import (
     group_activity_since,
     normalize_unit,
     prune_group_message_days,
+    set_group_title,
     set_setting,
 )
 from utils.group_activity import GROUP_QUIET_DAYS, has_full_window, quiet_groups
@@ -170,6 +180,41 @@ def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
     out = [c for c in candidates
            if claims[c["new"]] == 1 and c["new"] not in taken]
     out.sort(key=lambda c: c["old"])
+    return out
+
+
+def title_deactivations(groups: list[dict]) -> list[dict]:
+    """Active, configured groups whose title has stopped naming a unit.
+
+    Pure. The fleet renames a dead group ("INACTIVE - ANTON, ROGEL", "this group
+    has been moved") or drops the number off it entirely, so a title with no unit
+    left in it is read as the truck being gone.
+
+    Two groups are skipped, and both matter:
+
+    * **No stored unit.** An un-onboarded group has no truck to retire, and its
+      title not parsing is precisely the case onboarding exists to ask a human
+      about -- deactivating it would end that conversation before it started.
+    * **No title.** The sweep refreshes titles from Telegram first and drops the
+      ones it could not fetch, so a missing title here means *no evidence*, not
+      an unnamed truck. Acting on a blank would retire a group for being
+      unreachable, which is how the fleet was mass-deactivated once before.
+
+    Note this is a wider net than the weekly list's: ~20% of fleet titles carry
+    no parseable number, so the first run retires every one of them. That is the
+    configured behaviour -- reversed from the panel, one group at a time.
+    """
+    out: list[dict] = []
+    for g in groups:
+        if not g.get("is_active", True):
+            continue
+        if not normalize_unit(g.get("unit_number")):
+            continue
+        title = g.get("title")
+        if not title:
+            continue
+        if looks_retired(title) or not parse_unit(title):
+            out.append(g)
     return out
 
 
@@ -398,6 +443,156 @@ async def cmd_quiet(message: types.Message):
     await message.answer(await _quiet_report(), parse_mode="HTML")
 
 
+# ---------- the automatic title sweep ----------
+#
+# The same two decisions the weekly /units paste makes, run on a timer against
+# the group titles alone: a title naming a different listed unit re-files the
+# group, a title that has stopped naming a unit retires it, and a title that
+# still says what it said is silent. Unlike /units this writes without asking,
+# so it leans on the guards in the two pure functions above -- above all the
+# rule that a re-file needs the new number to be on the stored active list.
+
+# Which days it runs, UTC. Three times a week, spread evenly.
+TITLE_SWEEP_WEEKDAYS = frozenset({0, 2, 4})  # Mon, Wed, Fri
+_TITLE_SWEEP_KEY = "title_sweep_last_run_on"
+# Pause between get_chat calls; ~150 groups, so this costs half a minute and
+# keeps the sweep well clear of Telegram's rate limits.
+_TITLE_FETCH_DELAY = 0.2
+
+
+def title_sweep_due(now: datetime, last_run: date | None) -> bool:
+    """True on a sweep day that hasn't been swept yet.
+
+    Keyed on the date rather than an elapsed interval so the schedule can't
+    drift: a restart, a slow tick or a run that took an hour still leaves the
+    next sweep on the next sweep day, and never twice in one day.
+    """
+    if now.weekday() not in TITLE_SWEEP_WEEKDAYS:
+        return False
+    return last_run != now.date()
+
+
+async def _last_swept_on() -> date | None:
+    raw = await get_setting(_TITLE_SWEEP_KEY)
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+async def _refresh_titles(groups: list[dict]) -> tuple[list[dict], int]:
+    """Current titles from Telegram, plus the number of groups skipped.
+
+    The cached ``groups.title`` is written opportunistically from the message
+    middleware, so the groups whose titles are stalest are the quiet ones -- and
+    quiet is exactly the state a retired truck is in. Sweeping the cache would
+    therefore judge a rename by a title from whenever the group last spoke.
+
+    A group that can't be fetched is **dropped, not defaulted**: a chat the bot
+    was removed from, or a Bot API server that is briefly unhappy, must not read
+    as "title has no unit any more" and retire a live truck.
+    """
+    fresh: list[dict] = []
+    skipped = 0
+    for g in groups:
+        try:
+            chat = await bot.get_chat(g["group_id"])
+        except Exception as exc:
+            logging.warning("title sweep could not read chat %s: %s", g["group_id"], exc)
+            skipped += 1
+            continue
+        title = getattr(chat, "title", None)
+        if not title:
+            skipped += 1
+            continue
+        if title != g.get("title"):
+            await set_group_title(g["group_id"], title)
+        fresh.append({**g, "title": title})
+        await asyncio.sleep(_TITLE_FETCH_DELAY)
+    return fresh, skipped
+
+
+def _sweep_report(renames: list[dict], casualties: list[dict],
+                  refiled: int, deactivated: int, skipped: int) -> str:
+    lines = ["🔎 <b>Title check</b> — group titles changed since the last sweep."]
+
+    if renames:
+        lines += ["", f"🔄 <b>{refiled} group(s) re-filed</b> — the title now names "
+                      f"another unit from the active list:", ""]
+        lines += [_rename_line(r) for r in renames[:_PREVIEW_LIMIT]]
+        if len(renames) > _PREVIEW_LIMIT:
+            lines.append(f"…and {len(renames) - _PREVIEW_LIMIT} more.")
+
+    if casualties:
+        lines += ["", f"💤 <b>{deactivated} group(s) deactivated</b> — the title no "
+                      f"longer names a unit:", ""]
+        lines += [_group_line(g) for g in casualties[:_PREVIEW_LIMIT]]
+        if len(casualties) > _PREVIEW_LIMIT:
+            lines.append(f"…and {len(casualties) - _PREVIEW_LIMIT} more.")
+        lines += ["", "Reactivate any of these from the web panel if the truck is "
+                      "still running."]
+
+    if skipped:
+        lines += ["", f"<i>{skipped} group(s) couldn't be read and were left "
+                      f"untouched.</i>"]
+    return "\n".join(lines)
+
+
+async def run_title_sweep() -> str | None:
+    """Re-file and retire active groups from their current titles.
+
+    Returns the report that was sent, or ``None`` when nothing changed -- a
+    sweep that finds every title saying what it said before is silent, which is
+    most of them.
+    """
+    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
+    fresh, skipped = await _refresh_titles(groups)
+
+    units = await get_active_units()
+    # Same order as the weekly sweep: re-file first, then judge what is left.
+    # A truck that moved to a listed unit is not a truck that lost its number.
+    renames = title_unit_changes(fresh, list(units))
+    casualties = title_deactivations(apply_renames(fresh, renames))
+
+    if not renames and not casualties:
+        logging.info("title sweep: no changes (%s groups read, %s skipped)",
+                     len(fresh), skipped)
+        return None
+
+    pairs = [(r["group"]["group_id"], r["new"]) for r in renames]
+    refiled, deactivated = await apply_title_sweep(
+        pairs, [g["group_id"] for g in casualties])
+    logging.info("title sweep re-filed %s (%s) and deactivated %s (%s)",
+                 refiled, pairs, deactivated,
+                 [g["group_id"] for g in casualties])
+
+    report = _sweep_report(renames, casualties, refiled, deactivated, skipped)
+    for admin_id in _ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, report, parse_mode="HTML")
+        except Exception:
+            logging.exception("could not send the title sweep report to %s", admin_id)
+    return report
+
+
+async def run_title_sweep_if_due(now: datetime | None = None) -> bool:
+    """Run the sweep when the day calls for it. Returns True if it ran.
+
+    The day is marked *before* the sweep runs, on purpose: a crash halfway
+    through has already written some of its changes, and a retry on the next
+    tick would re-read every title and re-decide against a fleet it has half
+    modified. Missing a sweep costs two days; repeating one costs writes.
+    """
+    now = now or datetime.utcnow()
+    if not title_sweep_due(now, await _last_swept_on()):
+        return False
+    await set_setting(_TITLE_SWEEP_KEY, now.date().isoformat())
+    await run_title_sweep()
+    return True
+
+
 async def _last_asked_at() -> datetime | None:
     raw = await get_setting(_LAST_ASKED_KEY)
     if not raw:
@@ -448,15 +643,22 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
 
 
 async def units_refresh_loop():
-    """Background loop: nudge the admins when the units list goes stale, and
-    keep the message-count buckets from growing without bound."""
-    import asyncio
+    """Background loop: nudge the admins when the units list goes stale, sweep
+    the group titles three times a week, and keep the message-count buckets from
+    growing without bound.
 
+    One loop rather than three tasks — the tick is six hours and every step is
+    guarded, so a step that throws costs only itself.
+    """
     while True:
         try:
             await ask_for_units_if_stale()
         except Exception:
             logging.exception("units refresh loop failed")
+        try:
+            await run_title_sweep_if_due()
+        except Exception:
+            logging.exception("title sweep failed")
         try:
             await prune_group_message_days()
         except Exception:

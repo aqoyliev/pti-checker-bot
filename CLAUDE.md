@@ -175,6 +175,27 @@ group when its truck changes — so a group still filed under the old number wou
 be retired for a unit that merely moved. Both land in one `apply_units_sweep`
 transaction, renames applied first.
 
+**Titles are also swept on their own, three times a week.** Between weekly
+lists, `run_title_sweep` (Mon/Wed/Fri UTC, from `units_refresh_loop`) re-checks
+every active group's title: a title naming a different unit *that is on the
+stored active list* re-files the group, a title that has stopped naming a unit
+retires it, an unchanged title is silent, and nothing is sent unless something
+changed. It writes unattended, so three things hold it up:
+
+- **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
+  cache — the cache is refreshed opportunistically from the message middleware,
+  so the stalest titles belong to the quietest groups, which is exactly the state
+  a retired truck is in.
+- **A group that can't be read is dropped, not defaulted.** "Couldn't fetch" must
+  never be mistaken for "the title lost its unit"; that reading is how the fleet
+  was mass-deactivated once before.
+- **Un-onboarded groups are never retired** — no stored unit means no truck, and
+  an unparseable title there is the question onboarding is waiting to ask.
+
+`title_deactivations` is a wider net than the weekly list's on purpose (chosen
+2026-08-13): ~20% of fleet titles carry no parseable number, so it retires those
+too. Reversing one is a manual panel decision, same as any other reactivation.
+
 A title parse is still only a suggestion, so a rename is offered only when the
 group is already configured, its title doesn't read as retired, and — the real
 corroboration — **the parsed number is on the incoming list**. Collisions (two

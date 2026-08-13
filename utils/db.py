@@ -302,6 +302,47 @@ async def apply_units_sweep(
     return added, removed, deactivated, refiled
 
 
+async def apply_title_sweep(
+    renames: list[tuple[int, str]], group_ids: list[int],
+) -> tuple[int, int]:
+    """Re-file and retire groups from what their titles now say.
+
+    Returns ``(refiled_count, deactivated_count)``.
+
+    The same two writes ``apply_units_sweep`` makes, minus the weekly list --
+    this runs on a timer rather than off a pasted message, so there is no list to
+    store and no ``updated_at`` stamp to touch. Keeping the stamp out matters:
+    bumping it here would suppress the weekly ask for a fresh list.
+
+    One transaction, for the same reason as the weekly sweep: the summary DM'd to
+    the admin has to describe what actually landed. ``unit_number`` only, never
+    ``setup_complete`` -- a group being re-filed is already configured, and
+    flipping that flag would hide an un-onboarded group from the setup nag.
+    """
+    pool = _pool_check()
+    refiled = deactivated = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for gid, new_unit in renames:
+                rows = await conn.fetch(
+                    """UPDATE groups SET unit_number = $1
+                        WHERE group_id = $2 AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    normalize_unit(new_unit), gid,
+                )
+                refiled += len(rows)
+            if group_ids:
+                rows = await conn.fetch(
+                    """UPDATE groups SET is_active = FALSE
+                        WHERE group_id = ANY($1::bigint[])
+                          AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    group_ids,
+                )
+                deactivated = len(rows)
+    return refiled, deactivated
+
+
 async def active_units_updated_at() -> datetime | None:
     """When the list was last replaced, or None if it never has been."""
     raw = await get_setting(ACTIVE_UNITS_UPDATED_KEY)
