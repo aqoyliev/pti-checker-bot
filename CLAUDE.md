@@ -38,6 +38,9 @@ issues) is posted back into the group.
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
+- **`utils/driver_names.py`** — the fleet's driver name: parsing it out of a
+  group's About text, and pairing it to a registered `user_id` (`/fixnames`,
+  `handlers/admin/names.py`).
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
 - **`utils/phone_lookup.py`** — a *second*, write-capable user session: phone
@@ -140,15 +143,32 @@ picker count as passed over.
 
 **The stored name is the fleet's, not Telegram's.** The About text names the
 drivers on their own line (`Name: ZAMA, EMILE / FLEURMOND, JACQUES`), and
-`parse_driver_names` reads it: a Telegram profile says "Emile ✈️" or
-`@jacques_f`, which nobody can match against a driver list. Names pair with
-phone numbers **by position**, so any other count is not a pairing at all and
-the Telegram names are kept instead of guessing — the name is a label, never a
-reason to decline an otherwise-clean setup. The admin notice shows the Telegram
-name beside the stored one when they differ, because that is the line on which a
-swapped pair becomes visible. The picker's Save keeps whatever name a driver is
-already stored with, so editing one pick can't quietly swap the other back to a
-Telegram handle.
+`utils/driver_names.parse_driver_names` reads it: a Telegram profile says
+"Emile ✈️" or `@jacques_f`, which nobody can match against a driver list. Names
+pair with phone numbers **by position**, so any other count is not a pairing at
+all and the Telegram names are kept instead of guessing — the name is a label,
+never a reason to decline an otherwise-clean setup. The admin notice shows the
+Telegram name beside the stored one when they differ, because that is the line
+on which a swapped pair becomes visible. The picker's Save keeps whatever name a
+driver is already stored with, so editing one pick can't quietly swap the other
+back to a Telegram handle.
+
+### `/fixnames`: the backfill for groups configured earlier
+
+Groups set up before that are filed under Telegram names, and re-resolving every
+phone number to fix them is not a trade worth making — contact import is the
+most rate-limited thing a user account does, and spending the lookup account
+fleet-wide for a display name risks the member lookup onboarding depends on. So
+`handlers/admin/names.py` re-reads each active group's About text and pairs the
+names against the drivers *already registered*, by their words
+(`match_names_to_drivers`): a pairing counts only when a shared word ≥3 letters
+picks out exactly one driver and no driver is claimed twice, plus the one free
+case of a single name and a single driver. Two drivers sharing a surname pair to
+neither. A name that can't be placed is **reported, not guessed** — a wrong name
+on a `user_id` reads as authoritative — and the fix for those is a per-group
+`/onboard <group_id>`, which resolves the numbers properly. Preview then
+confirm, like `/units`, and the confirmed write is one transaction
+(`set_driver_names`).
 
 Three rules that are easy to undo by accident:
 

@@ -693,6 +693,32 @@ async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
             )
 
 
+async def set_driver_names(updates: list[tuple[int, int, str]]) -> int:
+    """Rename registered drivers: [(group_id, user_id, name), ...] -> rows changed.
+
+    One transaction, because this is a fleet-wide backfill (/fixnames) and a
+    half-applied one leaves the admin's report describing a state that never
+    existed. A driver whose name already matches is not counted -- the report
+    says how many names actually moved.
+    """
+    if not updates:
+        return 0
+    pool = _pool_check()
+    changed = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for group_id, user_id, name in updates:
+                rows = await conn.fetch(
+                    """UPDATE group_drivers SET name = $3
+                        WHERE group_id = $1 AND user_id = $2
+                          AND name IS DISTINCT FROM $3
+                    RETURNING id""",
+                    group_id, user_id, name,
+                )
+                changed += len(rows)
+    return changed
+
+
 # ---------- driver verification queue ----------
 
 async def get_verify_progress() -> tuple[int, int]:

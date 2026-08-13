@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from handlers.admin import onboard
-from utils.auto_onboard import parse_driver_names, plan_auto_config
+from utils.auto_onboard import plan_auto_config
 from utils.phone_lookup import LookupUnavailable, Match
 from utils.userbot import Member
 
@@ -115,34 +115,6 @@ def test_a_bot_is_never_a_driver():
 ABOUT_NAMED = ("Name: ZAMA, EMILE / FLEURMOND, JACQUES\n"
                "Phone# 718-864-1154 / 561-667-4276\n"
                "Truck# 1239")
-
-
-def test_names_are_read_from_the_about_text():
-    assert parse_driver_names(ABOUT_NAMED) == ["Zama Emile", "Fleurmond Jacques"]
-
-
-def test_one_name_line_per_driver_also_works():
-    about = "Name: ZAMA, EMILE\nPhone# 718-864-1154\nName: FLEURMOND, JACQUES"
-    assert parse_driver_names(about) == ["Zama Emile", "Fleurmond Jacques"]
-
-
-def test_a_properly_cased_name_is_not_re_cased():
-    # .title() would turn McDonald into Mcdonald.
-    assert parse_driver_names("Name: Ian McDonald") == ["Ian McDonald"]
-
-
-def test_a_phone_number_on_a_name_line_is_not_a_name():
-    # "Driver: 786-488-2619" is the label layout, not a name.
-    assert parse_driver_names("Driver: 786-488-2619") == []
-
-
-def test_a_bare_name_word_is_not_a_name_line():
-    # About text is free prose; a separator is required, as for descriptions.
-    assert parse_driver_names("the name on the lease is Acme LLC") == []
-
-
-def test_no_name_line_at_all():
-    assert parse_driver_names("UNIT 1216\n786-488-2619") == []
 
 
 def test_the_fleet_name_is_what_gets_stored():

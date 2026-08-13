@@ -29,7 +29,8 @@ from aiogram.utils.exceptions import MessageNotModified
 from data.config import ADMINS
 from loader import bot, dp
 from utils import phone_lookup, userbot
-from utils.auto_onboard import parse_driver_names, plan_auto_config
+from utils.auto_onboard import plan_auto_config
+from utils.driver_names import parse_driver_names
 from utils.db import (
     clear_non_drivers,
     get_active_units,

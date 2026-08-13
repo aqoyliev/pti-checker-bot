@@ -20,6 +20,7 @@ async def set_default_commands(dp):
     admin_commands = _DEFAULT_COMMANDS + [
         types.BotCommand("admin", "Open the admin panel"),
         types.BotCommand("whois", "Look up a phone number's Telegram account"),
+        types.BotCommand("fixnames", "Store drivers under their fleet names"),
     ]
     for admin in ADMINS:
         try:

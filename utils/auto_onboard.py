@@ -27,59 +27,14 @@ Anything short of that is not a failure -- it is the ordinary prompt, with a
 line saying which check stopped it.
 
 The About text also names the drivers, and that is the name stored -- see
-parse_driver_names. It never decides anything; a name that can't be paired with
+utils/driver_names. It never decides anything; a name that can't be paired with
 a number just leaves the Telegram name in its place.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 MAX_DRIVERS = 2
-
-# The About text names the drivers the way the fleet knows them, on their own
-# line, and that is the name worth storing -- a Telegram profile says "Emile ✈️"
-# or "@doniyor_777", which nobody can match against a driver list.
-#
-#   Name: ZAMA, EMILE / FLEURMOND, JACQUES
-#   Phone# 718-864-1154 / 561-667-4276
-#
-# A separator (`Name:` / `Name#`) is required, for the same reason descriptions
-# are parsed more strictly than titles: About text is free prose, and a bare
-# "name" would match a sentence about one.
-_NAME_LINE = re.compile(r"^[^\S\n]*(?:driver|name)s?[^\S\n]*[:#][^\S\n]*(.+)$",
-                        re.I | re.M)
-_HAS_LETTER = re.compile(r"[^\W\d_]")
-MAX_NAME_CHARS = 64
-
-
-def _clean_name(raw: str) -> str:
-    """'ZAMA, EMILE ' -> 'Zama Emile'. Empty when it isn't a name at all."""
-    name = " ".join(raw.replace(",", " ").split())
-    if not name or len(name) > MAX_NAME_CHARS:
-        return ""
-    # A digit means the line was "Driver: 718-864-1154" or similar -- a label,
-    # not a name. Storing it would be worse than falling back to Telegram.
-    if any(ch.isdigit() for ch in name) or not _HAS_LETTER.search(name):
-        return ""
-    # The fleet's lists SHOUT, but a properly-cased name is left alone:
-    # .title() would turn McDonald into Mcdonald.
-    return name.title() if name.isupper() else name
-
-
-def parse_driver_names(text: str) -> list[str]:
-    """Driver names from the About text, in the order they are written.
-
-    Handles both layouts the fleet uses: both names on one line separated by
-    '/', or one `Name:` line per driver.
-    """
-    out: list[str] = []
-    for line in _NAME_LINE.findall(text or ""):
-        for part in line.split("/"):
-            name = _clean_name(part)
-            if name and name not in out:
-                out.append(name)
-    return out
 
 
 @dataclass(frozen=True)
