@@ -517,19 +517,10 @@ function adminSub(a) {
   return bits.join(" · ");
 }
 
-// Opening an account needs a t.me link, which needs a public @username.
-// Without one tg://user?id= resolves only for accounts the client already
-// knows, so it can silently do nothing — copy the id instead of offering a
-// link that looks live and isn't.
-function openAccount(a) {
-  if (!a.username) {
-    if (navigator.clipboard) navigator.clipboard.writeText(String(a.user_id)).catch(() => {});
-    return toast("No @username — id copied");
-  }
-  const url = "https://t.me/" + a.username;
-  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
-  else window.open(url, "_blank");
-}
+// Rows are deliberately inert. Opening an account from here needs a t.me link
+// and so a public @username; tg://user?id= resolves only for accounts the
+// client already knows, so tapping did nothing for most admins. A row that
+// looks tappable and isn't is worse than a plain label.
 
 async function renderAdmins() {
   view.innerHTML = '<div class="center">Loading…</div>';
@@ -540,11 +531,10 @@ async function renderAdmins() {
 
   view.innerHTML =
     '<div class="card"><b>🛡 Admins</b><div class="hint" style="margin:4px 0 2px">' +
-      'Regular admins can use the panel; only super-admins manage admins. ' +
-      'Tap a name to open their Telegram account.</div>' +
+      'Regular admins can use the panel; only super-admins manage admins.</div>' +
       admins.map(a =>
         '<div class="item" style="cursor:default"><div class="row">' +
-        '<div class="grow ellip" data-open="' + a.user_id + '" style="cursor:pointer">' +
+        '<div class="grow ellip">' +
         '<b>' + esc(adminName(a)) + '</b> ' +
         (a.is_super_admin ? '<span class="chip ok">★ super</span>' : '<span class="chip mut">admin</span>') +
         '<div class="hint ellip">' + esc(adminSub(a)) + '</div></div>' +
@@ -556,9 +546,6 @@ async function renderAdmins() {
       'Numeric Telegram user id (forward one of their messages to @userinfobot to find it).</div>' +
       '<div class="row"><input type="text" id="newAdmin" inputmode="numeric" placeholder="123456789">' +
       '<button class="btn inline" id="addAdmin">Add</button></div></div>';
-
-  view.querySelectorAll("[data-open]").forEach(el =>
-    el.onclick = () => openAccount(byId[el.dataset.open]));
 
   view.querySelectorAll("[data-rma]").forEach(b => b.onclick = async () => {
     if (!await confirmDlg("Remove admin " + adminName(byId[b.dataset.rma]) + "?")) return;
