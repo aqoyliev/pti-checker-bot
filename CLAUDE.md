@@ -177,10 +177,17 @@ transaction, renames applied first.
 
 **Titles are also swept on their own, three times a week.** Between weekly
 lists, `run_title_sweep` (Mon/Wed/Fri UTC, from `units_refresh_loop`) re-checks
-every active group's title: a title naming a different unit *that is on the
-stored active list* re-files the group, a title that has stopped naming a unit
-retires it, an unchanged title is silent, and nothing is sent unless something
-changed. It writes unattended, so three things hold it up:
+every active group's title and reports only when something changed:
+
+| The title now names | Result |
+| --- | --- |
+| a different unit, on the stored active list | re-filed |
+| a different unit, **not** on the list | deactivated |
+| no unit at all, or INACTIVE / moved | deactivated |
+| the same unit it always did | silent, even if that unit left the list |
+
+The last row belongs to `/units`, where a human confirms it. It writes
+unattended, so four things hold it up:
 
 - **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
   cache — the cache is refreshed opportunistically from the message middleware,
@@ -191,10 +198,18 @@ changed. It writes unattended, so three things hold it up:
   was mass-deactivated once before.
 - **Un-onboarded groups are never retired** — no stored unit means no truck, and
   an unparseable title there is the question onboarding is waiting to ask.
+- **An empty `active_units` disables the unlisted-unit rule** rather than failing
+  every group against it — otherwise the first sweep on a fresh database retires
+  the entire fleet. (The no-unit-in-title rule reads the title alone and still
+  applies.)
 
-`title_deactivations` is a wider net than the weekly list's on purpose (chosen
-2026-08-13): ~20% of fleet titles carry no parseable number, so it retires those
-too. Reversing one is a manual panel decision, same as any other reactivation.
+`title_deactivations` is a much wider net than the weekly list's, on purpose
+(chosen 2026-08-13): ~20% of fleet titles carry no parseable number, and a title
+parse is only ~79.5% accurate, so a mis-parse to an unlisted number retires a
+live group. Reversing one is a manual panel decision, same as any other
+reactivation. The report names which of the two rules fired per group, because
+that is the difference between "the fleet retired this truck" and "the parser
+was wrong".
 
 A title parse is still only a suggestion, so a rename is offered only when the
 group is already configured, its title doesn't read as retired, and — the real

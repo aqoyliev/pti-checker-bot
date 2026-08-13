@@ -23,11 +23,13 @@ and only runs once the admin confirms. Nothing is written until then, not even
 the list itself.
 
 Between two lists, the titles are swept on their own three times a week
-(Mon/Wed/Fri, ``run_title_sweep``): a title naming a different unit *from the
-stored active list* re-files the group, a title that has stopped naming a unit
-retires it, and an unchanged title is silent. That one runs unattended, so it
-reads the titles fresh from Telegram and skips every group it cannot read --
-"couldn't fetch" must never be mistaken for "the truck is gone".
+(Mon/Wed/Fri, ``run_title_sweep``). A title naming a different unit re-files the
+group if that unit is on the stored list and retires it if it isn't; a title
+that has stopped naming a unit retires it; a title still naming the stored unit
+is silent, even if that unit has left the list -- that last one belongs to the
+confirmed sweep below. It runs unattended, so it reads the titles fresh from
+Telegram and skips every group it cannot read: "couldn't fetch" must never be
+mistaken for "the truck is gone".
 
 Two deliberate asymmetries:
 
@@ -183,14 +185,27 @@ def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
     return out
 
 
-def title_deactivations(groups: list[dict]) -> list[dict]:
-    """Active, configured groups whose title has stopped naming a unit.
+def title_deactivations(groups: list[dict], units: list[str]) -> list[dict]:
+    """Active, configured groups whose title says the truck is gone.
 
-    Pure. The fleet renames a dead group ("INACTIVE - ANTON, ROGEL", "this group
-    has been moved") or drops the number off it entirely, so a title with no unit
-    left in it is read as the truck being gone.
+    Returns ``[{"group": g, "reason": str}]`` -- the reason is carried because
+    the admin's report has to say *which* of the two rules retired a group.
 
-    Two groups are skipped, and both matter:
+    Pure. Run on post-rename rows, so anything re-filed above already agrees
+    with its title and falls out at the ``parsed == stored`` check. Two rules:
+
+    * **The title no longer names a unit** -- the fleet either marks the group
+      dead ("INACTIVE - ANTON, ROGEL", "this group has been moved") or drops the
+      number off it. ~20% of fleet titles carry no parseable number, so this is a
+      much wider net than the weekly list's.
+    * **The title names a unit that isn't on the active list** -- the group is
+      filed under one truck, its title claims another, and the fleet says that
+      other truck isn't running. Note the cost of a mis-parse lands here: six
+      known titles ("1275 - NEGRON..." on a group really filed as 2003) parse to
+      a *different* number, and if that number is off the list the live group is
+      retired. Reversed from the panel, one group at a time.
+
+    Skipped on purpose:
 
     * **No stored unit.** An un-onboarded group has no truck to retire, and its
       title not parsing is precisely the case onboarding exists to ask a human
@@ -199,22 +214,34 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
       ones it could not fetch, so a missing title here means *no evidence*, not
       an unnamed truck. Acting on a blank would retire a group for being
       unreachable, which is how the fleet was mass-deactivated once before.
-
-    Note this is a wider net than the weekly list's: ~20% of fleet titles carry
-    no parseable number, so the first run retires every one of them. That is the
-    configured behaviour -- reversed from the panel, one group at a time.
+    * **An empty units list.** Same rule as everywhere else: no list means the
+      check is disabled, not that every unit fails it. Without this the very
+      first sweep on a fresh database would retire the entire fleet.
+    * **A title still naming the stored unit.** Even if that unit has left the
+      list -- title and database agree, so there is nothing here to detect, and
+      retiring a truck for falling off the list belongs to /units, where a human
+      confirms it.
     """
+    wanted = {normalize_unit(u) for u in units}
     out: list[dict] = []
     for g in groups:
         if not g.get("is_active", True):
             continue
-        if not normalize_unit(g.get("unit_number")):
+        stored = normalize_unit(g.get("unit_number"))
+        if not stored:
             continue
         title = g.get("title")
         if not title:
             continue
-        if looks_retired(title) or not parse_unit(title):
-            out.append(g)
+        parsed = normalize_unit(parse_unit(title) or "")
+        if looks_retired(title) or not parsed:
+            out.append({"group": g, "reason": "title no longer names a unit"})
+            continue
+        if not wanted or parsed == stored:
+            continue
+        if parsed not in wanted:
+            out.append({"group": g,
+                        "reason": f"title names {parsed}, not on the active list"})
     return out
 
 
@@ -514,6 +541,10 @@ async def _refresh_titles(groups: list[dict]) -> tuple[list[dict], int]:
     return fresh, skipped
 
 
+def _casualty_line(c: dict) -> str:
+    return f"{_group_line(c['group'])} — <i>{escape(c['reason'])}</i>"
+
+
 def _sweep_report(renames: list[dict], casualties: list[dict],
                   refiled: int, deactivated: int, skipped: int) -> str:
     lines = ["🔎 <b>Title check</b> — group titles changed since the last sweep."]
@@ -526,9 +557,9 @@ def _sweep_report(renames: list[dict], casualties: list[dict],
             lines.append(f"…and {len(renames) - _PREVIEW_LIMIT} more.")
 
     if casualties:
-        lines += ["", f"💤 <b>{deactivated} group(s) deactivated</b> — the title no "
-                      f"longer names a unit:", ""]
-        lines += [_group_line(g) for g in casualties[:_PREVIEW_LIMIT]]
+        lines += ["", f"💤 <b>{deactivated} group(s) deactivated</b> — the title "
+                      f"says the truck is gone:", ""]
+        lines += [_casualty_line(c) for c in casualties[:_PREVIEW_LIMIT]]
         if len(casualties) > _PREVIEW_LIMIT:
             lines.append(f"…and {len(casualties) - _PREVIEW_LIMIT} more.")
         lines += ["", "Reactivate any of these from the web panel if the truck is "
@@ -550,11 +581,12 @@ async def run_title_sweep() -> str | None:
     groups = [g for g in await get_all_groups() if g.get("is_active", True)]
     fresh, skipped = await _refresh_titles(groups)
 
-    units = await get_active_units()
-    # Same order as the weekly sweep: re-file first, then judge what is left.
-    # A truck that moved to a listed unit is not a truck that lost its number.
-    renames = title_unit_changes(fresh, list(units))
-    casualties = title_deactivations(apply_renames(fresh, renames))
+    units = list(await get_active_units())
+    # Same order as the weekly sweep: re-file first, then judge what is left. A
+    # truck that moved to a listed unit is not a truck that lost its number --
+    # judging it before the re-file would retire it for naming the new one.
+    renames = title_unit_changes(fresh, units)
+    casualties = title_deactivations(apply_renames(fresh, renames), units)
 
     if not renames and not casualties:
         logging.info("title sweep: no changes (%s groups read, %s skipped)",
@@ -562,11 +594,11 @@ async def run_title_sweep() -> str | None:
         return None
 
     pairs = [(r["group"]["group_id"], r["new"]) for r in renames]
-    refiled, deactivated = await apply_title_sweep(
-        pairs, [g["group_id"] for g in casualties])
+    dead = [c["group"]["group_id"] for c in casualties]
+    refiled, deactivated = await apply_title_sweep(pairs, dead)
     logging.info("title sweep re-filed %s (%s) and deactivated %s (%s)",
                  refiled, pairs, deactivated,
-                 [g["group_id"] for g in casualties])
+                 [(c["group"]["group_id"], c["reason"]) for c in casualties])
 
     report = _sweep_report(renames, casualties, refiled, deactivated, skipped)
     for admin_id in _ADMIN_IDS:
