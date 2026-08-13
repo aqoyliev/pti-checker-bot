@@ -38,6 +38,9 @@ issues) is posted back into the group.
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
+- **`utils/driver_names.py`** — the fleet's driver name: parsing it out of a
+  group's About text, and pairing it to a registered `user_id` (`/fixnames`,
+  `handlers/admin/names.py`).
 - **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
   one thing the Bot API cannot do: list a group's members.
 - **`utils/phone_lookup.py`** — a *second*, write-capable user session: phone
@@ -138,6 +141,35 @@ configured the whole step is skipped silently.
 Nobody is marked as a non-driver on this path — only people actually shown a
 picker count as passed over.
 
+**The stored name is the fleet's, not Telegram's.** The About text names the
+drivers on their own line (`Name: ZAMA, EMILE / FLEURMOND, JACQUES`), and
+`utils/driver_names.parse_driver_names` reads it: a Telegram profile says
+"Emile ✈️" or `@jacques_f`, which nobody can match against a driver list. Names
+pair with phone numbers **by position**, so any other count is not a pairing at
+all and the Telegram names are kept instead of guessing — the name is a label,
+never a reason to decline an otherwise-clean setup. The admin notice shows the
+Telegram name beside the stored one when they differ, because that is the line
+on which a swapped pair becomes visible. The picker's Save keeps whatever name a
+driver is already stored with, so editing one pick can't quietly swap the other
+back to a Telegram handle.
+
+### `/fixnames`: the backfill for groups configured earlier
+
+Groups set up before that are filed under Telegram names, and re-resolving every
+phone number to fix them is not a trade worth making — contact import is the
+most rate-limited thing a user account does, and spending the lookup account
+fleet-wide for a display name risks the member lookup onboarding depends on. So
+`handlers/admin/names.py` re-reads each active group's About text and pairs the
+names against the drivers *already registered*, by their words
+(`match_names_to_drivers`): a pairing counts only when a shared word ≥3 letters
+picks out exactly one driver and no driver is claimed twice, plus the one free
+case of a single name and a single driver. Two drivers sharing a surname pair to
+neither. A name that can't be placed is **reported, not guessed** — a wrong name
+on a `user_id` reads as authoritative — and the fix for those is a per-group
+`/onboard <group_id>`, which resolves the numbers properly. Preview then
+confirm, like `/units`, and the confirmed write is one transaction
+(`set_driver_names`).
+
 Three rules that are easy to undo by accident:
 
 - **The parsed unit is a suggestion, never a value.** Measured across the 158
@@ -168,6 +200,54 @@ The unit guess is also checked against `active_units` before being offered, so a
 title naming a retired truck reads as "not found". An admin refreshes that list
 weekly with `/units …` (replaced wholesale); an empty table disables the check
 rather than rejecting every unit.
+
+**The weekly list first re-files, then retires.** `/units` runs
+`title_unit_changes` before `groups_to_deactivate`, because the fleet renames a
+group when its truck changes — so a group still filed under the old number would
+be retired for a unit that merely moved. Both land in one `apply_units_sweep`
+transaction, renames applied first.
+
+**Titles are also swept on their own, three times a week.** Between weekly
+lists, `run_title_sweep` (Mon/Wed/Fri UTC, from `units_refresh_loop`) re-checks
+every active group's title and reports only when something changed:
+
+| The title now names | Result |
+| --- | --- |
+| a different unit, on the stored active list | re-filed |
+| a different unit, **not** on the list | deactivated |
+| no unit at all, or INACTIVE / moved | deactivated |
+| the same unit it always did | silent, even if that unit left the list |
+
+The last row belongs to `/units`, where a human confirms it. It writes
+unattended, so four things hold it up:
+
+- **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
+  cache — the cache is refreshed opportunistically from the message middleware,
+  so the stalest titles belong to the quietest groups, which is exactly the state
+  a retired truck is in.
+- **A group that can't be read is dropped, not defaulted.** "Couldn't fetch" must
+  never be mistaken for "the title lost its unit"; that reading is how the fleet
+  was mass-deactivated once before.
+- **Un-onboarded groups are never retired** — no stored unit means no truck, and
+  an unparseable title there is the question onboarding is waiting to ask.
+- **An empty `active_units` disables the unlisted-unit rule** rather than failing
+  every group against it — otherwise the first sweep on a fresh database retires
+  the entire fleet. (The no-unit-in-title rule reads the title alone and still
+  applies.)
+
+`title_deactivations` is a much wider net than the weekly list's, on purpose
+(chosen 2026-08-13): ~20% of fleet titles carry no parseable number, and a title
+parse is only ~79.5% accurate, so a mis-parse to an unlisted number retires a
+live group. Reversing one is a manual panel decision, same as any other
+reactivation. The report names which of the two rules fired per group, because
+that is the difference between "the fleet retired this truck" and "the parser
+was wrong".
+
+A title parse is still only a suggestion, so a rename is offered only when the
+group is already configured, its title doesn't read as retired, and — the real
+corroboration — **the parsed number is on the incoming list**. Collisions (two
+titles claiming one unit, or a unit another active group already holds) are
+dropped rather than guessed at. Nothing is written without the admin confirming.
 
 **The weekly list also retires groups.** Any active group whose `unit_number` is
 missing from the new list is deactivated (`groups_to_deactivate` →

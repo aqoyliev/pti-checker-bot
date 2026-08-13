@@ -110,6 +110,41 @@ def test_a_bot_is_never_a_driver():
     assert "bot" in reason
 
 
+# ---------- the fleet's names, not Telegram's ----------
+
+ABOUT_NAMED = ("Name: ZAMA, EMILE / FLEURMOND, JACQUES\n"
+               "Phone# 718-864-1154 / 561-667-4276\n"
+               "Truck# 1239")
+
+
+def test_the_fleet_name_is_what_gets_stored():
+    plan, reason = plan_auto_config("1225", PHONES, RESOLVED, MEMBERS,
+                                    ["Zama Emile", "Fleurmond Jacques"])
+
+    assert reason == ""
+    assert plan.drivers == [(8063167928, "Zama Emile"),
+                            (6066541941, "Fleurmond Jacques")]
+    # The Telegram name is kept for the notice, so a swapped pair is visible.
+    assert plan.tg_labels[8063167928] == "M Mgn"
+
+
+def test_a_name_count_that_does_not_match_falls_back_to_telegram():
+    # Names pair with numbers by position; one name and two numbers is not a
+    # pairing, and guessing whose it is misattributes a driver.
+    plan, _ = plan_auto_config("1225", PHONES, RESOLVED, MEMBERS, ["Zama Emile"])
+
+    assert plan.drivers == [(8063167928, "M Mgn"), (6066541941, "Noor")]
+
+
+def test_no_names_at_all_still_configures_the_group():
+    # The name is a label; the user_id is the load-bearing part. Missing names
+    # must never cost an otherwise-clean automatic setup.
+    plan, reason = plan_auto_config("1225", PHONES, RESOLVED, MEMBERS, [])
+
+    assert reason == ""
+    assert plan.drivers == [(8063167928, "M Mgn"), (6066541941, "Noor")]
+
+
 # ---------- start_onboarding: the whole path ----------
 
 ABOUT = "UNIT 1216\nDriver 786-488-2619\nCo-driver 561-674-7866"
@@ -159,6 +194,29 @@ def test_a_clean_group_configures_itself_and_only_reports(monkeypatch):
     # The notice is informational, but a wrong save has to be one tap from the
     # normal picker -- otherwise the admin's only recourse is /onboard.
     assert "ob:e:-100123" in str(kwargs["reply_markup"])
+
+
+def test_drivers_are_stored_under_their_fleet_names(monkeypatch):
+    """A Telegram profile says "Emile ✈️"; the driver list says ZAMA, EMILE."""
+    resolved = {"+17188641154": Match("+17188641154", 8063167928, "Emile ✈️",
+                                      None, False),
+                "+15616674276": Match("+15616674276", 6066541941, "jacques_f",
+                                      "jacques_f", False)}
+    members = [Member(8063167928, "Emile ✈️", None, False),
+               Member(6066541941, "jacques_f", "jacques_f", False)]
+    writes, sent = _wire(monkeypatch, lookup=AsyncMock(return_value=resolved),
+                         description=ABOUT_NAMED, members=members)
+
+    asyncio.run(onboard.start_onboarding(-100123, "1239 ZAMA / FLEURMOND"))
+
+    assert writes["replace_drivers"].await_args.args[1] == [
+        {"user_id": 8063167928, "name": "Zama Emile"},
+        {"user_id": 6066541941, "name": "Fleurmond Jacques"},
+    ]
+    # Both names in the notice: the fleet's is what was stored, Telegram's is
+    # how the admin recognises the person it was stored against.
+    text = sent.await_args.args[1]
+    assert "Zama Emile" in text and "Emile ✈️" in text
 
 
 def test_an_unavailable_lookup_falls_back_to_the_picker(monkeypatch):

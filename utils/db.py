@@ -239,10 +239,18 @@ async def get_active_units() -> set[str]:
 
 async def apply_units_sweep(
     units: list[str], group_ids: list[int],
-) -> tuple[set[str], set[str], int]:
-    """Store the weekly list and retire the groups that fell off it — atomically.
+    renames: list[tuple[int, str]] | None = None,
+) -> tuple[set[str], set[str], int, int]:
+    """Store the weekly list, re-file renamed groups, retire what fell off it.
 
-    Returns ``(added, removed, deactivated_count)``.
+    Returns ``(added, removed, deactivated_count, refiled_count)``.
+
+    ``renames`` re-files a group under the unit its title now names, and is
+    applied *before* the deactivation so a truck whose number changed this week
+    isn't retired under the number it no longer has. It only ever sets
+    ``unit_number`` -- never ``setup_complete`` -- because a group being re-filed
+    is already configured, and flipping that flag here would hide an
+    un-onboarded group from the setup nag forever.
 
     One transaction on purpose. These were previously two independent writes, so
     a failure between them left the list replaced but no group retired, while the
@@ -255,7 +263,8 @@ async def apply_units_sweep(
     """
     pool = _pool_check()
     wanted = {u.strip() for u in units if u.strip()}
-    deactivated = 0
+    renames = renames or []
+    deactivated = refiled = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
             existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
@@ -266,6 +275,16 @@ async def apply_units_sweep(
             if added:
                 await conn.executemany("INSERT INTO active_units (unit) VALUES ($1)",
                                        [(u,) for u in added])
+            # Re-file before retiring, so a group that moved to a listed unit is
+            # judged on its new number rather than the one it just left.
+            for gid, new_unit in renames:
+                rows = await conn.fetch(
+                    """UPDATE groups SET unit_number = $1
+                        WHERE group_id = $2 AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    normalize_unit(new_unit), gid,
+                )
+                refiled += len(rows)
             if group_ids:
                 rows = await conn.fetch(
                     """UPDATE groups SET is_active = FALSE
@@ -280,7 +299,48 @@ async def apply_units_sweep(
                    ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
                 ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
             )
-    return added, removed, deactivated
+    return added, removed, deactivated, refiled
+
+
+async def apply_title_sweep(
+    renames: list[tuple[int, str]], group_ids: list[int],
+) -> tuple[int, int]:
+    """Re-file and retire groups from what their titles now say.
+
+    Returns ``(refiled_count, deactivated_count)``.
+
+    The same two writes ``apply_units_sweep`` makes, minus the weekly list --
+    this runs on a timer rather than off a pasted message, so there is no list to
+    store and no ``updated_at`` stamp to touch. Keeping the stamp out matters:
+    bumping it here would suppress the weekly ask for a fresh list.
+
+    One transaction, for the same reason as the weekly sweep: the summary DM'd to
+    the admin has to describe what actually landed. ``unit_number`` only, never
+    ``setup_complete`` -- a group being re-filed is already configured, and
+    flipping that flag would hide an un-onboarded group from the setup nag.
+    """
+    pool = _pool_check()
+    refiled = deactivated = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for gid, new_unit in renames:
+                rows = await conn.fetch(
+                    """UPDATE groups SET unit_number = $1
+                        WHERE group_id = $2 AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    normalize_unit(new_unit), gid,
+                )
+                refiled += len(rows)
+            if group_ids:
+                rows = await conn.fetch(
+                    """UPDATE groups SET is_active = FALSE
+                        WHERE group_id = ANY($1::bigint[])
+                          AND COALESCE(is_active, TRUE) = TRUE
+                    RETURNING group_id""",
+                    group_ids,
+                )
+                deactivated = len(rows)
+    return refiled, deactivated
 
 
 async def active_units_updated_at() -> datetime | None:
@@ -631,6 +691,32 @@ async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
             await conn.execute(
                 "UPDATE groups SET setup_complete = TRUE WHERE group_id = $1", group_id
             )
+
+
+async def set_driver_names(updates: list[tuple[int, int, str]]) -> int:
+    """Rename registered drivers: [(group_id, user_id, name), ...] -> rows changed.
+
+    One transaction, because this is a fleet-wide backfill (/fixnames) and a
+    half-applied one leaves the admin's report describing a state that never
+    existed. A driver whose name already matches is not counted -- the report
+    says how many names actually moved.
+    """
+    if not updates:
+        return 0
+    pool = _pool_check()
+    changed = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for group_id, user_id, name in updates:
+                rows = await conn.fetch(
+                    """UPDATE group_drivers SET name = $3
+                        WHERE group_id = $1 AND user_id = $2
+                          AND name IS DISTINCT FROM $3
+                    RETURNING id""",
+                    group_id, user_id, name,
+                )
+                changed += len(rows)
+    return changed
 
 
 # ---------- driver verification queue ----------
