@@ -196,6 +196,36 @@ def test_a_clean_group_configures_itself_and_only_reports(monkeypatch):
     assert "ob:e:-100123" in str(kwargs["reply_markup"])
 
 
+def test_a_driver_past_the_button_limit_is_still_a_member(monkeypatch):
+    """The keyboard holds MEMBER_BUTTONS members; the chat holds far more.
+
+    Slicing the roster for the buttons and then reusing that slice as the
+    membership evidence made real drivers read as "not in this group": on the
+    JRD fleet on 2026-08-14 this left 8 of 11 groups unconfigurable, and the
+    picker offered no button for them either, so there was no way through by
+    hand. Every one of those groups had 38-59 members.
+    """
+    padding = [Member(900_000 + i, f"Dispatch {i}", None, False)
+               for i in range(onboard.MEMBER_BUTTONS)]
+    late = Member(6066541941, "Noor Dubat", "noor", False)
+    roster = [Member(8063167928, "M Mgn", None, False)] + padding + [late]
+    assert roster.index(late) > onboard.MEMBER_BUTTONS
+
+    resolved = {"+17864882619": Match("+17864882619", 8063167928, "M Mgn", None, False),
+                "+15616747866": Match("+15616747866", 6066541941, "Noor Dubat",
+                                      "noor", False)}
+    writes, _ = _wire(monkeypatch, lookup=AsyncMock(return_value=resolved),
+                      members=roster)
+
+    assert asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH")) is True
+
+    writes["set_group_unit"].assert_awaited_once_with(-100123, "1216")
+    assert writes["replace_drivers"].await_args.args[1] == [
+        {"user_id": 8063167928, "name": "M Mgn"},
+        {"user_id": 6066541941, "name": "Noor Dubat"},
+    ]
+
+
 def test_drivers_are_stored_under_their_fleet_names(monkeypatch):
     """A Telegram profile says "Emile ✈️"; the driver list says ZAMA, EMILE."""
     resolved = {"+17188641154": Match("+17188641154", 8063167928, "Emile ✈️",

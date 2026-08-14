@@ -1,7 +1,7 @@
 """Email alerts for the overdue PTI escalation (#9).
 
 A small, dependency-free SMTP sender: the bot emails a single global address
-(``ALERT_EMAIL_TO``) when a group enters the every-12-hours overdue phase, so a
+(``ALERT_EMAIL_TO``) when a group enters the once-a-day overdue phase, so a
 fleet manager learns about a non-compliant driver without watching the chat.
 
 Sends through Gmail SMTP (``smtp.gmail.com``) — authenticating as the Gmail
@@ -99,8 +99,8 @@ async def send_overdue_alert(unit_number: str | None, driver_names: str, days_ov
         f"No pre-trip inspection has been submitted for {days_overdue} day(s).\n\n"
         f"Unit: {unit}\n"
         f"Driver(s): {driver_names}\n\n"
-        "The driver is being reminded in the group every 12 hours until a PTI video "
-        "is submitted. This email repeats on the same 12-hour cadence."
+        "The driver is being reminded in the group once a day until a PTI video "
+        "is submitted. This email repeats on the same daily cadence."
     )
     try:
         await asyncio.to_thread(_send_blocking, subject, body)

@@ -95,6 +95,15 @@ require real secrets. Keep new unit tests pure (no network / no DB).
   absent; `unmute_driver()` exists only to *lift* restrictions left over from
   before this rule. `ENFORCEMENT_ENABLED` only toggles the reminders. Don't
   reintroduce muting behind a config flag.
+- **One reminder per unit per 24 hours**, whatever kind it is. Both loops run
+  hourly, so the cap lives in the data, not in the cadence: `groups.last_reminder_at`
+  is stamped by every sender and checked through `reminder_logic.may_remind`.
+  The cap is per *unit* — two overdue drivers share one message naming both, not
+  one each — and when the twice-weekly nudge and an overdue notice fall in the
+  same pass the overdue one wins, because a nudge to inspect twice a week tells
+  an already-overdue driver nothing. A fresh PTI still clears the overdue state
+  inside that window (`reset` writes nothing to the chat), and the admin report
+  is not a reminder: it still lists every overdue driver every pass.
 
 ## Group onboarding
 

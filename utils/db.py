@@ -108,10 +108,16 @@ async def init_db():
             -- Reminder-engine bookkeeping (utils/reminders.py).
             -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
             -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
-            -- last_escalation_at: when the last every-12-hours escalation notice went out (#9).
+            -- last_escalation_at: when the last daily escalation notice went out (#9).
+            -- last_reminder_at: the last reminder of ANY kind, which is what the
+            --   one-per-24-hours rule is measured against. Kept separate from the
+            --   three above because those drive the state machine (which message
+            --   is due) while this one only answers "has this unit been told
+            --   today" -- including for reminders sent by the compliance loop.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP;
 
             -- Driver-verification queue (handlers/admin/verify.py). Seeded from a
             -- userbot member snapshot: one row per group, walked in `ord` order.
@@ -137,6 +143,13 @@ async def init_db():
                 unit     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT NOW()
             );
+
+            -- The trailer the office has assigned to that truck, from the wider
+            -- roster paste (utils/fleet_roster.py). Nullable on purpose: the
+            -- weekly /units list is unit numbers only, so a unit added by the
+            -- sweep simply has no trailer recorded. Never read as a verdict --
+            -- what a truck is actually pulling comes from the video.
+            ALTER TABLE active_units ADD COLUMN IF NOT EXISTS trailer TEXT;
 
             -- People confirmed *not* to be drivers, fleet-wide: dispatchers,
             -- safety staff, owners. They sit in many driver groups, so once an
@@ -235,6 +248,51 @@ async def get_active_units() -> set[str]:
     """Every active unit number. Empty set means "no list supplied yet"."""
     rows = await _pool_check().fetch("SELECT unit FROM active_units")
     return {r["unit"] for r in rows}
+
+
+async def set_fleet_roster(rows: list[dict]) -> tuple[int, int]:
+    """Upsert ``[{"unit", "trailer"}, ...]`` into the active list.
+
+    Returns ``(added, updated)``.
+
+    **Adds and updates only — it never deletes.** Retiring a unit deactivates
+    the groups filed under it, and that decision belongs to ``/units``, where an
+    admin is shown the casualties and confirms them (see
+    ``handlers/admin/units.py``). A roster paste is a statement about the trucks
+    it lists, not about the ones it leaves out, so loading one can't retire
+    anything by omission.
+
+    One transaction, so a half-loaded roster can't leave the list disagreeing
+    with what the caller was told it wrote.
+    """
+    clean = [(normalize_unit(r["unit"]), (r.get("trailer") or "").strip() or None)
+             for r in rows if normalize_unit(r.get("unit"))]
+    if not clean:
+        return 0, 0
+
+    pool = _pool_check()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
+            await conn.executemany(
+                """INSERT INTO active_units (unit, trailer) VALUES ($1, $2)
+                   ON CONFLICT (unit) DO UPDATE SET trailer = EXCLUDED.trailer""",
+                clean,
+            )
+            await conn.execute(
+                """INSERT INTO app_settings (key, value) VALUES ($1, $2)
+                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
+                ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
+            )
+    units = {u for u, _ in clean}
+    added = len(units - existing)
+    return added, len(units) - added
+
+
+async def get_fleet_roster() -> dict[str, str | None]:
+    """``{unit: trailer or None}`` for every active unit."""
+    rows = await _pool_check().fetch("SELECT unit, trailer FROM active_units")
+    return {r["unit"]: r["trailer"] for r in rows}
 
 
 async def apply_units_sweep(
@@ -1039,9 +1097,26 @@ async def mark_escalation_reminded(group_id: int, at) -> None:
     )
 
 
+async def mark_reminder_sent(group_id: int, at) -> None:
+    """Stamp the group's shared 24-hour reminder slot.
+
+    Every sender calls this after a reminder actually goes out — the weekly
+    nudge, the overdue notice, the escalation and the compliance loop alike —
+    because the one-per-24-hours rule counts reminders the *unit* received, not
+    reminders of one particular kind.
+    """
+    await _pool_check().execute(
+        "UPDATE groups SET last_reminder_at = $1 WHERE group_id = $2", at, group_id,
+    )
+
+
 async def reset_group_reminders(group_id: int) -> None:
     """Clear overdue/escalation state — called when a fresh PTI lands so the
-    every-12-hours nags stop immediately instead of waiting for the next pass."""
+    daily nags stop immediately instead of waiting for the next pass.
+
+    ``last_reminder_at`` is deliberately left alone: it records that the group
+    was messaged, which a new PTI doesn't undo, and clearing it would let a
+    second reminder go out within the 24 hours."""
     await _pool_check().execute(
         """UPDATE groups
            SET overdue_reminded_at = NULL, last_escalation_at = NULL
