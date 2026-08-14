@@ -25,13 +25,19 @@ from utils.db import (
     mark_escalation_reminded,
     mark_group_inactive,
     mark_overdue_reminded,
+    mark_reminder_sent,
     mark_weekly_reminder,
     mark_unreachable,
     clear_unreachable,
     UNREACHABLE_LIMIT,
     reset_group_reminders,
 )
-from utils.reminder_logic import OVERDUE_DAYS, decide_overdue_action, decide_weekly
+from utils.reminder_logic import (
+    OVERDUE_DAYS,
+    decide_overdue_action,
+    decide_weekly,
+    may_remind,
+)
 
 _UNREACHABLE = (ChatNotFound, BotKicked, BotBlocked, MethodIsNotAvailable)
 
@@ -125,40 +131,76 @@ async def _send(group_id: int, text: str) -> bool:
         return True  # transient; keep the group active and retry next pass
 
 
+async def post_reminder(group_id: int, text: str, now: datetime,
+                        last_reminder_at: datetime | None) -> bool | None:
+    """Post a reminder unless this unit's 24-hour slot is already spent.
+
+    The single gate every reminder goes through, including the compliance
+    loop's. Three outcomes, and the caller needs to tell them apart:
+
+      True  — sent, and the slot is now stamped
+      None  — the unit was already reminded within 24 hours; nothing sent, and
+              nothing is wrong
+      False — the group looked unreachable; stop messaging it this pass
+    """
+    if not may_remind(now, last_reminder_at):
+        return None
+    if not await _send(group_id, text):
+        return False
+    await mark_reminder_sent(group_id, now)
+    return True
+
+
 async def _process_group(group: dict, now: datetime) -> None:
     group_id = group["group_id"]
     drivers = await get_drivers(group_id)
     if not drivers:
         return  # nobody to remind
 
-    # #8 — twice-weekly nudge.
-    if decide_weekly(now, group.get("last_weekly_reminder_on")):
-        if not await _send(group_id, _weekly_text(drivers)):
-            return
-        await mark_weekly_reminder(group_id, now.date())
+    last_reminder_at = group.get("last_reminder_at")
 
     # #9 — overdue escalation. Reference = last PTI, else group creation time.
+    # Settled before the weekly nudge because the two now share one daily slot,
+    # and "your PTI is overdue" is the message worth spending it on: a nudge to
+    # send one twice a week tells an already-overdue driver nothing new.
     last = await get_last_pti_for_group(group_id)
     reference = (last and last["submitted_at"]) or group.get("created_at") or now
     action = decide_overdue_action(
         now, reference, group.get("overdue_reminded_at"), group.get("last_escalation_at")
     )
 
+    # A reset is bookkeeping, not a message — it never spends the slot.
     if action == "reset":
         await reset_group_reminders(group_id)
-    elif action == "overdue_first":
-        if await _send(group_id, _overdue_text(drivers)):
+        action = "none"
+
+    sent = False
+    if action == "overdue_first":
+        result = await post_reminder(group_id, _overdue_text(drivers), now, last_reminder_at)
+        if result is False:
+            return
+        if result:
             await mark_overdue_reminded(group_id, now)
+            sent = True
     elif action == "escalation":
-        if await _send(group_id, _escalation_text(drivers)):
+        result = await post_reminder(group_id, _escalation_text(drivers), now, last_reminder_at)
+        if result is False:
+            return
+        if result:
             await mark_escalation_reminded(group_id, now)
-            # Email the global alert address on the same 12-hour cadence as the
+            sent = True
+            # Email the global alert address on the same daily cadence as the
             # group nag (no-op unless SMTP + recipient are configured).
             await send_overdue_alert(
                 group.get("unit_number"),
                 _driver_names_plain(drivers),
                 (now - reference).days,
             )
+
+    # #8 — twice-weekly nudge, only when the overdue path stayed quiet.
+    if not sent and decide_weekly(now, group.get("last_weekly_reminder_on")):
+        if await post_reminder(group_id, _weekly_text(drivers), now, last_reminder_at):
+            await mark_weekly_reminder(group_id, now.date())
 
 
 async def run_reminder_pass() -> None:

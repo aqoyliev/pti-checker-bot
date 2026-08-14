@@ -14,7 +14,29 @@ WEEKLY_REMINDER_HOUR_UTC = 14             # don't fire before 14:00 UTC on those
 # #9 — overdue escalation.
 OVERDUE_DAYS = 3                          # quiet for this long → first reminder
 ESCALATION_GRACE = timedelta(days=1)      # one day after the first reminder before escalating
-ESCALATION_INTERVAL = timedelta(hours=12)  # then nag this often until a PTI lands
+ESCALATION_INTERVAL = timedelta(hours=24)  # then nag this often until a PTI lands
+
+# One reminder per unit per 24 hours, whichever kind it is. The escalation
+# interval above sets the pace of the overdue nag; this is the floor underneath
+# *every* reminder, so a unit can't collect a twice-weekly nudge and an overdue
+# notice in the same day, and two senders can't each think they're within their
+# own budget. A driver who has been told once today has been told.
+MIN_REMINDER_GAP = timedelta(hours=24)
+
+
+def may_remind(
+    now: datetime,
+    last_reminder_at: datetime | None,
+    gap: timedelta = MIN_REMINDER_GAP,
+) -> bool:
+    """True if this group's 24-hour reminder slot is free.
+
+    ``last_reminder_at`` is the last reminder of *any* kind posted to the group.
+    None means it has never been reminded, which is always allowed.
+    """
+    if last_reminder_at is None:
+        return True
+    return now - last_reminder_at >= gap
 
 
 def decide_weekly(

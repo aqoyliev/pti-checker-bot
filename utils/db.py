@@ -108,10 +108,16 @@ async def init_db():
             -- Reminder-engine bookkeeping (utils/reminders.py).
             -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
             -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
-            -- last_escalation_at: when the last every-12-hours escalation notice went out (#9).
+            -- last_escalation_at: when the last daily escalation notice went out (#9).
+            -- last_reminder_at: the last reminder of ANY kind, which is what the
+            --   one-per-24-hours rule is measured against. Kept separate from the
+            --   three above because those drive the state machine (which message
+            --   is due) while this one only answers "has this unit been told
+            --   today" -- including for reminders sent by the compliance loop.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP;
 
             -- Driver-verification queue (handlers/admin/verify.py). Seeded from a
             -- userbot member snapshot: one row per group, walked in `ord` order.
@@ -1091,9 +1097,26 @@ async def mark_escalation_reminded(group_id: int, at) -> None:
     )
 
 
+async def mark_reminder_sent(group_id: int, at) -> None:
+    """Stamp the group's shared 24-hour reminder slot.
+
+    Every sender calls this after a reminder actually goes out — the weekly
+    nudge, the overdue notice, the escalation and the compliance loop alike —
+    because the one-per-24-hours rule counts reminders the *unit* received, not
+    reminders of one particular kind.
+    """
+    await _pool_check().execute(
+        "UPDATE groups SET last_reminder_at = $1 WHERE group_id = $2", at, group_id,
+    )
+
+
 async def reset_group_reminders(group_id: int) -> None:
     """Clear overdue/escalation state — called when a fresh PTI lands so the
-    every-12-hours nags stop immediately instead of waiting for the next pass."""
+    daily nags stop immediately instead of waiting for the next pass.
+
+    ``last_reminder_at`` is deliberately left alone: it records that the group
+    was messaged, which a new PTI doesn't undo, and clearing it would let a
+    second reminder go out within the 24 hours."""
     await _pool_check().execute(
         """UPDATE groups
            SET overdue_reminded_at = NULL, last_escalation_at = NULL

@@ -78,7 +78,7 @@ FLEET_TZ = env.str("FLEET_TZ", default="America/New_York")
 WEBAPP_URL = env.str("WEBAPP_URL", default="").strip().rstrip("/")
 WEBAPP_PORT = env.int("PORT", default=env.int("WEBAPP_PORT", default=8080))
 
-# Email alerts for the overdue escalation (#9). When a group enters the every-12h
+# Email alerts for the overdue escalation (#9). When a group enters the daily
 # overdue phase, the bot emails ALERT_EMAIL_TO alongside the group nag, so a
 # fleet manager hears about a non-compliant driver without watching the chat.
 # Sent via Gmail SMTP: set SMTP_USER to the Gmail address and SMTP_PASSWORD to a
