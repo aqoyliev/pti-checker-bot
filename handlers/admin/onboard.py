@@ -54,6 +54,14 @@ MAX_DRIVERS = 2
 # Member buttons per row, and how much of a name fits in one that narrow.
 MEMBER_COLUMNS = 2
 LABEL_CHARS = 24
+# How many members fit in one prompt: at MEMBER_COLUMNS per row that is 20 rows
+# of buttons plus the control rows, which is about all a Telegram message holds.
+# This bounds the *keyboard* only. It must never bound the roster used to decide
+# whether a resolved account is in the group -- these groups run to 60 members,
+# so a driver sitting at position 41 would read as "not in this chat" and an
+# otherwise-clean automatic setup would decline. Membership questions get the
+# full roster; only the buttons get sliced.
+MEMBER_BUTTONS = 40
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
 # Picked drivers are numbered in the order they were tapped rather than all
@@ -256,14 +264,17 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     """
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
-    drivers_pool = [m for m in members if not m.is_bot][:40]
+    roster = [m for m in members if not m.is_bot]
+    drivers_pool = roster[:MEMBER_BUTTONS]
     unit, unit_source = await _checked_guess(title, description)
     hidden = await get_non_driver_ids()
 
     # The About text usually names both drivers by phone number. When all of it
     # checks out the group configures itself and the admins are told; anything
     # unclear falls through to the prompt below, with the reason attached.
-    plan, auto_note = await _try_auto_config(group_id, unit, description, drivers_pool)
+    # Note the full roster, not drivers_pool: the slice below is how many
+    # buttons fit, which has nothing to do with who is in the chat.
+    plan, auto_note = await _try_auto_config(group_id, unit, description, roster)
     if plan is not None:
         notice = await _apply_auto_config(group_id, plan)
         delivered = False
@@ -334,7 +345,7 @@ async def _rebuild_pending(admin_id: int, group_id: int) -> dict | None:
         "unit": unit,
         "unit_source": unit_source,
         "retired_marker": looks_retired(title),
-        "members": [m for m in members if not m.is_bot][:40],
+        "members": [m for m in members if not m.is_bot][:MEMBER_BUTTONS],
         "hidden": await get_non_driver_ids(),
         "show_all": False,
         "selected": [],
@@ -387,10 +398,14 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         # anyone who is no longer a member.
         await call.answer("Checking…")
         members = await userbot.list_members(group_id)
-        st["members"] = [m for m in members if not m.is_bot][:40]
+        roster = [m for m in members if not m.is_bot]
+        st["members"] = roster[:MEMBER_BUTTONS]
         st["description"] = await userbot.get_description(group_id)
         st["hidden"] = await get_non_driver_ids()
-        present = {m.user_id for m in st["members"]}
+        # Membership is judged against the whole roster, not the buttons: a pick
+        # that scrolled past the slice is still a member, and dropping it here
+        # would silently undo the admin's choice.
+        present = {m.user_id for m in roster}
         st["selected"] = [uid for uid in st["selected"] if uid in present]
 
         # A description that was unreadable before may carry the unit now. Never
