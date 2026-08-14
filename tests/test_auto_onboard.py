@@ -191,9 +191,10 @@ def test_a_clean_group_configures_itself_and_only_reports(monkeypatch):
     ]
     text, kwargs = sent.await_args.args[1], sent.await_args.kwargs
     assert "configured automatically" in text
-    # The notice is informational, but a wrong save has to be one tap from the
-    # normal picker -- otherwise the admin's only recourse is /onboard.
-    assert "ob:e:-100123" in str(kwargs["reply_markup"])
+    # Informational, and nothing more: no button on a setup that went right.
+    # The way to change one is named in the text instead.
+    assert "reply_markup" not in kwargs
+    assert "/onboard -100123" in text
 
 
 def test_drivers_are_stored_under_their_fleet_names(monkeypatch):
