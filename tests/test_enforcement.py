@@ -5,6 +5,7 @@ is the group creator: Telegram forbids a bot from restricting the chat owner
 (`CantRestrictChatOwner`), and that should be a benign no-op, not an error.
 """
 import asyncio
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 from aiogram.utils.exceptions import CantRestrictChatOwner
@@ -37,7 +38,7 @@ def test_there_is_no_way_to_mute_a_driver():
     assert not hasattr(enforcement, "_MUTED_PERMISSIONS")
 
 
-def _fake_loop_env(monkeypatch, restrict_perms, sent):
+def _fake_loop_env(monkeypatch, restrict_perms, sent, group=None, drivers=None):
     async def fake_restrict(group_id, user_id, permissions=None):
         restrict_perms.append(permissions)
 
@@ -48,9 +49,10 @@ def _fake_loop_env(monkeypatch, restrict_perms, sent):
         return type("Chat", (), {"title": "G"})()
 
     monkeypatch.setattr(enforcement, "get_all_registered_groups",
-                        AsyncMock(return_value=[{"group_id": -100}]))
+                        AsyncMock(return_value=[group or {"group_id": -100}]))
     monkeypatch.setattr(enforcement, "get_drivers",
-                        AsyncMock(return_value=[{"user_id": 1, "name": "Bob"}]))
+                        AsyncMock(return_value=drivers or [{"user_id": 1, "name": "Bob"}]))
+    monkeypatch.setattr(enforcement, "mark_reminder_sent", AsyncMock())
     monkeypatch.setattr(enforcement.bot, "get_chat", fake_get_chat)
     monkeypatch.setattr(enforcement.bot, "restrict_chat_member", fake_restrict)
     monkeypatch.setattr(enforcement.bot, "send_message", fake_send)
@@ -85,3 +87,37 @@ def test_overdue_driver_is_reminded_never_restricted(monkeypatch):
     assert restrict_perms == []
     assert any("overdue" in t for t in sent)
     assert not any("restricted" in t.lower() for t in sent)
+
+
+def test_a_unit_reminded_today_is_not_reminded_again(monkeypatch):
+    # The loop runs hourly. Without the 24-hour gate an overdue driver is told
+    # once an hour, all day.
+    restrict_perms, sent = [], []
+    _fake_loop_env(monkeypatch, restrict_perms, sent,
+                   group={"group_id": -100,
+                          "last_reminder_at": datetime.utcnow() - timedelta(hours=2)})
+    monkeypatch.setattr(enforcement, "ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(enforcement, "check_driver_compliance",
+                        AsyncMock(return_value=(False, "no PTI submitted yet this week")))
+    monkeypatch.setattr(enforcement, "notify_admins", AsyncMock())
+
+    asyncio.run(enforcement.run_compliance_check())
+
+    assert sent == []
+
+
+def test_both_overdue_drivers_share_one_message(monkeypatch):
+    # The cap is per unit, so two overdue drivers on one truck are named in a
+    # single reminder rather than getting one each.
+    restrict_perms, sent = [], []
+    _fake_loop_env(monkeypatch, restrict_perms, sent,
+                   drivers=[{"user_id": 1, "name": "Bob"}, {"user_id": 2, "name": "Ann"}])
+    monkeypatch.setattr(enforcement, "ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(enforcement, "check_driver_compliance",
+                        AsyncMock(return_value=(False, "no PTI submitted yet this week")))
+    monkeypatch.setattr(enforcement, "notify_admins", AsyncMock())
+
+    asyncio.run(enforcement.run_compliance_check())
+
+    assert len(sent) == 1
+    assert "Bob" in sent[0] and "Ann" in sent[0]

@@ -19,8 +19,9 @@ from data.config import ADMINS, ENFORCEMENT_ENABLED
 from utils.db import (
     get_all_registered_groups, get_drivers,
     get_pti_count_this_week, get_last_pti,
-    mark_group_inactive,
+    mark_group_inactive, mark_reminder_sent,
 )
+from utils.reminder_logic import may_remind
 
 REQUIRED_PER_WEEK = 2
 MIN_GAP_DAYS = 3
@@ -154,11 +155,19 @@ async def run_compliance_check():
     message, not a muzzle. That also removes the old hazard where a group whose
     bot lacked Restrict Members rights looked "unreachable" and got deregistered
     on the strength of a failed mute.
+
+    One reminder per unit per 24 hours. This runs hourly, so an overdue driver
+    used to be told once an hour, every hour; and it shares the rule -- and the
+    ``last_reminder_at`` stamp -- with the reminder engine, because two senders
+    each keeping to their own budget is how a unit ends up messaged twice in a
+    day. Both drivers of a truck are named in the one message for the same
+    reason: the cap is per unit, not per driver.
     """
     # With reminders off there is nothing left for this loop to do.
     if not ENFORCEMENT_ENABLED:
         return
 
+    now = datetime.utcnow()
     groups = await get_all_registered_groups()
     non_compliant: list[str] = []
 
@@ -176,6 +185,7 @@ async def run_compliance_check():
 
         group_name = chat.title or str(group_id)
         drivers = await get_drivers(group_id)
+        overdue_names: list[str] = []
 
         for driver in drivers:
             user_id = driver["user_id"]
@@ -187,18 +197,23 @@ async def run_compliance_check():
                 continue
 
             non_compliant.append(f"• {name} ({group_name}) — {reason}")
+            overdue_names.append(name)
 
+        # The admin report above lists every overdue driver every pass; the
+        # group only hears about it once a day.
+        if overdue_names and may_remind(now, group.get("last_reminder_at")):
             # Plain text: this send has no parse_mode, so no HTML markup here.
             # Nobody is restricted, so the reminder never claims otherwise.
             reminder = (
-                f"⚠️ {name}, your PTI is overdue. Please submit one as soon as "
-                f"possible. Reply /check to your PTI video."
+                f"⚠️ {', '.join(overdue_names)}, your PTI is overdue. Please submit "
+                f"one as soon as possible. Reply /check to your PTI video."
             )
             try:
                 await bot.send_message(group_id, reminder)
+                await mark_reminder_sent(group_id, now)
             except _UNREACHABLE_EXCEPTIONS as e:
                 await _deregister_group(group_id, type(e).__name__)
-                break
+                continue
             except Exception:
                 logging.exception(f"Failed to send reminder in group {group_id}")
 
