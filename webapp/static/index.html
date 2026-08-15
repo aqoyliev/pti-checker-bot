@@ -147,6 +147,7 @@ const titleEl = document.getElementById("title");
 let me = null;
 let groupsCache = null;
 let groupSort = null;                         // null = server default order
+let groupFilter = null;                       // null = every group
 let current = { tab: "groups", gid: null };   // gid set = group detail open
 
 // ---------- helpers ----------
@@ -255,16 +256,31 @@ async function renderGroups() {
   const gs = groupsCache;
   const active = gs.filter(g => g.is_active).length;
   const configured = gs.filter(g => g.is_active && g.setup_complete).length;
+  const needSetup = active - configured;
+
+  // Filters, not sorts: an un-onboarded group has no unit and no last PTI, so
+  // it sorts to the bottom of every ordering here and is effectively invisible
+  // in a fleet of 150. Being able to ask for just those is the only way to
+  // work through them.
+  const filters = [["setup", "⚙️ Needs setup"], ["nodrv", "👤 No drivers"],
+                   ["inactive", "💤 Inactive"]];
 
   view.innerHTML =
     '<div class="card"><div class="row">' +
       '<div class="grow"><b>' + gs.length + '</b> groups <span class="hint">· ' +
-      active + ' active · ' + configured + ' configured</span></div></div></div>' +
+      active + ' active · ' + configured + ' configured</span>' +
+      (needSetup ? '<div class="hint" style="margin-top:2px">⚙️ ' + needSetup +
+        ' active group(s) still need setting up.</div>' : "") +
+      '</div></div></div>' +
     '<input type="text" id="q" placeholder="Search unit, title, driver…" style="margin-bottom:10px">' +
     '<div class="sortbar"><span class="hint" style="font-size:12px">Sort</span>' +
       [["unit", "Unit #"], ["last", "Last PTI"], ["fail", "Fails"], ["due", "Due"]].map(s =>
         '<span class="chip mut' + (groupSort === s[0] ? " on" : "") + '" data-sort="' + s[0] + '">' +
         s[1] + '</span>').join("") + '</div>' +
+    '<div class="sortbar"><span class="hint" style="font-size:12px">Show</span>' +
+      filters.map(f =>
+        '<span class="chip mut' + (groupFilter === f[0] ? " on" : "") + '" data-filter="' + f[0] + '">' +
+        f[1] + '</span>').join("") + '</div>' +
     '<div class="card" id="glist"></div>';
 
   // Timestamps are uniform "YYYY-MM-DD HH:MM:SS…" strings, so string comparison
@@ -279,10 +295,18 @@ async function renderGroups() {
     due:  (a, b) => (b.drivers_due || 0) - (a.drivers_due || 0) || sorters.last(a, b),
   };
 
+  const matchesFilter = g => {
+    if (groupFilter === "setup")    return g.is_active && !g.setup_complete;
+    if (groupFilter === "nodrv")    return g.is_active && !g.drivers.length;
+    if (groupFilter === "inactive") return !g.is_active;
+    return true;
+  };
+
   const list = document.getElementById("glist");
   const draw = q => {
     q = (q || "").toLowerCase();
     const rows = gs.filter(g => {
+      if (!matchesFilter(g)) return false;
       if (!q) return true;
       const hay = [g.unit_number, g.title, g.group_id,
                    ...g.drivers.map(d => d.name)].join(" ").toLowerCase();
@@ -309,10 +333,16 @@ async function renderGroups() {
   };
   draw("");
   document.getElementById("q").oninput = e => draw(e.target.value);
-  view.querySelectorAll(".sortbar .chip").forEach(c => c.onclick = () => {
+  view.querySelectorAll(".sortbar .chip[data-sort]").forEach(c => c.onclick = () => {
     groupSort = groupSort === c.dataset.sort ? null : c.dataset.sort;  // tap again = default order
-    view.querySelectorAll(".sortbar .chip").forEach(x =>
+    view.querySelectorAll(".sortbar .chip[data-sort]").forEach(x =>
       x.classList.toggle("on", x.dataset.sort === groupSort));
+    draw(document.getElementById("q").value);
+  });
+  view.querySelectorAll(".sortbar .chip[data-filter]").forEach(c => c.onclick = () => {
+    groupFilter = groupFilter === c.dataset.filter ? null : c.dataset.filter;  // tap again = all
+    view.querySelectorAll(".sortbar .chip[data-filter]").forEach(x =>
+      x.classList.toggle("on", x.dataset.filter === groupFilter));
     draw(document.getElementById("q").value);
   });
 }
@@ -321,6 +351,7 @@ async function renderGroups() {
 
 async function renderGroup(gid) {
   titleEl.textContent = "Group";
+  drvUI = {};   // a picker left open in another group must not follow us here
   view.innerHTML = '<div class="center">Loading group…</div>';
   let g;
   try { g = await api("/api/groups/" + gid); }
@@ -332,15 +363,15 @@ async function renderGroup(gid) {
     ? esc(g.trailer_unit || "—") + (g.trailer_plate ? " (plate " + esc(g.trailer_plate) + ")" : "")
     : "—";
 
-  const drivers = g.drivers.map(d =>
-    '<div class="item" style="cursor:default"><div class="row">' +
-      '<div class="grow"><b>' + esc(d.name) + '</b> <span class="hint">' + d.user_id + '</span>' +
-      '<div class="hint">' + d.ptis_this_week + '/' + me.required_per_week + ' this week' +
-      (d.compliant ? "" : " · " + esc(d.reason || "non-compliant")) + '</div></div>' +
-      '<span class="chip ' + (d.compliant ? "ok" : "warn") + '">' + (d.compliant ? "OK" : "due") + '</span>' +
-      '<button class="btn danger inline" data-rm="' + d.user_id + '" data-name="' + esc(d.name) + '">Remove</button>' +
-    '</div></div>'
-  ).join("") || '<div class="hint" style="padding:6px 0">No drivers registered.</div>';
+  // A group with no unit is not yet configured: no PTI can be filed against it
+  // and no reminder covers it. Say what is missing rather than leaving the
+  // admin to infer it from an empty "Truck" row.
+  const setupBanner = g.setup_complete ? "" :
+    '<div class="card" style="border:1px solid var(--warn)">' +
+      '<b>⚙️ This group isn\'t set up yet</b>' +
+      '<div class="hint" style="margin-top:4px">Give it a unit number and at ' +
+      'least one driver below. Until it has a unit, nothing here is inspected ' +
+      'or reminded.</div></div>';
 
   view.innerHTML =
     '<div class="card">' +
@@ -353,13 +384,14 @@ async function renderGroup(gid) {
       '<div class="kv"><div class="k">Reminders</div><div>' + (g.notifications_disabled ? "🔕 disabled" : "🔔 on") + '</div></div>' +
     '</div>' +
 
+    setupBanner +
+
     '<div class="card"><b>🔧 Unit number</b><div class="hint" style="margin:4px 0 8px">' +
-      'Applies immediately — skips the 3-vote flow.</div>' +
+      'Applies immediately.</div>' +
       '<div class="row"><input type="text" id="unitIn" value="' + esc(g.unit_number || "") + '" placeholder="Unit #">' +
       '<button class="btn inline" id="unitSave">Save</button></div></div>' +
 
-    '<div class="card"><b>👤 Drivers</b><div class="hint" style="margin:4px 0 2px">' +
-      'Removing here skips the 3-vote process.</div>' + drivers + '</div>' +
+    '<div class="card" id="drvCard"></div>' +
 
     '<div class="card"><b>📊 PTI log</b><div id="ptis" class="hint" style="padding-top:6px">Loading…</div></div>' +
 
@@ -397,14 +429,7 @@ async function renderGroup(gid) {
     } catch (e) { toast(e.message); }
   };
 
-  view.querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
-    if (!await confirmDlg("Remove driver " + b.dataset.name + "? This skips the 3-vote process.")) return;
-    try {
-      await api("/api/groups/" + gid + "/drivers/" + b.dataset.rm, { method: "DELETE" });
-      toast("Driver removed");
-      groupsCache = null; render();
-    } catch (e) { toast(e.message); }
-  });
+  drawDrivers(g);
 
   // PTI log loads after the main view so the page feels instant.
   try {
@@ -421,6 +446,211 @@ async function renderGroup(gid) {
     const el = document.getElementById("ptis");
     if (el) el.textContent = e.message;
   }
+}
+
+// ---------- drivers card ----------
+// Picking a driver here is a *search*, not a page of buttons: the Telegram
+// prompt can only show so many members and hides known non-drivers, which is
+// how a group whose roster starts with 40 office staff ends up offering nobody
+// to tap. A search box has nothing to run out of, so this list hides no one.
+
+// Which inline editor is open, if any: {pick:{mode:"add"|"change", uid}} or
+// {rename: user_id}. Kept next to the card rather than in `current` so
+// redrawing it never refetches the group.
+let drvUI = {};
+let membersCache = {};   // gid -> the /members payload
+
+async function loadMembers(gid) {
+  if (!membersCache[gid]) membersCache[gid] = await api("/api/groups/" + gid + "/members");
+  return membersCache[gid];
+}
+
+function drawDrivers(g) {
+  const gid = g.group_id;
+  const card = document.getElementById("drvCard");
+  if (!card) return;
+
+  const rows = g.drivers.map(d => {
+    if (drvUI.rename === d.user_id) {
+      return '<div class="item" style="cursor:default">' +
+        '<div class="hint" style="margin-bottom:6px">Stored name for <code>' +
+          d.user_id + '</code> — this is what reports and reminders call them.</div>' +
+        '<div class="row"><input type="text" id="nameIn" value="' + esc(d.name) + '">' +
+        '<button class="btn inline" id="nameSave">Save</button></div>' +
+        '<button class="btn secondary" id="nameCancel">Cancel</button></div>';
+    }
+    return '<div class="item" style="cursor:default"><div class="row">' +
+      '<div class="grow"><b>' + esc(d.name) + '</b> <span class="hint">' + d.user_id + '</span>' +
+      '<div class="hint">' + d.ptis_this_week + '/' + me.required_per_week + ' this week' +
+      (d.compliant ? "" : " · " + esc(d.reason || "non-compliant")) + '</div></div>' +
+      '<span class="chip ' + (d.compliant ? "ok" : "warn") + '">' + (d.compliant ? "OK" : "due") + '</span>' +
+      '</div><div class="row" style="margin-top:8px;gap:6px">' +
+      '<button class="btn secondary inline" data-chg="' + d.user_id + '">🔄 Change</button>' +
+      '<button class="btn secondary inline" data-ren="' + d.user_id + '">✏️ Rename</button>' +
+      '<button class="btn danger inline" data-rm="' + d.user_id + '" data-name="' + esc(d.name) + '">Remove</button>' +
+      '</div></div>';
+  }).join("") || '<div class="hint" style="padding:6px 0">No drivers registered.</div>';
+
+  card.innerHTML =
+    '<b>👤 Drivers</b>' +
+    '<div class="hint" style="margin:4px 0 2px">Changes here apply immediately.</div>' +
+    rows +
+    '<div id="pickBox"></div>' +
+    (drvUI.pick ? "" : '<button class="btn secondary" id="addDrv">➕ Add driver</button>');
+
+  const rerender = () => drawDrivers(g);
+
+  // These only set the state; the redraw below reopens the picker from it.
+  const addBtn = document.getElementById("addDrv");
+  if (addBtn) addBtn.onclick = () => { drvUI = { pick: { mode: "add" } }; rerender(); };
+
+  card.querySelectorAll("[data-chg]").forEach(b => b.onclick = () => {
+    drvUI = { pick: { mode: "change", uid: Number(b.dataset.chg) } };
+    rerender();
+  });
+
+  card.querySelectorAll("[data-ren]").forEach(b => b.onclick = () => {
+    drvUI = { rename: Number(b.dataset.ren) };
+    rerender();
+    const input = document.getElementById("nameIn");
+    if (input) input.focus();
+  });
+
+  card.querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+    if (!await confirmDlg("Remove driver " + b.dataset.name + "?")) return;
+    try {
+      await api("/api/groups/" + gid + "/drivers/" + b.dataset.rm, { method: "DELETE" });
+      toast("Driver removed");
+      afterDriverChange(gid);
+    } catch (e) { toast(e.message); }
+  });
+
+  const nameSave = document.getElementById("nameSave");
+  if (nameSave) nameSave.onclick = async () => {
+    const name = document.getElementById("nameIn").value.trim();
+    if (!name) return toast("Name can't be empty");
+    try {
+      await api("/api/groups/" + gid + "/drivers/" + drvUI.rename + "/name",
+        { method: "POST", body: { name } });
+      toast("Renamed to " + name);
+      afterDriverChange(gid);
+    } catch (e) { toast(e.message); }
+  };
+  const nameCancel = document.getElementById("nameCancel");
+  if (nameCancel) nameCancel.onclick = () => { drvUI = {}; rerender(); };
+
+  if (drvUI.pick) openPicker(g);
+}
+
+// Every driver write changes the roster's is_driver flags and the group list's
+// driver names, so both caches go and the detail view is reloaded.
+function afterDriverChange(gid) {
+  drvUI = {};
+  delete membersCache[gid];
+  groupsCache = null;
+  render();
+}
+
+async function openPicker(g) {
+  const gid = g.group_id;
+  const box = document.getElementById("pickBox");
+  if (!box || !drvUI.pick) return;
+
+  const replacing = drvUI.pick.mode === "change"
+    ? g.drivers.find(d => d.user_id === drvUI.pick.uid) : null;
+  const heading = replacing
+    ? 'Replace <b>' + esc(replacing.name) + '</b> with…'
+    : 'Add a driver from this group';
+
+  box.innerHTML = '<div class="hint" style="padding:8px 0">Reading the group ' +
+    'roster…</div>';
+  let data;
+  try { data = await loadMembers(gid); }
+  catch (e) {
+    box.innerHTML = '<div class="hint" style="padding:8px 0">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (!drvUI.pick) return;   // cancelled while the roster was loading
+
+  // No roster (no userbot session, or the account isn't in the group) is the
+  // documented degraded path, not an error: fall back to a typed user id, the
+  // same escape hatch /adddriver is.
+  const manual =
+    '<div class="hint" style="margin:8px 0 6px">Or enter a Telegram user id ' +
+    'directly:</div>' +
+    '<div class="row"><input type="text" id="mUid" inputmode="numeric" placeholder="user id">' +
+    '<input type="text" id="mName" placeholder="Name"></div>' +
+    '<button class="btn" id="mAdd">' + (replacing ? "Replace" : "Add") + '</button>';
+
+  box.innerHTML =
+    '<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(128,128,128,.2)">' +
+    '<div style="margin-bottom:6px">' + heading + '</div>' +
+    (data.available
+      ? '<input type="text" id="mq" placeholder="Search name, @username or id…">' +
+        '<div id="mlist" style="max-height:46vh;overflow-y:auto;margin-top:4px"></div>'
+      : '<div class="hint">⚠️ ' + esc(data.reason || "No member list available.") + '</div>') +
+    manual +
+    '<button class="btn secondary" id="mCancel">Cancel</button></div>';
+
+  document.getElementById("mCancel").onclick = () => { drvUI = {}; drawDrivers(g); };
+
+  document.getElementById("mAdd").onclick = () => {
+    const raw = document.getElementById("mUid").value.trim();
+    const name = document.getElementById("mName").value.trim();
+    if (!/^\d+$/.test(raw)) return toast("Enter a numeric user id");
+    if (!name) return toast("Name can't be empty");
+    pickMember(g, { user_id: Number(raw), label: name });
+  };
+
+  if (!data.available) return;
+
+  const list = document.getElementById("mlist");
+  const LIMIT = 60;   // long enough that searching, not scrolling, is the path
+  const draw = q => {
+    q = (q || "").toLowerCase().trim();
+    const hits = data.members.filter(m => !q ||
+      (m.label + " " + (m.username || "") + " " + m.user_id).toLowerCase().includes(q));
+    list.innerHTML = hits.slice(0, LIMIT).map(m => {
+      const tags =
+        (m.is_driver ? '<span class="chip ok">driver here</span> ' : "") +
+        (m.is_non_driver ? '<span class="chip mut">marked non-driver</span>' : "");
+      const sub = [m.username ? "@" + m.username : null, m.user_id].filter(Boolean).join(" · ");
+      return '<div class="item" data-uid="' + m.user_id + '"><div class="row">' +
+        '<div class="grow ellip"><b>' + esc(m.label) + '</b>' +
+        '<div class="hint ellip">' + esc(sub) + '</div></div>' + tags + '</div></div>';
+    }).join("") ||
+      '<div class="hint" style="padding:8px 0">No member matches that.</div>';
+    if (hits.length > LIMIT) {
+      list.innerHTML += '<div class="hint" style="padding:6px 0">' +
+        (hits.length - LIMIT) + ' more — keep typing to narrow it down.</div>';
+    }
+    list.querySelectorAll(".item[data-uid]").forEach(el => el.onclick = () => {
+      const m = data.members.find(x => x.user_id === Number(el.dataset.uid));
+      if (!m) return;
+      if (m.is_driver) return toast(m.label + " already drives here");  // toast sets textContent
+      pickMember(g, m);
+    });
+  };
+  draw("");
+  document.getElementById("mq").oninput = e => draw(e.target.value);
+}
+
+async function pickMember(g, m) {
+  const gid = g.group_id;
+  const p = drvUI.pick;
+  if (!p) return;
+  try {
+    if (p.mode === "change") {
+      await api("/api/groups/" + gid + "/drivers/" + p.uid + "/replace",
+        { method: "POST", body: { user_id: m.user_id, name: m.label } });
+      toast("Driver changed to " + m.label);
+    } else {
+      await api("/api/groups/" + gid + "/drivers",
+        { method: "POST", body: { user_id: m.user_id, name: m.label } });
+      toast("Added " + m.label);
+    }
+    afterDriverChange(gid);
+  } catch (e) { toast(e.message); }
 }
 
 // ---------- stats ----------

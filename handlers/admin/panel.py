@@ -4,7 +4,7 @@ A private-chat ``/admin`` command opens an inline-keyboard panel restricted to
 the user ids in ``ADMINS``. From it an admin can:
 
 * browse every group the bot is in and inspect its config / recent PTIs;
-* override the 3-vote group flow directly (set unit, remove driver,
+* edit a group's configuration directly (set unit, remove driver,
   deactivate / reactivate a group);
 * see a global compliance snapshot;
 * broadcast a message to all active groups.
@@ -255,7 +255,7 @@ async def _render_drivers(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
         body = "\n".join(f"• {escape(d['name'])} (<code>{d['user_id']}</code>)" for d in drivers)
     else:
         body = "No drivers registered."
-    text = f"<b>👤 Drivers</b>\n\n{body}\n\nRemoving here skips the 3-vote process."
+    text = f"<b>👤 Drivers</b>\n\n{body}\n\nRemoving here takes effect immediately."
     return text, kb
 
 
@@ -527,7 +527,7 @@ async def admin_cb(query: types.CallbackQuery, state: FSMContext):
         await _edit(
             query,
             "Send the new unit number for this group as a message.\n\n"
-            "It takes effect immediately (no 3-vote). /cancel to abort.",
+            "It takes effect immediately. /cancel to abort.",
             _back_kb(f"adm:g:{gid}", "« Cancel"),
         )
         return
