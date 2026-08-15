@@ -61,6 +61,13 @@ LABEL_CHARS = 24
 # so a driver sitting at position 41 would read as "not in this chat" and an
 # otherwise-clean automatic setup would decline. Membership questions get the
 # full roster; only the buttons get sliced.
+#
+# The slice is therefore applied *last*, to the already-filtered list (_shown),
+# never to the roster on the way into the state. Slicing first produced a prompt
+# with no buttons at all whenever the first 40 members were all known
+# non-drivers: the drivers sat at position 41+ and were dropped before the
+# non-driver filter ever ran, so the admin was told "40 non-drivers hidden" and
+# given nobody to tap.
 MEMBER_BUTTONS = 40
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
@@ -118,8 +125,34 @@ def _visible(st: dict) -> list:
             if m.user_id not in hidden or m.user_id in st["selected"]]
 
 
+def _shown(st: dict) -> list:
+    """The members actually on screen: the visible ones, capped to the keyboard.
+
+    Everything user-facing derives from this rather than from `_visible`, so a
+    roster longer than the keyboard can never be judged as though the admin had
+    seen all of it.
+    """
+    return _visible(st)[:MEMBER_BUTTONS]
+
+
 def _hidden_count(st: dict) -> int:
     return len(st["members"]) - len(_visible(st))
+
+
+def _overflow_count(st: dict) -> int:
+    """Visible members that didn't fit on the keyboard."""
+    return len(_visible(st)) - len(_shown(st))
+
+
+def _passed_over(st: dict) -> list[tuple[int, str]]:
+    """Members the admin looked at and did not pick — the non-driver candidates.
+
+    Only what was *on screen* counts. Someone hidden was never judged here, and
+    someone past the button cap was never displayed either, so neither may be
+    swept into a fleet-wide non-driver decision.
+    """
+    return [(m.user_id, m.label) for m in _shown(st)
+            if m.user_id not in st["selected"]]
 
 
 def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
@@ -134,7 +167,7 @@ def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
             f"{_marker(st['selected'], m.user_id)} {m.label}"[:LABEL_CHARS],
             callback_data=f"ob:t:{group_id}:{m.user_id}",
         )
-        for m in _visible(st)
+        for m in _shown(st)
     ]
     for i in range(0, len(people), MEMBER_COLUMNS):
         kb.row(*people[i:i + MEMBER_COLUMNS])
@@ -194,6 +227,18 @@ def _text(admin_id: int, group_id: int) -> str:
         hidden = _hidden_count(st)
         if hidden:
             lines.append(f"<i>{hidden} known non-driver(s) hidden.</i>")
+        if not _shown(st):
+            # Everyone in the roster is on the fleet-wide non-driver list, so
+            # the prompt has nothing to tap. Say so plainly — the alternative is
+            # a list of controls with no names above it and no explanation.
+            lines.append("⚠️ Every member is on the non-driver list, so there is "
+                         "nobody to pick. Tap <b>Show hidden</b> to see them "
+                         "anyway.")
+        overflow = _overflow_count(st)
+        if overflow:
+            lines.append(f"<i>Showing the first {len(_shown(st))} — {overflow} "
+                         f"more member(s) didn't fit. Use /adddriver in the "
+                         f"group for anyone missing.</i>")
         for uid in st["selected"]:
             member = next((x for x in st["members"] if x.user_id == uid), None)
             name = member.label if member else str(uid)
@@ -265,15 +310,12 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
     roster = [m for m in members if not m.is_bot]
-    drivers_pool = roster[:MEMBER_BUTTONS]
     unit, unit_source = await _checked_guess(title, description)
     hidden = await get_non_driver_ids()
 
     # The About text usually names both drivers by phone number. When all of it
     # checks out the group configures itself and the admins are told; anything
     # unclear falls through to the prompt below, with the reason attached.
-    # Note the full roster, not drivers_pool: the slice below is how many
-    # buttons fit, which has nothing to do with who is in the chat.
     plan, auto_note = await _try_auto_config(group_id, unit, description, roster)
     if plan is not None:
         notice = await _apply_auto_config(group_id, plan)
@@ -299,7 +341,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
             "unit": unit,
             "unit_source": unit_source,
             "retired_marker": looks_retired(title),
-            "members": drivers_pool,
+            "members": roster,
             "hidden": hidden,
             "show_all": False,
             "selected": [],
@@ -345,7 +387,7 @@ async def _rebuild_pending(admin_id: int, group_id: int) -> dict | None:
         "unit": unit,
         "unit_source": unit_source,
         "retired_marker": looks_retired(title),
-        "members": [m for m in members if not m.is_bot][:MEMBER_BUTTONS],
+        "members": [m for m in members if not m.is_bot],
         "hidden": await get_non_driver_ids(),
         "show_all": False,
         "selected": [],
@@ -399,7 +441,7 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         await call.answer("Checking…")
         members = await userbot.list_members(group_id)
         roster = [m for m in members if not m.is_bot]
-        st["members"] = roster[:MEMBER_BUTTONS]
+        st["members"] = roster
         st["description"] = await userbot.get_description(group_id)
         st["hidden"] = await get_non_driver_ids()
         # Membership is judged against the whole roster, not the buttons: a pick
@@ -495,9 +537,7 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         # remember them and stop offering them. Only people who were actually
         # on screen count: someone hidden behind "Show hidden" was never judged
         # here, and the selected drivers are cleared from the list outright.
-        passed_over = [(m.user_id, m.label) for m in _visible(st)
-                       if m.user_id not in st["selected"]]
-        newly_hidden = await mark_non_drivers(passed_over)
+        newly_hidden = await mark_non_drivers(_passed_over(st))
         await unmark_non_drivers(st["selected"])
         _pending.pop(key, None)
 

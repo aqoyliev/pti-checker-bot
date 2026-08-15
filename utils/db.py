@@ -751,6 +751,35 @@ async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
             )
 
 
+async def swap_driver(group_id: int, old_user_id: int, new_user_id: int,
+                      name: str) -> bool:
+    """Replace one driver with another in a single transaction.
+
+    "The wrong person is registered here" is one correction, not two, and doing
+    it as remove-then-add leaves a window where the group has one driver -- long
+    enough for the hourly compliance pass to read it and report a unit that is
+    short a driver. Returns False if `old_user_id` was not registered here, so
+    a stale panel can't add someone by pretending to replace a driver who has
+    already gone.
+    """
+    pool = _pool_check()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            removed = await conn.execute(
+                "DELETE FROM group_drivers WHERE group_id = $1 AND user_id = $2",
+                group_id, old_user_id,
+            )
+            if removed == "DELETE 0":
+                return False
+            await conn.execute(
+                """INSERT INTO group_drivers (group_id, user_id, name)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (group_id, user_id) DO UPDATE SET name = $3""",
+                group_id, new_user_id, name,
+            )
+    return True
+
+
 async def set_driver_names(updates: list[tuple[int, int, str]]) -> int:
     """Rename registered drivers: [(group_id, user_id, name), ...] -> rows changed.
 

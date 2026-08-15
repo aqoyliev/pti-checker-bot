@@ -41,6 +41,17 @@ if python3 -m pip install --help 2>/dev/null | grep -q -- "--break-system-packag
   BSP="--break-system-packages"
 fi
 
+# Debian ships a *patched* setuptools whose `install_lib` command reads an
+# `install_layout` option that its own `install` command no longer exposes.
+# Any dependency that still builds through the legacy setup.py path then dies
+# with `AttributeError: install_layout` — telethon's `pyaes` is sdist-only and
+# hits this, which took the whole hook down (`set -e`) before ruff/pytest were
+# ever installed. Upstream setuptools has no such patch, so pulling a current
+# one in first is enough. `--ignore-installed` is required because the Debian
+# `wheel` package carries no RECORD file and pip therefore refuses to replace it.
+echo "[session-start] Upgrading build tooling (Debian setuptools breaks sdist builds)…"
+python3 -m pip install --no-cache-dir $BSP --upgrade --ignore-installed setuptools wheel
+
 echo "[session-start] Installing Python runtime dependencies…"
 python3 -m pip install --no-cache-dir $BSP -r requirements.txt
 

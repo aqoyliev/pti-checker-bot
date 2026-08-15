@@ -157,9 +157,63 @@ def test_hidden_people_are_not_re_marked_on_save():
     # hidden was never judged in this group, so they must not be swept in as a
     # fresh decision.
     st = _state_with_hidden({THIRD.user_id}, selected=[ARLETTE.user_id])
-    passed_over = [(m.user_id, m.label) for m in onboard._visible(st)
-                   if m.user_id not in st["selected"]]
-    assert passed_over == [(LIVENSTONN.user_id, LIVENSTONN.label)]
+    assert onboard._passed_over(st) == [(LIVENSTONN.user_id, LIVENSTONN.label)]
+
+
+# --- the roster is filtered before it is sliced --------------------------
+# The keyboard holds MEMBER_BUTTONS buttons, but that cap is a display limit.
+# Applying it to the roster on the way in meant a group whose first 40 members
+# were all known non-drivers produced a prompt with no names on it at all --
+# the drivers were at position 41+ and had been dropped before the non-driver
+# filter ever ran. Observed live: "40 known non-driver(s) hidden", zero buttons.
+
+
+def _big_state(hidden=(), selected=(), extra=0):
+    """A roster longer than the button cap, whose leading members are hidden."""
+    staff = [_member(1000 + i, f"STAFF {i}") for i in range(onboard.MEMBER_BUTTONS)]
+    drivers = [_member(2000 + i, f"DRIVER {i}") for i in range(2 + extra)]
+    st = _state(selected)
+    st["members"] = staff + drivers
+    st["hidden"] = set(hidden) or {m.user_id for m in staff}
+    st["show_all"] = False
+    return st
+
+
+def test_drivers_past_the_button_cap_are_still_offered():
+    st = _big_state()
+    shown = [m.user_id for m in onboard._shown(st)]
+    assert shown == [2000, 2001], "the two drivers should be the only buttons"
+
+
+def test_the_hidden_count_still_counts_the_whole_roster():
+    st = _big_state()
+    assert onboard._hidden_count(st) == onboard.MEMBER_BUTTONS
+
+
+def test_buttons_are_capped_at_the_keyboard_limit():
+    # Nothing hidden, roster longer than the cap: the extra members are cut
+    # from the keyboard, not from the state.
+    st = _big_state(hidden={-1}, extra=10)
+    assert len(st["members"]) > onboard.MEMBER_BUTTONS
+    assert len(onboard._shown(st)) == onboard.MEMBER_BUTTONS
+    assert onboard._overflow_count(st) == len(st["members"]) - onboard.MEMBER_BUTTONS
+
+
+def test_members_past_the_cap_are_not_marked_as_non_drivers():
+    # They were never displayed, so Save must not record them as passed over --
+    # that exclusion is fleet-wide and would hide them in every other group.
+    st = _big_state(hidden={-1}, extra=10, selected=[2000])
+    passed = {uid for uid, _ in onboard._passed_over(st)}
+    assert 2000 not in passed, "the pick is not passed over"
+    assert not passed & {m.user_id for m in st["members"][onboard.MEMBER_BUTTONS:]}
+
+
+def test_an_all_hidden_roster_says_so_instead_of_showing_nothing():
+    onboard._pending[onboard._key(1, -100)] = _big_state(
+        hidden={m.user_id for m in _big_state()["members"]})
+    text = onboard._text(1, -100)
+    assert "nobody to pick" in text
+    assert "Show hidden" in text
 
 
 # --- two-column layout ---------------------------------------------------

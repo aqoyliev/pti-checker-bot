@@ -30,7 +30,8 @@ issues) is posted back into the group.
   default 8080); `auth.py` validates the Mini App's signed `initData` (admins =
   env `ADMINS` ∪ admins table, same as the inline panel); `static/index.html`
   is the whole UI. `/admin` shows an "Open Web Panel" button once `WEBAPP_URL`
-  (public HTTPS URL) is set.
+  (public HTTPS URL) is set. It is also where a group gets **configured by
+  hand** — unit, plus drivers picked by searching the roster (below).
 - **`handlers/groups/proposals.py`** — the "nag" loop for still-unconfigured
   groups (the nag re-sends the onboarding prompt to admins in DM; it does not
   message the group). It also still holds the 3-vote proposal flow, which is
@@ -205,6 +206,18 @@ them for one prompt, and `/nondrivers clear` empties the table. Someone hidden i
 never swept into a fresh non-driver decision — only people actually displayed
 count as "passed over".
 
+**Filter the roster, then slice it — never the other way round.**
+`MEMBER_BUTTONS` (40) is how many buttons a Telegram message holds, and it is
+applied *last*, by `_shown()`, to the already-filtered list. Slicing the roster
+on the way into the state instead produced a prompt with no names on it at all:
+in a group whose first 40 members are office staff, every one of them is a known
+non-driver, so the drivers at position 41+ were discarded before the non-driver
+filter ever ran and the admin was told "40 known non-driver(s) hidden" above an
+empty keyboard. Three things read from `_shown()` for the same reason —
+the buttons, the overflow note, and `_passed_over()`, since someone who never
+appeared on screen must not be swept into a fleet-wide non-driver decision.
+Everything about *membership* still reads the full roster.
+
 The unit guess is also checked against `active_units` before being offered, so a
 title naming a retired truck reads as "not found". An admin refreshes that list
 weekly with `/units …` (replaced wholesale); an empty table disables the check
@@ -307,6 +320,35 @@ group the account is not in all yield "no member buttons", not an exception.
 `TELEGRAM_SESSION` is full access to the account it was made from: use a
 dedicated account and move it with `scripts/tg_session_to_railway.py`, which
 never prints the value.
+
+### The web panel's driver picker: a search, not a keyboard
+
+The same roster, asked a different way. `GET /api/groups/{gid}/members` returns
+every non-bot member flagged `is_driver` / `is_non_driver`, and the panel's
+group page picks from it by name. Four writes sit on top of it: add
+(`POST …/drivers`), rename (`POST …/drivers/{uid}/name`), swap
+(`POST …/drivers/{uid}/replace`) and the existing remove. Together with the unit
+field that is a full manual setup path, so an un-onboarded group no longer has
+to wait for a DM prompt — the groups list carries a **Needs setup** filter
+because such a group has no unit and no last PTI and therefore sorts to the
+bottom of every other ordering.
+
+Three rules it does *not* share with the Telegram picker:
+
+- **It hides nobody.** Known non-drivers are badged and sorted last, never
+  filtered out. Hiding is what leaves the keyboard empty; in a list you find
+  people by typing, so there is nothing to protect them from.
+- **It marks nobody.** Searching for one person is not a judgement on the rest
+  of the roster, so nothing here writes `non_drivers` — only a picker Save does.
+  Adding or swapping *in* a driver still clears their row, as everywhere else.
+- **A swap is one transaction** (`swap_driver`). Remove-then-add leaves a window
+  where the unit is short a driver, which the hourly compliance pass can read.
+  It refuses to swap onto someone who already drives the group, since the
+  DELETE + upsert would quietly collapse two drivers into one.
+
+Degrading works as it does for onboarding: no session, or an account that is not
+in the group, yields `available: false` plus the reason, and the panel falls back
+to a typed user id.
 
 ## Phone number → account: the second userbot
 
@@ -430,6 +472,11 @@ demanding plate evidence would strand those groups on the old truck.
 Because the change resolves from the video, the driver's result is never held
 back. Don't reintroduce the vote: `PROPOSAL_REMINDERS_ENABLED` and the `pv:`
 callbacks in `proposals.py` are dead for vehicle changes.
+
+Both admin surfaces used to describe their edits as "skips the 3-vote flow",
+which read as though a vote were still waiting somewhere. Nothing in the panels
+says that any more — an admin edit is simply immediate. Don't reintroduce the
+phrase in user-facing copy either.
 
 ## Behavior under high load
 

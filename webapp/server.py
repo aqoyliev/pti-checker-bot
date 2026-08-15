@@ -21,8 +21,10 @@ from aiohttp import web
 
 from data.config import WEBAPP_PORT
 from loader import bot
+from utils import userbot
 from utils.db import (
     add_admin,
+    add_driver,
     get_active_group_ids,
     get_admins,
     get_all_drivers_by_group,
@@ -31,17 +33,21 @@ from utils.db import (
     get_group,
     get_last_pti,
     get_last_pti_per_group,
+    get_non_driver_ids,
     get_pti_count_this_week,
     get_recent_ptis,
     get_weekly_pti_stats,
     normalize_unit,
     remove_admin,
     remove_driver,
+    set_driver_names,
     set_group_active,
     set_group_notifications,
     set_group_title,
     set_group_unit,
     set_setting,
+    swap_driver,
+    unmark_non_drivers,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
 from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
@@ -352,6 +358,123 @@ async def api_remove_driver(request: web.Request) -> web.Response:
     return _json({"ok": True, "removed": removed})
 
 
+# ---------- driver picking ----------
+# The panel's answer to "this group has the wrong driver registered", and the
+# way an un-onboarded group gets configured without waiting for a DM prompt.
+# It reads the same roster the onboarding picker does, but presents it as a
+# *searchable* list rather than a page of buttons: a search box has no room to
+# run out of, so nothing here is hidden or capped.
+
+
+async def api_group_members(request: web.Request) -> web.Response:
+    """The group's roster, flagged for who is already a driver.
+
+    Degrades exactly like the onboarding prompt: no session, no membership or a
+    refused participant list all yield available=false plus a reason, never an
+    error. The caller falls back to entering a user id by hand.
+    """
+    gid = _int_param(request, "gid")
+    if not await get_group(gid):
+        return _err(404, "Group not found.")
+    if not userbot.is_configured():
+        return _json({"available": False, "members": [], "reason":
+                      "No userbot session is configured, so member lists are "
+                      "unavailable."})
+
+    roster = [m for m in await userbot.list_members(gid) if not m.is_bot]
+    if not roster:
+        return _json({"available": False, "members": [], "reason":
+                      "No member list — the userbot account is probably not in "
+                      "this group."})
+
+    driver_ids = {d["user_id"] for d in await get_drivers(gid)}
+    non_drivers = await get_non_driver_ids()
+    members = [{
+        "user_id": m.user_id,
+        "name": m.name or "",
+        "username": m.username,
+        "label": m.label,
+        "is_driver": m.user_id in driver_ids,
+        "is_non_driver": m.user_id in non_drivers,
+    } for m in roster]
+    # Known non-drivers are shown here, not hidden. Hiding them is what leaves
+    # the Telegram picker with nothing to tap; in a list you search by name,
+    # being able to find the person is the whole point. They sort last and
+    # carry a badge instead.
+    members.sort(key=lambda m: (m["is_non_driver"], m["label"].lower()))
+    return _json({"available": True, "members": members, "reason": None})
+
+
+def _driver_name(body: dict) -> str:
+    return str(body.get("name") or "").strip()
+
+
+async def api_add_driver(request: web.Request) -> web.Response:
+    gid = _int_param(request, "gid")
+    body = await _body(request)
+    try:
+        uid = int(body.get("user_id"))
+    except (TypeError, ValueError):
+        return _err(400, "user_id must be a numeric Telegram id.")
+    name = _driver_name(body)
+    if not name:
+        return _err(400, "Driver name can't be empty.")
+    if not await get_group(gid):
+        return _err(404, "Group not found.")
+    if not await add_driver(gid, uid, name):
+        return _err(400, "That person is already a driver in this group.")
+    # Being chosen as a driver outranks a stale fleet-wide "not a driver" row,
+    # exactly as it does on the onboarding Save path. Nobody is marked as a
+    # non-driver from here: searching for one person is not a judgement on
+    # everyone else in the roster.
+    await unmark_non_drivers([uid])
+    logging.info("web panel: admin %s added driver %s (%r) to group %s",
+                 request["admin"]["user_id"], uid, name, gid)
+    return _json({"ok": True})
+
+
+async def api_rename_driver(request: web.Request) -> web.Response:
+    gid = _int_param(request, "gid")
+    uid = _int_param(request, "uid")
+    name = _driver_name(await _body(request))
+    if not name:
+        return _err(400, "Driver name can't be empty.")
+    changed = await set_driver_names([(gid, uid, name)])
+    if not changed and not any(d["user_id"] == uid for d in await get_drivers(gid)):
+        return _err(404, "That driver isn't registered in this group.")
+    logging.info("web panel: admin %s renamed driver %s in group %s to %r",
+                 request["admin"]["user_id"], uid, gid, name)
+    # changed=False also means "the name already said that", which is a no-op
+    # rather than a failure — the caller only needs to know it went through.
+    return _json({"ok": True, "changed": bool(changed)})
+
+
+async def api_replace_driver(request: web.Request) -> web.Response:
+    """Swap one registered driver for another member of the same group."""
+    gid = _int_param(request, "gid")
+    old_uid = _int_param(request, "uid")
+    body = await _body(request)
+    try:
+        new_uid = int(body.get("user_id"))
+    except (TypeError, ValueError):
+        return _err(400, "user_id must be a numeric Telegram id.")
+    name = _driver_name(body)
+    if not name:
+        return _err(400, "Driver name can't be empty.")
+
+    # Swapping onto someone who already drives here would delete one row and
+    # update another, quietly turning two drivers into one.
+    if new_uid != old_uid and any(d["user_id"] == new_uid
+                                  for d in await get_drivers(gid)):
+        return _err(400, "That person is already a driver in this group.")
+    if not await swap_driver(gid, old_uid, new_uid, name):
+        return _err(404, "That driver isn't registered here — reload the panel.")
+    await unmark_non_drivers([new_uid])
+    logging.info("web panel: admin %s replaced driver %s with %s (%r) in group %s",
+                 request["admin"]["user_id"], old_uid, new_uid, name, gid)
+    return _json({"ok": True})
+
+
 async def api_stats(request: web.Request) -> web.Response:
     groups = await get_all_groups()
     drivers_by_group = await get_all_drivers_by_group()
@@ -474,6 +597,10 @@ def build_app() -> web.Application:
     app.router.add_post("/api/groups/{gid}/unit", api_group_set_unit)
     app.router.add_post("/api/groups/{gid}/notifications", api_group_notifications)
     app.router.add_post("/api/groups/{gid}/active", api_group_active)
+    app.router.add_get("/api/groups/{gid}/members", api_group_members)
+    app.router.add_post("/api/groups/{gid}/drivers", api_add_driver)
+    app.router.add_post("/api/groups/{gid}/drivers/{uid}/name", api_rename_driver)
+    app.router.add_post("/api/groups/{gid}/drivers/{uid}/replace", api_replace_driver)
     app.router.add_delete("/api/groups/{gid}/drivers/{uid}", api_remove_driver)
     app.router.add_get("/api/stats", api_stats)
     app.router.add_get("/api/model", api_model)
