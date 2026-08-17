@@ -521,10 +521,9 @@ async def units_confirm_callback(query: types.CallbackQuery):
 async def _quiet_report() -> str:
     """The quiet-groups list, as HTML. Safe to call even with no traffic data."""
     # Counting only runs forward, so for the first few days after this ships
-    # every group has zero messages and would be reported as dead. That list is
-    # printed directly above "paste this week's active units", i.e. next to the
-    # decision that retires trucks — so until a full window has been observed,
-    # say so instead of raising a fleet-wide false alarm.
+    # every group has zero messages and would be reported as dead -- so until a
+    # full window has been observed, say so instead of raising a fleet-wide
+    # false alarm.
     since = await group_activity_since()
     if not has_full_window(since, datetime.utcnow().date()):
         collected = "no traffic recorded yet" if since is None else f"collecting since {since}"
@@ -735,19 +734,15 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
     if asked is not None and now - asked < REFRESH_AFTER:
         return False
 
-    # The quiet list rides along with the ask: which trucks went silent is
-    # exactly the question being answered when deciding what goes on the new
-    # list. A failure to build it must not cost the ask itself.
-    try:
-        body = f"{_ASK_TEXT}\n\n{await _quiet_report()}"
-    except Exception:
-        logging.exception("could not build the quiet-groups report")
-        body = _ASK_TEXT
-
+    # The quiet list used to ride along here. It doesn't any more: a truck being
+    # quiet is not evidence it is retired -- a driver who films his PTI and says
+    # nothing else looks identical to an idle truck -- so printing it directly
+    # above "paste this week's active units" put a list next to a decision it
+    # cannot answer. It is still available on demand with /quiet.
     sent = False
     for admin_id in _ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, body, parse_mode="HTML")
+            await bot.send_message(admin_id, _ASK_TEXT, parse_mode="HTML")
             sent = True
         except Exception:
             logging.exception("could not ask admin %s for the units list", admin_id)

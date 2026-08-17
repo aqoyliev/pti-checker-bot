@@ -374,8 +374,12 @@ asked is "how many in the last few days", so a daily counter answers it with one
 small row instead of thousands, and pruning is a single `DELETE`. That is also
 why the middleware is **not** throttled — a count needs every message.
 
-Quiet is a **reporting** status, surfaced by `/quiet` in DM and appended to the
-weekly units ask. Two rules:
+Quiet is a **reporting** status, surfaced by `/quiet` in DM **on demand only**.
+It used to ride along with the weekly units ask; that was removed on 2026-08-17,
+because a quiet truck is not a retired one — a driver who films his PTI and says
+nothing else is indistinguishable from an idle truck — so the list sat directly
+above "paste this week's active units", next to a decision it cannot answer.
+Don't re-attach it there. Two rules:
 
 - It never writes `is_active`. Deactivation belongs to the `/units` sweep, where
   a human confirms it; quiet is evidence, not a decision.
