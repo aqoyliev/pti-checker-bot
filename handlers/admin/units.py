@@ -64,6 +64,7 @@ from utils.db import (
     active_units_updated_at,
     apply_title_sweep,
     apply_units_sweep,
+    deactivate_group_ids,
     get_active_units,
     get_all_groups,
     get_group_message_counts,
@@ -83,6 +84,9 @@ _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 # In memory on purpose — a prompt that doesn't survive a restart is the safe
 # failure mode for a write this wide, and the admin just re-pastes the list.
 _pending: dict[int, dict] = {}
+# A pending /titlecheck confirmation, per admin: {"group_ids": [...], "at": ...}.
+# Kept apart from _pending above so the two flows can never overwrite each other.
+_pending_titlecheck: dict[int, dict] = {}
 # How long a preview stays answerable before it's treated as stale.
 _PENDING_TTL = 600  # seconds
 # Cap the previewed groups so a fleet-wide sweep can't exceed Telegram's message limit.
@@ -683,6 +687,96 @@ async def run_title_sweep() -> str | None:
         except Exception:
             logging.exception("could not send the title sweep report to %s", admin_id)
     return report
+
+
+def _titlecheck_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("💤 Deactivate", callback_data="tc:ok"),
+        InlineKeyboardButton("✖️ Cancel", callback_data="tc:no"),
+    )
+    return kb
+
+
+@dp.message_handler(commands=["titlecheck"], chat_type=types.ChatType.PRIVATE)
+async def cmd_titlecheck(message: types.Message):
+    """On-demand version of the title sweep's one surviving rule.
+
+    Titles are read fresh from Telegram (same as the sweep), and a group that
+    can't be fetched is left out rather than flagged -- "couldn't read it" is
+    not evidence its title lost the unit. Nothing is deactivated here without
+    a tap: this only ever reads ``title_deactivations``, the same pure,
+    list-free check the automatic sweep runs, and hands the result to a human.
+    """
+    if message.from_user.id not in _ADMIN_IDS:
+        return
+
+    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
+    fresh, skipped = await _refresh_titles(groups)
+    candidates = title_deactivations(fresh)
+
+    if not candidates:
+        text = "🟢 Every active group's title still carries a unit number."
+        if skipped:
+            text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    _pending_titlecheck[message.from_user.id] = {
+        "group_ids": [c["group"]["group_id"] for c in candidates],
+        "at": monotonic(),
+    }
+    shown = candidates[:_PREVIEW_LIMIT]
+    lines = [f"🔎 <b>{len(candidates)} active group(s)</b> whose title carries "
+             f"no unit number:", ""]
+    lines += [_casualty_line(c) for c in shown]
+    if len(candidates) > len(shown):
+        lines.append(f"…and {len(candidates) - len(shown)} more.")
+    if skipped:
+        lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
+    lines.append("\nNothing has been deactivated yet.")
+    await message.answer("\n".join(lines), parse_mode="HTML",
+                         reply_markup=_titlecheck_kb())
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("tc:"))
+async def titlecheck_callback(query: types.CallbackQuery):
+    uid = query.from_user.id
+    if uid not in _ADMIN_IDS:
+        await query.answer("Not allowed.", show_alert=True)
+        return
+
+    state = _pending_titlecheck.pop(uid, None)
+    if state is None or monotonic() - state["at"] > _PENDING_TTL:
+        # The fleet may have changed since this list was drawn -- re-run rather
+        # than act on a stale one.
+        await query.message.edit_text("That list expired — send /titlecheck again.")
+        await query.answer()
+        return
+
+    if query.data == "tc:no":
+        await query.message.edit_text("✖️ Cancelled — nothing was deactivated.")
+        await query.answer()
+        return
+
+    try:
+        deactivated = await deactivate_group_ids(state["group_ids"])
+    except Exception:
+        logging.exception("titlecheck bulk deactivate failed for admin %s", uid)
+        await query.message.edit_text(
+            "⚠️ <b>Something went wrong — nothing was deactivated.</b>\n"
+            "Send /titlecheck again to retry.",
+            parse_mode="HTML",
+        )
+        await query.answer()
+        return
+
+    await query.message.edit_text(
+        f"💤 <b>{deactivated} group(s) deactivated.</b>\n"
+        "Reactivate any of these from the web panel if a truck is still running.",
+        parse_mode="HTML",
+    )
+    await query.answer()
 
 
 async def run_title_sweep_if_due(now: datetime | None = None) -> bool:

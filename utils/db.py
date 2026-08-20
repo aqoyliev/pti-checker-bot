@@ -986,6 +986,25 @@ async def set_group_active(group_id: int, active: bool):
     )
 
 
+async def deactivate_group_ids(group_ids: list[int]) -> int:
+    """Bulk-deactivate arbitrary groups. Returns how many were actually flipped.
+
+    For a manual, admin-confirmed bulk action (e.g. /titlecheck) that isn't tied
+    to the weekly active-units list -- it never touches ``active_units`` or its
+    ``updated_at`` stamp.
+    """
+    if not group_ids:
+        return 0
+    rows = await _pool_check().fetch(
+        """UPDATE groups SET is_active = FALSE
+            WHERE group_id = ANY($1::bigint[])
+              AND COALESCE(is_active, TRUE) = TRUE
+        RETURNING group_id""",
+        group_ids,
+    )
+    return len(rows)
+
+
 async def bump_group_message_count(group_id: int) -> None:
     """Count one human message against today's bucket for this group.
 
