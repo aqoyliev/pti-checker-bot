@@ -97,13 +97,20 @@ require real secrets. Keep new unit tests pure (no network / no DB).
   reintroduce muting behind a config flag.
 - **One reminder per unit per 24 hours**, whatever kind it is. Both loops run
   hourly, so the cap lives in the data, not in the cadence: `groups.last_reminder_at`
-  is stamped by every sender and checked through `reminder_logic.may_remind`.
-  The cap is per *unit* — two overdue drivers share one message naming both, not
-  one each — and when the twice-weekly nudge and an overdue notice fall in the
-  same pass the overdue one wins, because a nudge to inspect twice a week tells
-  an already-overdue driver nothing. A fresh PTI still clears the overdue state
-  inside that window (`reset` writes nothing to the chat), and the admin report
-  is not a reminder: it still lists every overdue driver every pass.
+  is stamped by every sender and checked through `reminder_logic.may_remind`. The
+  cap is per *unit* — two overdue drivers share one message naming both, not one
+  each. A fresh PTI still clears the overdue state inside that window (`reset`
+  writes nothing to the chat), and the admin report is not a reminder: it still
+  lists every overdue driver every pass.
+- **There is no calendar-based "nudge" reminder — only the overdue one.** A
+  twice-weekly nudge (#8, `decide_weekly`) used to fire every Monday and Thursday
+  at 14:00 UTC regardless of same-day activity, so a driver who had already
+  submitted a PTI that morning still got told to "please send your PTI video"
+  that afternoon. Removed 2026-08-20 after exactly that complaint. The only
+  reminder left in `utils/reminders.py` is the #9 overdue escalation, which is
+  driven off the *actual* last PTI (`get_last_pti_for_group`), not a schedule.
+  Don't reintroduce a reminder that fires on a fixed cadence without checking
+  whether a PTI already came in.
 
 ## Group onboarding
 

@@ -106,15 +106,15 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS notifications_disabled BOOLEAN DEFAULT FALSE;
 
             -- Reminder-engine bookkeeping (utils/reminders.py).
-            -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
             -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
             -- last_escalation_at: when the last daily escalation notice went out (#9).
             -- last_reminder_at: the last reminder of ANY kind, which is what the
             --   one-per-24-hours rule is measured against. Kept separate from the
-            --   three above because those drive the state machine (which message
+            --   two above because those drive the state machine (which message
             --   is due) while this one only answers "has this unit been told
             --   today" -- including for reminders sent by the compliance loop.
-            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
+            -- last_weekly_reminder_on (DATE) is a leftover column from the removed
+            -- twice-weekly nudge (#8, dropped 2026-08-20) -- unused, not recreated.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP;
@@ -1093,13 +1093,6 @@ async def get_last_pti_for_group(group_id: int) -> dict | None:
         group_id,
     )
     return dict(row) if row else None
-
-
-async def mark_weekly_reminder(group_id: int, on_date) -> None:
-    await _pool_check().execute(
-        "UPDATE groups SET last_weekly_reminder_on = $1 WHERE group_id = $2",
-        on_date, group_id,
-    )
 
 
 async def mark_overdue_reminded(group_id: int, at) -> None:

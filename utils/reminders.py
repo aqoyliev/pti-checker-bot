@@ -1,12 +1,17 @@
-"""PTI reminder engine (#8 twice-weekly nudge, #9 overdue escalation).
+"""PTI reminder engine (#9 overdue escalation).
 
 Deliberately separate from utils/enforcement.py: this NEVER restricts anyone, it
 only posts reminders into the driver's group. The hourly scheduler calls
 ``run_reminder_pass``. Groups with ``notifications_disabled`` (toggled from the
 admin panel, #10) are excluded at the query level and never reminded.
 
-The decision logic is split into pure functions (``decide_weekly`` /
-``decide_overdue_action``) so it can be unit-tested without a DB or Telegram.
+The decision logic is split into a pure function (``decide_overdue_action``) so
+it can be unit-tested without a DB or Telegram.
+
+The twice-weekly nudge (#8) that used to live here was removed 2026-08-20: it
+fired on a fixed Mon/Thu schedule regardless of whether a PTI had already come
+in that day, so a driver who submitted that morning still got told to "please
+send your PTI video" that afternoon. Don't reintroduce a calendar-only nudge.
 """
 from __future__ import annotations
 
@@ -26,7 +31,6 @@ from utils.db import (
     mark_group_inactive,
     mark_overdue_reminded,
     mark_reminder_sent,
-    mark_weekly_reminder,
     mark_unreachable,
     clear_unreachable,
     UNREACHABLE_LIMIT,
@@ -35,7 +39,6 @@ from utils.db import (
 from utils.reminder_logic import (
     OVERDUE_DAYS,
     decide_overdue_action,
-    decide_weekly,
     may_remind,
 )
 
@@ -75,14 +78,6 @@ def _driver_names(drivers: list[dict]) -> str:
 # automatically, but albums and photos always need the explicit reply, so the
 # instruction is the one that works in every case.
 _HOW = "Reply <code>/check</code> to your PTI video."
-
-
-def _weekly_text(drivers: list[dict]) -> str:
-    return (
-        f"⏰ <b>PTI reminder</b> — {_driver_names(drivers)}, please send your "
-        f"pre-trip inspection video. {_HOW}\n"
-        "Drivers should submit a PTI at least twice a week."
-    )
 
 
 def _overdue_text(drivers: list[dict]) -> str:
@@ -160,9 +155,6 @@ async def _process_group(group: dict, now: datetime) -> None:
     last_reminder_at = group.get("last_reminder_at")
 
     # #9 — overdue escalation. Reference = last PTI, else group creation time.
-    # Settled before the weekly nudge because the two now share one daily slot,
-    # and "your PTI is overdue" is the message worth spending it on: a nudge to
-    # send one twice a week tells an already-overdue driver nothing new.
     last = await get_last_pti_for_group(group_id)
     reference = (last and last["submitted_at"]) or group.get("created_at") or now
     action = decide_overdue_action(
@@ -174,21 +166,18 @@ async def _process_group(group: dict, now: datetime) -> None:
         await reset_group_reminders(group_id)
         action = "none"
 
-    sent = False
     if action == "overdue_first":
         result = await post_reminder(group_id, _overdue_text(drivers), now, last_reminder_at)
         if result is False:
             return
         if result:
             await mark_overdue_reminded(group_id, now)
-            sent = True
     elif action == "escalation":
         result = await post_reminder(group_id, _escalation_text(drivers), now, last_reminder_at)
         if result is False:
             return
         if result:
             await mark_escalation_reminded(group_id, now)
-            sent = True
             # Email the global alert address on the same daily cadence as the
             # group nag (no-op unless SMTP + recipient are configured).
             await send_overdue_alert(
@@ -196,11 +185,6 @@ async def _process_group(group: dict, now: datetime) -> None:
                 _driver_names_plain(drivers),
                 (now - reference).days,
             )
-
-    # #8 — twice-weekly nudge, only when the overdue path stayed quiet.
-    if not sent and decide_weekly(now, group.get("last_weekly_reminder_on")):
-        if await post_reminder(group_id, _weekly_text(drivers), now, last_reminder_at):
-            await mark_weekly_reminder(group_id, now.date())
 
 
 async def run_reminder_pass() -> None:
