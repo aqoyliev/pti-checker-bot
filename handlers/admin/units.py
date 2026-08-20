@@ -84,7 +84,9 @@ _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 # In memory on purpose — a prompt that doesn't survive a restart is the safe
 # failure mode for a write this wide, and the admin just re-pastes the list.
 _pending: dict[int, dict] = {}
-# A pending /titlecheck confirmation, per admin: {"group_ids": [...], "at": ...}.
+# A pending /titlecheck confirmation, per admin:
+# {"candidates": [...], "selected": {group_id, ...}, "at": ...}. "selected" is
+# mutated in place by toggle taps; only tc:ok/tc:no ever pop the entry.
 # Kept apart from _pending above so the two flows can never overwrite each other.
 _pending_titlecheck: dict[int, dict] = {}
 # How long a preview stays answerable before it's treated as stale.
@@ -689,10 +691,28 @@ async def run_title_sweep() -> str | None:
     return report
 
 
-def _titlecheck_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("💤 Deactivate", callback_data="tc:ok"),
+def _titlecheck_button_label(c: dict, selected: bool) -> str:
+    unit = normalize_unit(c["group"].get("unit_number")) or "—"
+    title = c["group"].get("title") or str(c["group"]["group_id"])
+    mark = "✅" if selected else "⬜"
+    label = f"{mark} {unit} — {title}"
+    return label if len(label) <= 40 else label[:39] + "…"
+
+
+def _titlecheck_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboardMarkup:
+    """One toggle row per group, defaulting to selected -- a plain tap on
+    Deactivate still behaves like "deactivate everything shown", but a known
+    false positive (the title parser missed a unit it does carry) can be
+    unchecked first instead of forcing an all-or-nothing choice."""
+    kb = InlineKeyboardMarkup()
+    for c in candidates:
+        gid = c["group"]["group_id"]
+        kb.row(InlineKeyboardButton(
+            _titlecheck_button_label(c, gid in selected),
+            callback_data=f"tc:t:{gid}",
+        ))
+    kb.row(
+        InlineKeyboardButton(f"💤 Deactivate selected ({len(selected)})", callback_data="tc:ok"),
         InlineKeyboardButton("✖️ Cancel", callback_data="tc:no"),
     )
     return kb
@@ -706,7 +726,10 @@ async def cmd_titlecheck(message: types.Message):
     can't be fetched is left out rather than flagged -- "couldn't read it" is
     not evidence its title lost the unit. Nothing is deactivated here without
     a tap: this only ever reads ``title_deactivations``, the same pure,
-    list-free check the automatic sweep runs, and hands the result to a human.
+    list-free check the automatic sweep runs, and hands the result to a human,
+    who can deselect individual groups before confirming -- the parser is
+    conservative but not perfect, and a title it can't read a unit out of
+    (e.g. one buried after other words) may still name a live truck.
     """
     if message.from_user.id not in _ADMIN_IDS:
         return
@@ -722,21 +745,28 @@ async def cmd_titlecheck(message: types.Message):
         await message.answer(text, parse_mode="HTML")
         return
 
+    # Only the shown subset is ever toggleable/actionable in one round -- acting
+    # on a group the admin never saw a line for would defeat the point of this
+    # being a reviewed, not automatic, deactivation.
+    shown = candidates[:_PREVIEW_LIMIT]
+    selected = {c["group"]["group_id"] for c in shown}
     _pending_titlecheck[message.from_user.id] = {
-        "group_ids": [c["group"]["group_id"] for c in candidates],
+        "candidates": shown,
+        "selected": selected,
         "at": monotonic(),
     }
-    shown = candidates[:_PREVIEW_LIMIT]
     lines = [f"🔎 <b>{len(candidates)} active group(s)</b> whose title carries "
              f"no unit number:", ""]
     lines += [_casualty_line(c) for c in shown]
     if len(candidates) > len(shown):
-        lines.append(f"…and {len(candidates) - len(shown)} more.")
+        lines.append(f"…and {len(candidates) - len(shown)} more -- re-run "
+                     f"/titlecheck after these are handled to reach them.")
     if skipped:
         lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
-    lines.append("\nNothing has been deactivated yet.")
+    lines.append("\nTap a group to uncheck it if its title actually does name a "
+                 "unit. Nothing has been deactivated yet.")
     await message.answer("\n".join(lines), parse_mode="HTML",
-                         reply_markup=_titlecheck_kb())
+                         reply_markup=_titlecheck_kb(shown, selected))
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("tc:"))
@@ -746,21 +776,46 @@ async def titlecheck_callback(query: types.CallbackQuery):
         await query.answer("Not allowed.", show_alert=True)
         return
 
-    state = _pending_titlecheck.pop(uid, None)
+    state = _pending_titlecheck.get(uid)
     if state is None or monotonic() - state["at"] > _PENDING_TTL:
         # The fleet may have changed since this list was drawn -- re-run rather
         # than act on a stale one.
+        _pending_titlecheck.pop(uid, None)
         await query.message.edit_text("That list expired — send /titlecheck again.")
         await query.answer()
         return
 
-    if query.data == "tc:no":
+    action = query.data[len("tc:"):]
+
+    if action == "no":
+        _pending_titlecheck.pop(uid, None)
         await query.message.edit_text("✖️ Cancelled — nothing was deactivated.")
         await query.answer()
         return
 
+    if action.startswith("t:"):
+        # A toggle only ever edits the keyboard -- the state stays pending, so
+        # this can't be mistaken for a confirmation.
+        gid = int(action[len("t:"):])
+        if gid in state["selected"]:
+            state["selected"].discard(gid)
+        else:
+            state["selected"].add(gid)
+        await query.message.edit_reply_markup(
+            reply_markup=_titlecheck_kb(state["candidates"], state["selected"]))
+        await query.answer()
+        return
+
+    # action == "ok"
+    _pending_titlecheck.pop(uid, None)
+    group_ids = list(state["selected"])
+    if not group_ids:
+        await query.message.edit_text("Nothing selected — nothing was deactivated.")
+        await query.answer()
+        return
+
     try:
-        deactivated = await deactivate_group_ids(state["group_ids"])
+        deactivated = await deactivate_group_ids(group_ids)
     except Exception:
         logging.exception("titlecheck bulk deactivate failed for admin %s", uid)
         await query.message.edit_text(

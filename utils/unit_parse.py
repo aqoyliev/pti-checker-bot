@@ -24,8 +24,12 @@ import re
 _SUB = re.compile(r"\bSUB\b\s*#?\s*\d{3,7}\s*[/|-]+\s*(\d{3,7})", re.IGNORECASE)
 # "UNIT# 1216", "UNIT 1216", "TRUCK# 147085", "Unit: 001A"
 _LABELLED = re.compile(r"\b(?:UNIT|TRUCK)\b\s*[#:]?\s*(\d{3,7})", re.IGNORECASE)
-# A bare leading number: "1136 LORISTON...", "0822 // FRANCOIS..."
-_LEADING = re.compile(r"^\s*[^\w]*(\d{3,7})\b")
+# A bare leading number: "1136 LORISTON...", "0822 // FRANCOIS...". Also
+# tolerates one or two letters glued directly onto the digits with no space
+# ("F9121 BOYKIN...", "ML2432 DEANS...") -- some units in the fleet carry a
+# letter prefix, and dropping it would silently return the wrong unit. Still
+# anchored to the very start of the title, same as the plain-digit case.
+_LEADING = re.compile(r"^\s*[^\w]*([A-Za-z]{0,2}\d{3,7})\b")
 
 
 def parse_unit(title: str | None) -> str | None:

@@ -27,6 +27,12 @@ from utils.unit_parse import (
     ("1136 LORISTON, ALEX FRANCOIS // JOSEPH , ANTOINE", "1136"),
     ("0822 // FRANCOIS, DIKENS / HERNANDEZ, FRANCOIS", "0822"),
     ("1157 / MCCLAIN, DRANTON / SIMS, RANDY A", "1157"),
+    # a letter prefix glued straight onto the leading digits is part of the unit
+    ("F9121 BOYKIN, LEON / MARTINEZ HERNANDEZ, MARIO (ML)", "F9121"),
+    ("ML2432 DEANS, DAVID", "ML2432"),
+    # ... but a unit buried after other words is still out of reach -- the
+    # parser only ever looks at the very start of the title.
+    ("TEAM \U0001F981 2336 IBRAAHIIMI, LIBAN / ABDIRAHMAN AWIL", None),
     # sub-leases: the FIRST number is the sublease, the second is the unit
     ("SUB 588197 // 212566 FARAH, MOHAMED ABDI", "212566"),
     ("SUB 429819 /// 728443 - EVARIS, PIERRE", "728443"),
