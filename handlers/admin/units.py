@@ -734,6 +734,12 @@ async def cmd_titlecheck(message: types.Message):
     if message.from_user.id not in _ADMIN_IDS:
         return
 
+    # _refresh_titles reads every active group from Telegram one at a time
+    # (throttled, ~150 groups) -- that's tens of seconds with nothing on
+    # screen, so say so up front instead of leaving the admin wondering if the
+    # command did anything.
+    status = await message.answer("🔎 Checking group titles — this can take a "
+                                  "minute for the full fleet…")
     groups = [g for g in await get_all_groups() if g.get("is_active", True)]
     fresh, skipped = await _refresh_titles(groups)
     candidates = title_deactivations(fresh)
@@ -742,7 +748,7 @@ async def cmd_titlecheck(message: types.Message):
         text = "🟢 Every active group's title still carries a unit number."
         if skipped:
             text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
-        await message.answer(text, parse_mode="HTML")
+        await status.edit_text(text, parse_mode="HTML")
         return
 
     # Only the shown subset is ever toggleable/actionable in one round -- acting
@@ -765,8 +771,8 @@ async def cmd_titlecheck(message: types.Message):
         lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
     lines.append("\nTap a group to uncheck it if its title actually does name a "
                  "unit. Nothing has been deactivated yet.")
-    await message.answer("\n".join(lines), parse_mode="HTML",
-                         reply_markup=_titlecheck_kb(shown, selected))
+    await status.edit_text("\n".join(lines), parse_mode="HTML",
+                           reply_markup=_titlecheck_kb(shown, selected))
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("tc:"))
