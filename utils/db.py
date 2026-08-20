@@ -106,15 +106,15 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS notifications_disabled BOOLEAN DEFAULT FALSE;
 
             -- Reminder-engine bookkeeping (utils/reminders.py).
-            -- last_weekly_reminder_on: date of the last twice-weekly nudge (#8).
             -- overdue_reminded_at: when the first "3 days, no PTI" notice went out (#9).
             -- last_escalation_at: when the last daily escalation notice went out (#9).
             -- last_reminder_at: the last reminder of ANY kind, which is what the
             --   one-per-24-hours rule is measured against. Kept separate from the
-            --   three above because those drive the state machine (which message
+            --   two above because those drive the state machine (which message
             --   is due) while this one only answers "has this unit been told
             --   today" -- including for reminders sent by the compliance loop.
-            ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_weekly_reminder_on DATE;
+            -- last_weekly_reminder_on (DATE) is a leftover column from the removed
+            -- twice-weekly nudge (#8, dropped 2026-08-20) -- unused, not recreated.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS overdue_reminded_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP;
@@ -986,6 +986,25 @@ async def set_group_active(group_id: int, active: bool):
     )
 
 
+async def deactivate_group_ids(group_ids: list[int]) -> int:
+    """Bulk-deactivate arbitrary groups. Returns how many were actually flipped.
+
+    For a manual, admin-confirmed bulk action (e.g. /titlecheck) that isn't tied
+    to the weekly active-units list -- it never touches ``active_units`` or its
+    ``updated_at`` stamp.
+    """
+    if not group_ids:
+        return 0
+    rows = await _pool_check().fetch(
+        """UPDATE groups SET is_active = FALSE
+            WHERE group_id = ANY($1::bigint[])
+              AND COALESCE(is_active, TRUE) = TRUE
+        RETURNING group_id""",
+        group_ids,
+    )
+    return len(rows)
+
+
 async def bump_group_message_count(group_id: int) -> None:
     """Count one human message against today's bucket for this group.
 
@@ -1074,13 +1093,6 @@ async def get_last_pti_for_group(group_id: int) -> dict | None:
         group_id,
     )
     return dict(row) if row else None
-
-
-async def mark_weekly_reminder(group_id: int, on_date) -> None:
-    await _pool_check().execute(
-        "UPDATE groups SET last_weekly_reminder_on = $1 WHERE group_id = $2",
-        on_date, group_id,
-    )
 
 
 async def mark_overdue_reminded(group_id: int, at) -> None:

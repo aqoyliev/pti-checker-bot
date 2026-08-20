@@ -97,13 +97,20 @@ require real secrets. Keep new unit tests pure (no network / no DB).
   reintroduce muting behind a config flag.
 - **One reminder per unit per 24 hours**, whatever kind it is. Both loops run
   hourly, so the cap lives in the data, not in the cadence: `groups.last_reminder_at`
-  is stamped by every sender and checked through `reminder_logic.may_remind`.
-  The cap is per *unit* — two overdue drivers share one message naming both, not
-  one each — and when the twice-weekly nudge and an overdue notice fall in the
-  same pass the overdue one wins, because a nudge to inspect twice a week tells
-  an already-overdue driver nothing. A fresh PTI still clears the overdue state
-  inside that window (`reset` writes nothing to the chat), and the admin report
-  is not a reminder: it still lists every overdue driver every pass.
+  is stamped by every sender and checked through `reminder_logic.may_remind`. The
+  cap is per *unit* — two overdue drivers share one message naming both, not one
+  each. A fresh PTI still clears the overdue state inside that window (`reset`
+  writes nothing to the chat), and the admin report is not a reminder: it still
+  lists every overdue driver every pass.
+- **There is no calendar-based "nudge" reminder — only the overdue one.** A
+  twice-weekly nudge (#8, `decide_weekly`) used to fire every Monday and Thursday
+  at 14:00 UTC regardless of same-day activity, so a driver who had already
+  submitted a PTI that morning still got told to "please send your PTI video"
+  that afternoon. Removed 2026-08-20 after exactly that complaint. The only
+  reminder left in `utils/reminders.py` is the #9 overdue escalation, which is
+  driven off the *actual* last PTI (`get_last_pti_for_group`), not a schedule.
+  Don't reintroduce a reminder that fires on a fixed cadence without checking
+  whether a PTI already came in.
 
 ## Group onboarding
 
@@ -223,12 +230,12 @@ every active group's title and reports only when something changed:
 | The title now names | Result |
 | --- | --- |
 | a different unit, on the stored active list | re-filed |
-| a different unit, **not** on the list | deactivated |
+| a different unit, **not** on the list | **nothing** — see below |
 | no unit at all, or INACTIVE / moved | deactivated |
 | the same unit it always did | silent, even if that unit left the list |
 
 The last row belongs to `/units`, where a human confirms it. It writes
-unattended, so four things hold it up:
+unattended, so three things hold it up:
 
 - **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
   cache — the cache is refreshed opportunistically from the message middleware,
@@ -239,18 +246,21 @@ unattended, so four things hold it up:
   was mass-deactivated once before.
 - **Un-onboarded groups are never retired** — no stored unit means no truck, and
   an unparseable title there is the question onboarding is waiting to ask.
-- **An empty `active_units` disables the unlisted-unit rule** rather than failing
-  every group against it — otherwise the first sweep on a fresh database retires
-  the entire fleet. (The no-unit-in-title rule reads the title alone and still
-  applies.)
 
-`title_deactivations` is a much wider net than the weekly list's, on purpose
-(chosen 2026-08-13): ~20% of fleet titles carry no parseable number, and a title
-parse is only ~79.5% accurate, so a mis-parse to an unlisted number retires a
-live group. Reversing one is a manual panel decision, same as any other
-reactivation. The report names which of the two rules fired per group, because
-that is the difference between "the fleet retired this truck" and "the parser
-was wrong".
+**`title_deactivations` reads the title alone — it never consults
+`active_units`.** It used to have a second rule (retire a group whose title
+names a unit that is *not* on the stored list), added 2026-08-13 and **removed
+2026-08-17: the fleet's weekly list is not trustworthy, it omits trucks that are
+running.** That rule stacked two unreliable inputs with nothing to catch the
+result — a ~79.5%-accurate title parse against a list with holes in it — and
+wrote unattended three times a week, so either input being wrong retired a live
+group. Don't reintroduce it. Absence from that list is not evidence a truck is
+gone, and the one place it may still be read that way is `/units`, where a human
+previews the casualties and confirms them.
+
+What remains is still a much wider net than the weekly list's: ~20% of fleet
+titles carry no parseable number. Reversing one is a manual panel decision, same
+as any other reactivation.
 
 A title parse is still only a suggestion, so a rename is offered only when the
 group is already configured, its title doesn't read as retired, and — the real
@@ -374,8 +384,12 @@ asked is "how many in the last few days", so a daily counter answers it with one
 small row instead of thousands, and pruning is a single `DELETE`. That is also
 why the middleware is **not** throttled — a count needs every message.
 
-Quiet is a **reporting** status, surfaced by `/quiet` in DM and appended to the
-weekly units ask. Two rules:
+Quiet is a **reporting** status, surfaced by `/quiet` in DM **on demand only**.
+It used to ride along with the weekly units ask; that was removed on 2026-08-17,
+because a quiet truck is not a retired one — a driver who films his PTI and says
+nothing else is indistinguishable from an idle truck — so the list sat directly
+above "paste this week's active units", next to a decision it cannot answer.
+Don't re-attach it there. Two rules:
 
 - It never writes `is_active`. Deactivation belongs to the `/units` sweep, where
   a human confirms it; quiet is evidence, not a decision.
