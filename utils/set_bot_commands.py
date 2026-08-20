@@ -28,6 +28,7 @@ _ADMIN_EXTRA = [
     types.BotCommand("fixnames", "Store drivers under their fleet names"),
     types.BotCommand("units", "Update this week's active unit list"),
     types.BotCommand("titlecheck", "Check group titles for lost unit numbers"),
+    types.BotCommand("retitle", "Re-file groups whose title now names another unit"),
     types.BotCommand("quiet", "List groups with little recent traffic"),
     types.BotCommand("onboard", "Re-open setup for a group"),
     types.BotCommand("nondrivers", "Manage the fleet-wide non-driver list"),

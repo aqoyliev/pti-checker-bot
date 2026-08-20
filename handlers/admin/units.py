@@ -31,6 +31,11 @@ confirmed sweep below. It runs unattended, so it reads the titles fresh from
 Telegram and skips every group it cannot read: "couldn't fetch" must never be
 mistaken for "the truck is gone".
 
+Two commands reach into that same sweep on demand, each covering one half:
+``/titlecheck`` previews the deactivations, ``/retitle`` previews the renames.
+Both are human-confirmed, per-group toggle, so a title change doesn't have to
+wait for the next sweep day.
+
 The paste is also answered with the reverse question: which units on the list
 have *no* active group (``units_without_groups``). Every other report here is
 driven off the groups the bot already knows, so a truck whose chat was never
@@ -89,6 +94,10 @@ _pending: dict[int, dict] = {}
 # mutated in place by toggle taps; only tc:ok/tc:no ever pop the entry.
 # Kept apart from _pending above so the two flows can never overwrite each other.
 _pending_titlecheck: dict[int, dict] = {}
+# Same shape as _pending_titlecheck, for /retitle. A third, separate dict for
+# the same reason as the second: /units, /titlecheck and /retitle can be run
+# back to back by the same admin without one's confirmation clobbering another's.
+_pending_retitle: dict[int, dict] = {}
 # How long a preview stays answerable before it's treated as stale.
 _PENDING_TTL = 600  # seconds
 # Cap the previewed groups so a fleet-wide sweep can't exceed Telegram's message limit.
@@ -835,6 +844,142 @@ async def titlecheck_callback(query: types.CallbackQuery):
     await query.message.edit_text(
         f"💤 <b>{deactivated} group(s) deactivated.</b>\n"
         "Reactivate any of these from the web panel if a truck is still running.",
+        parse_mode="HTML",
+    )
+    await query.answer()
+
+
+def _retitle_button_label(r: dict, selected: bool) -> str:
+    title = r["group"].get("title") or str(r["group"]["group_id"])
+    mark = "✅" if selected else "⬜"
+    label = f"{mark} {r['old']} → {r['new']} — {title}"
+    return label if len(label) <= 40 else label[:39] + "…"
+
+
+def _retitle_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboardMarkup:
+    """One toggle row per rename, same shape as _titlecheck_kb."""
+    kb = InlineKeyboardMarkup()
+    for r in candidates:
+        gid = r["group"]["group_id"]
+        kb.row(InlineKeyboardButton(
+            _retitle_button_label(r, gid in selected),
+            callback_data=f"rt:t:{gid}",
+        ))
+    kb.row(
+        InlineKeyboardButton(f"🔄 Re-file selected ({len(selected)})", callback_data="rt:ok"),
+        InlineKeyboardButton("✖️ Cancel", callback_data="rt:no"),
+    )
+    return kb
+
+
+@dp.message_handler(commands=["retitle"], chat_type=types.ChatType.PRIVATE)
+async def cmd_retitle(message: types.Message):
+    """On-demand version of the title sweep's rename half.
+
+    ``run_title_sweep`` only reaches this Mon/Wed/Fri; a title that changes the
+    day after a sweep otherwise waits up to two days to be re-filed. This runs
+    the exact same check (``title_unit_changes``, same corroboration against
+    the stored active-units list -- a bare title guess is never enough on its
+    own) whenever an admin wants it, and hands the result to a human who can
+    deselect any candidate before confirming, same as /titlecheck.
+    """
+    if message.from_user.id not in _ADMIN_IDS:
+        return
+
+    status = await message.answer("🔎 Checking group titles for renames — this can "
+                                  "take a minute for the full fleet…")
+    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
+    fresh, skipped = await _refresh_titles(groups)
+    units = list(await get_active_units())
+    renames = title_unit_changes(fresh, units)
+
+    if not renames:
+        text = "🟢 No group's title names a different unit from the active list."
+        if not units:
+            text += ("\n\n<i>No active-units list is stored, so nothing can be "
+                     "corroborated. Send /units first.</i>")
+        if skipped:
+            text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
+        await status.edit_text(text, parse_mode="HTML")
+        return
+
+    shown = renames[:_PREVIEW_LIMIT]
+    selected = {r["group"]["group_id"] for r in shown}
+    _pending_retitle[message.from_user.id] = {
+        "candidates": shown,
+        "selected": selected,
+        "at": monotonic(),
+    }
+    lines = [f"🔄 <b>{len(renames)} active group(s)</b> whose title now names a "
+             f"different unit on the active list:", ""]
+    lines += [_rename_line(r) for r in shown]
+    if len(renames) > len(shown):
+        lines.append(f"…and {len(renames) - len(shown)} more -- re-run "
+                     f"/retitle after these are handled to reach them.")
+    if skipped:
+        lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
+    lines.append("\nTap a group to uncheck it if the rename is wrong. Nothing has "
+                 "been re-filed yet.")
+    await status.edit_text("\n".join(lines), parse_mode="HTML",
+                           reply_markup=_retitle_kb(shown, selected))
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("rt:"))
+async def retitle_callback(query: types.CallbackQuery):
+    uid = query.from_user.id
+    if uid not in _ADMIN_IDS:
+        await query.answer("Not allowed.", show_alert=True)
+        return
+
+    state = _pending_retitle.get(uid)
+    if state is None or monotonic() - state["at"] > _PENDING_TTL:
+        _pending_retitle.pop(uid, None)
+        await query.message.edit_text("That list expired — send /retitle again.")
+        await query.answer()
+        return
+
+    action = query.data[len("rt:"):]
+
+    if action == "no":
+        _pending_retitle.pop(uid, None)
+        await query.message.edit_text("✖️ Cancelled — nothing was re-filed.")
+        await query.answer()
+        return
+
+    if action.startswith("t:"):
+        gid = int(action[len("t:"):])
+        if gid in state["selected"]:
+            state["selected"].discard(gid)
+        else:
+            state["selected"].add(gid)
+        await query.message.edit_reply_markup(
+            reply_markup=_retitle_kb(state["candidates"], state["selected"]))
+        await query.answer()
+        return
+
+    # action == "ok"
+    _pending_retitle.pop(uid, None)
+    chosen = [r for r in state["candidates"] if r["group"]["group_id"] in state["selected"]]
+    if not chosen:
+        await query.message.edit_text("Nothing selected — nothing was re-filed.")
+        await query.answer()
+        return
+
+    pairs = [(r["group"]["group_id"], r["new"]) for r in chosen]
+    try:
+        refiled, _ = await apply_title_sweep(pairs, [])
+    except Exception:
+        logging.exception("retitle bulk rename failed for admin %s", uid)
+        await query.message.edit_text(
+            "⚠️ <b>Something went wrong — nothing was re-filed.</b>\n"
+            "Send /retitle again to retry.",
+            parse_mode="HTML",
+        )
+        await query.answer()
+        return
+
+    await query.message.edit_text(
+        f"🔄 <b>{refiled} group(s) re-filed.</b>",
         parse_mode="HTML",
     )
     await query.answer()
