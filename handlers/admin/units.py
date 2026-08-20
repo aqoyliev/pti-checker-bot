@@ -64,6 +64,7 @@ from utils.db import (
     active_units_updated_at,
     apply_title_sweep,
     apply_units_sweep,
+    deactivate_group_ids,
     get_active_units,
     get_all_groups,
     get_group_message_counts,
@@ -83,6 +84,9 @@ _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 # In memory on purpose — a prompt that doesn't survive a restart is the safe
 # failure mode for a write this wide, and the admin just re-pastes the list.
 _pending: dict[int, dict] = {}
+# A pending /titlecheck confirmation, per admin: {"group_ids": [...], "at": ...}.
+# Kept apart from _pending above so the two flows can never overwrite each other.
+_pending_titlecheck: dict[int, dict] = {}
 # How long a preview stays answerable before it's treated as stale.
 _PENDING_TTL = 600  # seconds
 # Cap the previewed groups so a fleet-wide sweep can't exceed Telegram's message limit.
@@ -191,25 +195,33 @@ def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
     return out
 
 
-def title_deactivations(groups: list[dict], units: list[str]) -> list[dict]:
+def title_deactivations(groups: list[dict]) -> list[dict]:
     """Active, configured groups whose title says the truck is gone.
 
     Returns ``[{"group": g, "reason": str}]`` -- the reason is carried because
-    the admin's report has to say *which* of the two rules retired a group.
+    the admin's report has to say why a group was retired.
 
-    Pure. Run on post-rename rows, so anything re-filed above already agrees
-    with its title and falls out at the ``parsed == stored`` check. Two rules:
+    Pure, and it reads the **title alone**. One rule: the title no longer names
+    a unit, because the fleet either marks the group dead ("INACTIVE - ANTON,
+    ROGEL", "this group has been moved") or drops the number off it. ~20% of
+    fleet titles carry no parseable number, so this is already a much wider net
+    than the weekly list's.
 
-    * **The title no longer names a unit** -- the fleet either marks the group
-      dead ("INACTIVE - ANTON, ROGEL", "this group has been moved") or drops the
-      number off it. ~20% of fleet titles carry no parseable number, so this is a
-      much wider net than the weekly list's.
-    * **The title names a unit that isn't on the active list** -- the group is
-      filed under one truck, its title claims another, and the fleet says that
-      other truck isn't running. Note the cost of a mis-parse lands here: six
-      known titles ("1275 - NEGRON..." on a group really filed as 2003) parse to
-      a *different* number, and if that number is off the list the live group is
-      retired. Reversed from the panel, one group at a time.
+    There used to be a second rule -- retire a group whose title names a unit
+    that isn't on the stored active list -- and it was **removed on 2026-08-17
+    because the list is not trustworthy**. It stacked two unreliable inputs with
+    nothing to catch the result: a title parse measured at 79.5% (six known
+    titles, e.g. "1275 - NEGRON..." on a group really filed as 2003, parse to a
+    *different* valid number) against a list that omits live trucks. Either one
+    alone retires a running group, unattended, three times a week. Don't
+    reintroduce it: absence from that list is not evidence a truck is gone, and
+    the one place it may still be read that way is ``/units``, where a human
+    previews the casualties and confirms them.
+
+    So a title naming some *other* unit is now simply left alone here. If that
+    number is on the list, ``title_unit_changes`` re-files the group; if it
+    isn't, nothing happens at all, which is the correct answer when the only
+    thing saying the truck is dead is a list that drops live ones.
 
     Skipped on purpose:
 
@@ -220,15 +232,7 @@ def title_deactivations(groups: list[dict], units: list[str]) -> list[dict]:
       ones it could not fetch, so a missing title here means *no evidence*, not
       an unnamed truck. Acting on a blank would retire a group for being
       unreachable, which is how the fleet was mass-deactivated once before.
-    * **An empty units list.** Same rule as everywhere else: no list means the
-      check is disabled, not that every unit fails it. Without this the very
-      first sweep on a fresh database would retire the entire fleet.
-    * **A title still naming the stored unit.** Even if that unit has left the
-      list -- title and database agree, so there is nothing here to detect, and
-      retiring a truck for falling off the list belongs to /units, where a human
-      confirms it.
     """
-    wanted = {normalize_unit(u) for u in units}
     out: list[dict] = []
     for g in groups:
         if not g.get("is_active", True):
@@ -242,12 +246,6 @@ def title_deactivations(groups: list[dict], units: list[str]) -> list[dict]:
         parsed = normalize_unit(parse_unit(title) or "")
         if looks_retired(title) or not parsed:
             out.append({"group": g, "reason": "title no longer names a unit"})
-            continue
-        if not wanted or parsed == stored:
-            continue
-        if parsed not in wanted:
-            out.append({"group": g,
-                        "reason": f"title names {parsed}, not on the active list"})
     return out
 
 
@@ -521,10 +519,9 @@ async def units_confirm_callback(query: types.CallbackQuery):
 async def _quiet_report() -> str:
     """The quiet-groups list, as HTML. Safe to call even with no traffic data."""
     # Counting only runs forward, so for the first few days after this ships
-    # every group has zero messages and would be reported as dead. That list is
-    # printed directly above "paste this week's active units", i.e. next to the
-    # decision that retires trucks — so until a full window has been observed,
-    # say so instead of raising a fleet-wide false alarm.
+    # every group has zero messages and would be reported as dead -- so until a
+    # full window has been observed, say so instead of raising a fleet-wide
+    # false alarm.
     since = await group_activity_since()
     if not has_full_window(since, datetime.utcnow().date()):
         collected = "no traffic recorded yet" if since is None else f"collecting since {since}"
@@ -669,7 +666,7 @@ async def run_title_sweep() -> str | None:
     # truck that moved to a listed unit is not a truck that lost its number --
     # judging it before the re-file would retire it for naming the new one.
     renames = title_unit_changes(fresh, units)
-    casualties = title_deactivations(apply_renames(fresh, renames), units)
+    casualties = title_deactivations(apply_renames(fresh, renames))
 
     if not renames and not casualties:
         logging.info("title sweep: no changes (%s groups read, %s skipped)",
@@ -690,6 +687,96 @@ async def run_title_sweep() -> str | None:
         except Exception:
             logging.exception("could not send the title sweep report to %s", admin_id)
     return report
+
+
+def _titlecheck_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("💤 Deactivate", callback_data="tc:ok"),
+        InlineKeyboardButton("✖️ Cancel", callback_data="tc:no"),
+    )
+    return kb
+
+
+@dp.message_handler(commands=["titlecheck"], chat_type=types.ChatType.PRIVATE)
+async def cmd_titlecheck(message: types.Message):
+    """On-demand version of the title sweep's one surviving rule.
+
+    Titles are read fresh from Telegram (same as the sweep), and a group that
+    can't be fetched is left out rather than flagged -- "couldn't read it" is
+    not evidence its title lost the unit. Nothing is deactivated here without
+    a tap: this only ever reads ``title_deactivations``, the same pure,
+    list-free check the automatic sweep runs, and hands the result to a human.
+    """
+    if message.from_user.id not in _ADMIN_IDS:
+        return
+
+    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
+    fresh, skipped = await _refresh_titles(groups)
+    candidates = title_deactivations(fresh)
+
+    if not candidates:
+        text = "🟢 Every active group's title still carries a unit number."
+        if skipped:
+            text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    _pending_titlecheck[message.from_user.id] = {
+        "group_ids": [c["group"]["group_id"] for c in candidates],
+        "at": monotonic(),
+    }
+    shown = candidates[:_PREVIEW_LIMIT]
+    lines = [f"🔎 <b>{len(candidates)} active group(s)</b> whose title carries "
+             f"no unit number:", ""]
+    lines += [_casualty_line(c) for c in shown]
+    if len(candidates) > len(shown):
+        lines.append(f"…and {len(candidates) - len(shown)} more.")
+    if skipped:
+        lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
+    lines.append("\nNothing has been deactivated yet.")
+    await message.answer("\n".join(lines), parse_mode="HTML",
+                         reply_markup=_titlecheck_kb())
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("tc:"))
+async def titlecheck_callback(query: types.CallbackQuery):
+    uid = query.from_user.id
+    if uid not in _ADMIN_IDS:
+        await query.answer("Not allowed.", show_alert=True)
+        return
+
+    state = _pending_titlecheck.pop(uid, None)
+    if state is None or monotonic() - state["at"] > _PENDING_TTL:
+        # The fleet may have changed since this list was drawn -- re-run rather
+        # than act on a stale one.
+        await query.message.edit_text("That list expired — send /titlecheck again.")
+        await query.answer()
+        return
+
+    if query.data == "tc:no":
+        await query.message.edit_text("✖️ Cancelled — nothing was deactivated.")
+        await query.answer()
+        return
+
+    try:
+        deactivated = await deactivate_group_ids(state["group_ids"])
+    except Exception:
+        logging.exception("titlecheck bulk deactivate failed for admin %s", uid)
+        await query.message.edit_text(
+            "⚠️ <b>Something went wrong — nothing was deactivated.</b>\n"
+            "Send /titlecheck again to retry.",
+            parse_mode="HTML",
+        )
+        await query.answer()
+        return
+
+    await query.message.edit_text(
+        f"💤 <b>{deactivated} group(s) deactivated.</b>\n"
+        "Reactivate any of these from the web panel if a truck is still running.",
+        parse_mode="HTML",
+    )
+    await query.answer()
 
 
 async def run_title_sweep_if_due(now: datetime | None = None) -> bool:
@@ -735,19 +822,15 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
     if asked is not None and now - asked < REFRESH_AFTER:
         return False
 
-    # The quiet list rides along with the ask: which trucks went silent is
-    # exactly the question being answered when deciding what goes on the new
-    # list. A failure to build it must not cost the ask itself.
-    try:
-        body = f"{_ASK_TEXT}\n\n{await _quiet_report()}"
-    except Exception:
-        logging.exception("could not build the quiet-groups report")
-        body = _ASK_TEXT
-
+    # The quiet list used to ride along here. It doesn't any more: a truck being
+    # quiet is not evidence it is retired -- a driver who films his PTI and says
+    # nothing else looks identical to an idle truck -- so printing it directly
+    # above "paste this week's active units" put a list next to a decision it
+    # cannot answer. It is still available on demand with /quiet.
     sent = False
     for admin_id in _ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, body, parse_mode="HTML")
+            await bot.send_message(admin_id, _ASK_TEXT, parse_mode="HTML")
             sent = True
         except Exception:
             logging.exception("could not ask admin %s for the units list", admin_id)

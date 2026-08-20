@@ -268,13 +268,6 @@ async def _try_auto_config(group_id: int, unit: str | None, description: str,
                             parse_driver_names(description))
 
 
-def _auto_keyboard(group_id: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("✏️ Edit / undo",
-                                callback_data=f"ob:e:{group_id}:0"))
-    return kb
-
-
 async def _apply_auto_config(group_id: int, plan) -> str:
     """Write the unit and drivers, and return the notice for the admins."""
     await set_group_unit(group_id, plan.unit)
@@ -294,8 +287,14 @@ async def _apply_auto_config(group_id: int, plan) -> str:
         also = f", Telegram: {escape(tg)}" if tg and tg != name else ""
         lines.append(f"• {escape(name)} — <code>{user_id}</code> "
                      f"(from {escape(plan.sources[user_id])}{also})")
-    lines.append("\n<i>Drivers were read from the phone numbers in the group's "
-                 "About text. Tap Edit if any of this is wrong.</i>")
+    # No button. The notice tells the admin what happened; it does not ask them
+    # to check it, and a button on every automatic setup invites a tap on the
+    # ones that were right. Fixing a wrong one is still one command away, and
+    # /onboard is the better route anyway -- it re-reads the roster and the
+    # About text rather than reopening a picker built from a stale snapshot.
+    lines.append(f"\n<i>Drivers were read from the phone numbers in the group's "
+                 f"About text. To change any of it: "
+                 f"<code>/onboard {group_id}</code></i>")
     return "\n".join(lines)
 
 
@@ -322,8 +321,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
         delivered = False
         for admin_id in _ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, notice, parse_mode="HTML",
-                                       reply_markup=_auto_keyboard(group_id))
+                await bot.send_message(admin_id, notice, parse_mode="HTML")
                 delivered = True
             except Exception:
                 logging.exception("could not tell admin %s about the auto-config "
@@ -473,6 +471,12 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         # Edit/undo on an auto-configured group. The stored drivers are
         # pre-selected, so the admin corrects a pick rather than redoing the
         # group from scratch; nothing is unwritten until they Save.
+        #
+        # Nothing offers this button any more -- the automatic-setup notice is
+        # informational and points at /onboard instead. It stays reachable
+        # because every notice already sitting in an admin's DM still carries
+        # one, and a tap that answers "this button is dead" is worse than the
+        # button never having been there.
         stored = await get_drivers(group_id)
         present = {m.user_id for m in st["members"]}
         st["selected"] = [d["user_id"] for d in stored
