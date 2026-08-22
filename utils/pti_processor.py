@@ -25,9 +25,37 @@ def _is_service_overload(e: Exception) -> bool:
     return isinstance(e, genai_errors.ClientError) and getattr(e, "code", None) == 429
 
 
+def _is_model_retired(e: Exception) -> bool:
+    """404 from Gemini meaning *this model id no longer exists for this key*.
+
+    Distinct from an overload on purpose: a retired model never recovers, so
+    retrying it — on this key or any other — is pointless. Google returns
+    "This model models/X is no longer available to new users" for it.
+
+    This is what took PTI checking down for ~2 days on 2026-08-20: every
+    ``gemini-2.5-*`` id went 404 at once, and because 404 is neither transient
+    nor an overload it propagated straight out of the key-failover loop.
+    """
+    return (isinstance(e, genai_errors.ClientError)
+            and getattr(e, "code", None) == 404
+            and "model" in str(e).lower())
+
+
 from data import config
 from loader import bot
-from utils.gemini import extract_frames, call_gemini_photos, call_gemini_tires, delete_frames, parse_result, get_api_keys, VideoTooLongError, MAX_FRAMES
+from utils.gemini import (
+    AVAILABLE_GEMINI_MODELS,
+    MAX_FRAMES,
+    VideoTooLongError,
+    call_gemini_photos,
+    call_gemini_tires,
+    delete_frames,
+    extract_frames,
+    get_active_model,
+    get_api_keys,
+    parse_result,
+    set_active_model,
+)
 
 # Global cap on concurrent PTI analyses (frame extraction + Gemini). Bounds CPU,
 # memory, disk, thread-pool, and Gemini-quota pressure when submissions arrive in
@@ -73,7 +101,7 @@ def _split_strided(items: list, n: int) -> list[list]:
 
 
 async def _call_gemini_with_retry(fn, *args, **kwargs):
-    """Run a Gemini call with API-key failover.
+    """Run a Gemini call with API-key failover, then model failover.
 
     Tries each key from get_api_keys() in order; the moment a key returns a service
     overload (5xx/429) or transient network error, the SAME request is retried on the
@@ -81,22 +109,49 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
     inspection. A non-transient error (bad request, auth) propagates immediately. With
     a single key this is one attempt (fail fast). Raises the last error if every key is
     exhausted; the caller then shows the "overloaded" message.
+
+    On top of that, a **retired model** (404, see ``_is_model_retired``) switches the
+    active model to the next one in ``AVAILABLE_GEMINI_MODELS`` and starts over. Keys
+    are irrelevant to that failure — Google retires an id for the whole project — so
+    trying the remaining keys first would just burn them on a model that is gone. The
+    switch is process-wide and deliberately *not* persisted: a deploy should come back
+    on the configured default, and an admin's stored choice must not be silently
+    rewritten by a transient outage.
     """
     keys = get_api_keys()
     if not keys:
         raise ValueError("No Gemini API key set (GEMINI_API_KEYS or GEMINI_API_KEY)")
+
+    tried_models: set[str] = set()
     last_exc: Exception | None = None
-    for i, key in enumerate(keys):
-        try:
-            return await asyncio.to_thread(fn, *args, api_key=key, **kwargs)
-        except Exception as e:
-            if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
-                raise
-            last_exc = e
-            if i + 1 < len(keys):
-                logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); failing over to next key")
-            else:
-                logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); no keys left")
+
+    while True:
+        model = get_active_model()
+        tried_models.add(model)
+        for i, key in enumerate(keys):
+            try:
+                return await asyncio.to_thread(fn, *args, api_key=key, **kwargs)
+            except Exception as e:
+                if _is_model_retired(e):
+                    last_exc = e
+                    break  # keys can't help; fall through to the model switch
+                if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
+                    raise
+                last_exc = e
+                if i + 1 < len(keys):
+                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); failing over to next key")
+                else:
+                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); no keys left")
+        else:
+            break  # key loop finished without a retired-model break
+
+        nxt = next((m for m in AVAILABLE_GEMINI_MODELS if m not in tried_models), None)
+        if nxt is None:
+            logging.error("Gemini model %s is retired and no alternative is left", model)
+            break
+        logging.error("Gemini model %s is retired (404); switching to %s", model, nxt)
+        set_active_model(nxt)
+
     raise last_exc
 
 
