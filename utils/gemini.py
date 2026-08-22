@@ -28,16 +28,25 @@ FILE_API_THRESHOLD = 50    # frames above this count are uploaded via File API i
 #
 # 2026-08-20: every ``gemini-2.5-*`` id started returning **404 NOT_FOUND** --
 # "no longer available to new users. Please update your code to use
-# models/gemini-3.1-pro-preview". All four production keys lost 2.5 access on the
-# same day and PTI checking stopped dead for ~2 days. Note the failure mode: a
-# retired model is a *404*, not the 429/503 the retry path treats as transient,
-# so nothing failed over and every inspection simply errored out.
+# models/gemini-3.1-pro-preview" -- and PTI checking stopped dead for ~2 days. Note
+# the failure mode: that is a *404*, not the 429/503 the retry path treats as
+# transient, so nothing failed over and every inspection simply errored out.
 #
-# Only ids verified callable on the production keys belong here -- listing a model
-# the panel can select but the API rejects just moves the outage one tap away.
-# ``gemini-2.5-*`` and ``gemini-3-pro-preview`` are gone; don't add them back.
-DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+# **The 404 is per-key, not global.** Google grandfathers older accounts: a key
+# issued before the cutoff still serves 2.5, a newer one does not. 2.5-pro is kept
+# here as the default because it is the model every PTI prompt was tuned against
+# (and it is markedly cheaper than 3.1-pro), and because
+# ``pti_processor._call_gemini_with_retry`` only abandons a model once **every**
+# configured key has 404'd it -- so this degrades to 3.1-pro on its own if the
+# grandfathered key ever loses access, instead of taking the fleet down again.
+#
+# Order matters twice over: DEFAULT is first so a blank stored value falls back to
+# it, and the rest is the failover order. Everything below 2.5 was verified
+# callable on the production keys on 2026-08-22; ``gemini-3-pro-preview`` was not,
+# so don't add it back.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
 AVAILABLE_GEMINI_MODELS = (
+    "gemini-2.5-pro",
     "gemini-3.1-pro-preview",
     "gemini-pro-latest",
     "gemini-3-flash-preview",

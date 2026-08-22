@@ -30,11 +30,19 @@ def test_there_is_more_than_one_choice():
     assert len(gemini.AVAILABLE_GEMINI_MODELS) > 1
 
 
-def test_no_retired_model_is_offered():
-    # A model id the API 404s on must not be selectable: offering it just moves
-    # the outage one tap away. See utils/gemini.py's note on 2026-08-20.
-    assert not [m for m in gemini.AVAILABLE_GEMINI_MODELS
-                if m.startswith("gemini-2.5-") or m == "gemini-3-pro-preview"]
+def test_no_model_without_a_working_key_is_offered():
+    # gemini-3-pro-preview 404s on every production key, so selecting it could
+    # only fail. 2.5-pro is different: it 404s on the newer keys but still works
+    # on the grandfathered one, and _call_gemini_with_retry only abandons a model
+    # once every key has refused it. See utils/gemini.py's note on 2026-08-20.
+    assert "gemini-3-pro-preview" not in gemini.AVAILABLE_GEMINI_MODELS
+    assert "gemini-2.5-flash-lite" not in gemini.AVAILABLE_GEMINI_MODELS
+
+
+def test_a_fallback_sits_after_the_default():
+    # If the grandfathered key ever loses 2.5 access the bot has to land
+    # somewhere, so the default must not be the only entry.
+    assert gemini.AVAILABLE_GEMINI_MODELS[1:] != ()
 
 
 def test_set_active_model_switches_when_valid():

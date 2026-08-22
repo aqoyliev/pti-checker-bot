@@ -26,15 +26,20 @@ def _is_service_overload(e: Exception) -> bool:
 
 
 def _is_model_retired(e: Exception) -> bool:
-    """404 from Gemini meaning *this model id no longer exists for this key*.
+    """404 from Gemini meaning *this key may not use this model*.
 
-    Distinct from an overload on purpose: a retired model never recovers, so
-    retrying it — on this key or any other — is pointless. Google returns
-    "This model models/X is no longer available to new users" for it.
+    Distinct from an overload: an overload clears in a minute, this does not, so
+    the same call must not simply be retried. Google returns "This model
+    models/X is no longer available to new users" for it.
 
-    This is what took PTI checking down for ~2 days on 2026-08-20: every
-    ``gemini-2.5-*`` id went 404 at once, and because 404 is neither transient
-    nor an overload it propagated straight out of the key-failover loop.
+    Read it as per-key, never as global. Model access is grandfathered per
+    account, so after the 2026-08-20 cutoff `gemini-2.5-pro` 404s on a recently
+    issued key and still answers on an older one. The callers therefore try the
+    other keys before concluding anything about the model.
+
+    This is what took PTI checking down for ~2 days on 2026-08-20: 404 is
+    neither transient nor an overload, so it propagated straight out of the
+    key-failover loop and every inspection errored.
     """
     return (isinstance(e, genai_errors.ClientError)
             and getattr(e, "code", None) == 404
@@ -86,6 +91,30 @@ def _should_split(num_images: int, num_keys: int) -> bool:
     return config.PTI_SPLIT_FRAMES and num_keys > 1 and num_images >= 2
 
 
+# Which keys have already 404'd for which model, learned as we go.
+# Google grandfathers model access per account, so with a mixed key set only some
+# keys can serve gemini-2.5-pro. Remembering that is what lets the frame split keep
+# working: without it the splitter hands a quarter of the walkaround to a key that
+# cannot answer, and those frames are simply lost from the verdict.
+# Process-local and never persisted -- access can be restored, and a fresh deploy
+# should re-discover rather than inherit a stale verdict about a key.
+_model_dead_keys: dict[str, set[str]] = {}
+
+
+def _note_key_cannot_serve(model: str, key: str) -> None:
+    _model_dead_keys.setdefault(model, set()).add(key)
+
+
+def _viable_keys(model: str, keys: list[str]) -> list[str]:
+    """`keys` minus the ones already known to 404 for `model`.
+
+    Never returns empty: if every key has been ruled out, the caller still has to
+    make one attempt so the model-failover path can observe the failure and move on.
+    """
+    dead = _model_dead_keys.get(model, set())
+    return [k for k in keys if k not in dead] or keys
+
+
 def _split_strided(items: list, n: int) -> list[list]:
     """Split `items` into at most `n` near-equal chunks, STRIDED not contiguous: chunk
     i gets items[i::n] (210 frames over 3 keys -> indices 0,3,6… / 1,4,7… / 2,5,8…).
@@ -110,13 +139,17 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
     a single key this is one attempt (fail fast). Raises the last error if every key is
     exhausted; the caller then shows the "overloaded" message.
 
-    On top of that, a **retired model** (404, see ``_is_model_retired``) switches the
-    active model to the next one in ``AVAILABLE_GEMINI_MODELS`` and starts over. Keys
-    are irrelevant to that failure — Google retires an id for the whole project — so
-    trying the remaining keys first would just burn them on a model that is gone. The
-    switch is process-wide and deliberately *not* persisted: a deploy should come back
-    on the configured default, and an admin's stored choice must not be silently
-    rewritten by a transient outage.
+    On top of that, a **model unavailable everywhere** (404, see ``_is_model_retired``)
+    switches the active model to the next one in ``AVAILABLE_GEMINI_MODELS`` and starts
+    over. The switch is process-wide and deliberately *not* persisted: a deploy should
+    come back on the configured default, and an admin's stored choice must not be
+    silently rewritten by a transient outage.
+
+    **A 404 is per-key, not global.** Google retires a model id *per account*: after the
+    2026-08-20 cutoff `gemini-2.5-pro` 404s on a key issued recently while an older,
+    grandfathered key still serves it. So the model is only abandoned once **every** key
+    has refused it — giving up on the first 404 would strand the fleet on a newer model
+    while a perfectly good key sat later in the list.
     """
     keys = get_api_keys()
     if not keys:
@@ -128,28 +161,39 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
     while True:
         model = get_active_model()
         tried_models.add(model)
-        for i, key in enumerate(keys):
+        # Keys already known not to serve this model go last rather than being
+        # dropped: access can come back, and one wasted call per inspection is a
+        # cheaper way to notice than never trying again.
+        ordered = _viable_keys(model, keys)
+        ordered += [k for k in keys if k not in ordered]
+        retired_on = 0
+        for i, key in enumerate(ordered):
             try:
                 return await asyncio.to_thread(fn, *args, api_key=key, **kwargs)
             except Exception as e:
                 if _is_model_retired(e):
+                    # This key can't serve this model; another one still might.
+                    _note_key_cannot_serve(model, key)
+                    retired_on += 1
                     last_exc = e
-                    break  # keys can't help; fall through to the model switch
+                    logging.warning(f"Gemini model {model} unavailable on key #{i + 1}/{len(ordered)} (404)")
+                    continue
                 if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
                     raise
                 last_exc = e
-                if i + 1 < len(keys):
-                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); failing over to next key")
+                if i + 1 < len(ordered):
+                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(ordered)} ({type(e).__name__}); failing over to next key")
                 else:
-                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(keys)} ({type(e).__name__}); no keys left")
-        else:
-            break  # key loop finished without a retired-model break
+                    logging.warning(f"Gemini overload/transient on key #{i + 1}/{len(ordered)} ({type(e).__name__}); no keys left")
+
+        if retired_on < len(ordered):
+            break  # some key failed for another reason; that error is the real one
 
         nxt = next((m for m in AVAILABLE_GEMINI_MODELS if m not in tried_models), None)
         if nxt is None:
-            logging.error("Gemini model %s is retired and no alternative is left", model)
+            logging.error("Gemini model %s is unavailable on every key and no alternative is left", model)
             break
-        logging.error("Gemini model %s is retired (404); switching to %s", model, nxt)
+        logging.error("Gemini model %s is unavailable on every key (404); switching to %s", model, nxt)
         set_active_model(nxt)
 
     raise last_exc
@@ -179,21 +223,34 @@ async def _run_split_passes(all_images: list, keys: list[str], history: list[dic
     propagates. If EVERY chunk fails we re-raise an overload so the caller shows the
     friendly 'overloaded' message.
     """
+    # Only split across keys that can actually serve the active model. A key that
+    # 404s here doesn't just fail its own chunk -- those frames leave the merged
+    # verdict entirely, and completeness is exactly what a PTI is judged on.
+    model = get_active_model()
+    keys = _viable_keys(model, keys)
     chunks = _split_strided(all_images, len(keys))
     logging.info(
         f"PTI split: {len(all_images)} image(s) strided across {len(chunks)} key(s) "
         f"({', '.join(str(len(c)) for c in chunks)} per key)"
     )
+    used = list(keys[:len(chunks)])
     results = await asyncio.gather(
         *[asyncio.to_thread(call_gemini_photos, chunk, history=history, api_key=key)
-          for chunk, key in zip(chunks, keys)],
+          for chunk, key in zip(chunks, used)],
         return_exceptions=True,
     )
 
     passes: list[dict] = []
     overload_exc: Exception | None = None
-    for r in results:
+    for r, key in zip(results, used):
         if isinstance(r, Exception):
+            if _is_model_retired(r):
+                # Remember it so the next inspection splits across the keys that
+                # do work, instead of losing this slice of the walkaround again.
+                _note_key_cannot_serve(model, key)
+                logging.warning(f"Split chunk lost: key cannot serve {model} (404)")
+                overload_exc = r
+                continue
             if not (isinstance(r, _TRANSIENT_NET_ERRORS) or _is_service_overload(r)):
                 raise r
             overload_exc = r
