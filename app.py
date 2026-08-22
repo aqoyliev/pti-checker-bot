@@ -10,6 +10,7 @@ from utils.set_bot_commands import set_default_commands
 from data.config import ADMINS
 from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
+from utils.pti_retry import pti_retry_loop
 from handlers.admin.units import units_refresh_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
 from utils.gemini import set_active_model
@@ -38,6 +39,9 @@ async def on_startup(dispatcher):
     asyncio.create_task(compliance_loop())
     asyncio.create_task(setup_nag_loop())
     asyncio.create_task(units_refresh_loop())
+    # Inspections that failed while Gemini was down get re-run from here once it
+    # is answering again -- see utils/pti_retry.py.
+    asyncio.create_task(pti_retry_loop())
     await schedule_pending_reminders()
 
 

@@ -14,7 +14,7 @@ from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
     set_truck_plate, set_trailer, set_truck_unit,
-    reset_group_reminders,
+    reset_group_reminders, enqueue_pti_retry,
 )
 from utils.pti_processor import process_mixed_media
 from utils.enforcement import handle_pti_passed
@@ -83,6 +83,31 @@ def _items_from_buffered(buf_item) -> dict | None:
         if mime.startswith("video/"):
             return {"kind": "video_doc", "obj": buf_item.document}
     return None
+
+
+def _items_to_refs(items: list[dict]) -> list[dict]:
+    """The parts of `items` worth storing, for a retry hours or days later.
+
+    Only the ``file_id`` and mime type: the Telegram objects themselves are not
+    serialisable, and nothing downstream needs the rest. A ``file_id`` stays
+    valid long after the update that carried it is gone, which is what lets the
+    bot fetch the media again on its own — the Bot API cannot read chat history,
+    so without this a failed inspection is unrecoverable.
+    """
+    refs = []
+    for it in items:
+        obj = it["obj"]
+        file_id = getattr(obj, "file_id", None)
+        if not file_id:
+            continue
+        refs.append({
+            "kind": it["kind"],
+            "file_id": file_id,
+            "mime_type": getattr(obj, "mime_type", None),
+            "duration": getattr(obj, "duration", None),
+            "file_size": getattr(obj, "file_size", None),
+        })
+    return refs
 
 
 def _signature_from_items(items: list[dict]) -> str | None:
@@ -452,11 +477,39 @@ async def _run_pti(
     current_unit = group.get("unit_number") if group else None
     if current_unit:
         history = [h for h in history if h.get("unit_number") == current_unit]
+    # Remember a submission the bot failed to inspect through no fault of the
+    # driver's, so utils/pti_retry.py can re-run it once the service is back.
+    # Before this existed such a submission left no trace at all -- not even a
+    # pti_log row -- and the two days lost on 2026-08-20 had to be rebuilt by
+    # reading Telegram history by hand.
+    pending_failure: dict = {}
+
+    def _remember(retryable: bool, error: str) -> None:
+        if retryable:
+            pending_failure.update(error=error)
+
     text, data, status_msg = await process_mixed_media(
         items, reply, history=history, driver_name=driver_name,
+        on_failure=_remember,
     )
 
     if text is None or data is None or status_msg is None:
+        if pending_failure:
+            try:
+                await enqueue_pti_retry(
+                    group_id=message.chat.id,
+                    user_id=driver_uid,
+                    reply_message_id=reply.message_id,
+                    items_json=json.dumps(_items_to_refs(items)),
+                    driver_name=driver_name,
+                    media_signature=signature,
+                    content_signature=content_sig,
+                    error=pending_failure.get("error"),
+                )
+            except Exception:
+                # Queueing is a safety net; failing to queue must not add a
+                # second error message on top of the one the driver just got.
+                logging.exception("Could not queue PTI retry for chat %s", message.chat.id)
         return  # error path; process_mixed_media already edited the status message
 
     # The result is always shown now: a truck change is resolved from the video

@@ -724,9 +724,10 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
 
 async def process_mixed_media(
     items,
-    reply_to: types.Message,
+    reply_to,
     history: list[dict] | None = None,
     driver_name: str | None = None,
+    on_failure=None,
 ) -> tuple[str | None, dict | None, types.Message | None]:
     """Process a mix of photos, image docs, and videos as a single PTI inspection.
 
@@ -738,7 +739,26 @@ async def process_mixed_media(
     to render there (full result, or a hold message during vehicle-change vote).
     On error the status message is edited with the error and ``(None, None, status_msg)``
     is returned.
+
+    ``on_failure(retryable: bool, error: str)`` is called before returning on any
+    error path, so the caller can queue the submission for a later re-run. The
+    distinction it carries is the whole point: an overloaded or out-of-credit
+    Gemini will succeed on the same footage tomorrow, while a 12-minute video or
+    a response the model refused fails identically forever, and re-posting that
+    verdict days later is noise. Errors default to *not* retryable — a failure
+    nobody has classified is more likely a bug than a blip.
+
+    ``reply_to`` only has to provide ``.reply()``, ``.answer()`` and ``.chat.id``,
+    which is what lets utils/pti_retry.py re-drive this exact path from a stored
+    file_id rather than reimplementing it.
     """
+    def _failed(retryable: bool, error: str):
+        if on_failure is None:
+            return
+        try:
+            on_failure(retryable, error)
+        except Exception:
+            logging.exception("PTI on_failure hook raised; ignoring")
     try:
         status_msg = await reply_to.reply(
             f"Analyzing {len(items)} item(s)...",
@@ -807,6 +827,9 @@ async def process_mixed_media(
                     await status_msg.edit_text(
                         f"⚠️ Video is {mins} min long — too long for a PTI inspection. Please send a video under 15 minutes."
                     )
+                    # The footage itself is the problem; it will be just as long
+                    # next week.
+                    _failed(False, f"video too long ({mins} min)")
                     return None, None, status_msg
                 video_frames.extend(extracted)
             else:
@@ -823,6 +846,10 @@ async def process_mixed_media(
         if not all_images:
             msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)
+            # A download that failed is worth another go -- the local Bot API
+            # server having a bad minute is not the driver's problem -- but only
+            # if there was something to download in the first place.
+            _failed(bool(skipped), msg)
             return None, None, status_msg
 
         cap_note = f" (capped from {len(video_frames)})" if len(capped_frames) < len(video_frames) else ""
@@ -878,9 +905,15 @@ async def process_mixed_media(
         if not _is_service_overload(e):
             logging.exception("PTI mixed-media processing error")
             await status_msg.edit_text(f"An error occurred: {e}")
+            # A model every key has refused, an exhausted quota, a billing wall:
+            # all arrive here as a ClientError and all come back on their own.
+            # This is the class that cost two days of inspections on 2026-08-20.
+            _failed(_is_model_retired(e) or getattr(e, "code", None) in (401, 403, 429),
+                    f"{type(e).__name__}: {str(e)[:200]}")
             return None, None, status_msg
         logging.warning(f"Gemini overloaded after retries (mixed-media flow): {type(e).__name__}")
         await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
+        _failed(True, f"overloaded: {type(e).__name__}")
         return None, None, status_msg
     except ValueError as e:
         logging.warning(f"Gemini returned unusable response: {e}")
@@ -888,10 +921,18 @@ async def process_mixed_media(
             "The analysis service could not read this PTI (response was empty or blocked). "
             "Please re-record and try /check again."
         )
+        # An empty or blocked response is about this footage, not the service.
+        _failed(False, f"unusable response: {str(e)[:200]}")
+        return None, None, status_msg
+    except _TRANSIENT_NET_ERRORS as e:
+        logging.warning(f"PTI network failure: {type(e).__name__}")
+        await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
+        _failed(True, f"network: {type(e).__name__}")
         return None, None, status_msg
     except Exception as e:
         logging.exception("PTI mixed-media processing error")
         await status_msg.edit_text(f"An error occurred: {e}")
+        _failed(False, f"{type(e).__name__}: {str(e)[:200]}")
         return None, None, status_msg
     finally:
         slot.release()

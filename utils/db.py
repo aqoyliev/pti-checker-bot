@@ -183,6 +183,42 @@ async def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_gmd_day ON group_message_days (day);
 
+            -- Inspections that failed for a reason that was NOT the driver's
+            -- fault -- Gemini out of credit, a retired model, an overload, a
+            -- network blip. Before this table those submissions vanished: the
+            -- handler returned without writing a pti_log row, so nothing in the
+            -- bot knew a PTI had ever been attempted, and on 2026-08-20 two days
+            -- of them had to be reconstructed by hand from Telegram history.
+            -- Rows are re-analysed by utils/pti_retry.py once the service works
+            -- again. file_id is what makes that possible: it stays valid long
+            -- after the update is gone, so the bot can re-download the media
+            -- itself instead of needing the chat history it cannot read.
+            CREATE TABLE IF NOT EXISTS pti_retry_queue (
+                id               BIGSERIAL PRIMARY KEY,
+                group_id         BIGINT NOT NULL,
+                user_id          BIGINT NOT NULL,
+                driver_name      TEXT,
+                reply_message_id BIGINT NOT NULL,
+                items_json       TEXT   NOT NULL,
+                media_signature  TEXT,
+                content_signature TEXT,
+                attempts         INT    NOT NULL DEFAULT 0,
+                last_error       TEXT,
+                created_at       TIMESTAMP DEFAULT NOW(),
+                next_attempt_at  TIMESTAMP DEFAULT NOW(),
+                resolved_at      TIMESTAMP,
+                outcome          TEXT
+            );
+            -- The worker only ever asks for unresolved rows that are due.
+            CREATE INDEX IF NOT EXISTS idx_pti_retry_due
+                ON pti_retry_queue (next_attempt_at)
+                WHERE resolved_at IS NULL;
+            -- One pending retry per submission, so a driver spamming /check on a
+            -- broken bot doesn't queue the same video five times over.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pti_retry_pending_once
+                ON pti_retry_queue (group_id, reply_message_id)
+                WHERE resolved_at IS NULL;
+
             -- pti_log is queried three ways on every hot path: recent-per-group
             -- (results/reminders), per-driver weekly counts (compliance), and
             -- signature lookups (recycled-video dedup on every submission).
@@ -980,6 +1016,82 @@ async def get_weekly_pti_stats() -> dict[tuple[int, int], dict]:
         (r["group_id"], r["user_id"]): {"week_count": r["week_count"], "last_at": r["last_at"]}
         for r in rows
     }
+
+
+# ---------- failed-inspection retry queue ----------
+#
+# Only infrastructure failures belong here (see utils/pti_retry.py). A video that
+# is genuinely unusable -- too long, no media, a response the model refused --
+# will fail identically forever, and re-posting that verdict days later is noise.
+
+async def enqueue_pti_retry(
+    group_id: int,
+    user_id: int,
+    reply_message_id: int,
+    items_json: str,
+    driver_name: str | None = None,
+    media_signature: str | None = None,
+    content_signature: str | None = None,
+    error: str | None = None,
+) -> int | None:
+    """Remember a submission whose inspection failed on us. Returns the row id.
+
+    Returns ``None`` when this submission is already queued: the partial unique
+    index means a driver re-sending /check against a broken bot updates the
+    existing row instead of stacking duplicates that would each post a result.
+    """
+    row = await _pool_check().fetchrow(
+        """INSERT INTO pti_retry_queue
+           (group_id, user_id, driver_name, reply_message_id, items_json,
+            media_signature, content_signature, last_error)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (group_id, reply_message_id) WHERE resolved_at IS NULL
+           DO UPDATE SET last_error = EXCLUDED.last_error
+           RETURNING id""",
+        group_id, user_id, driver_name, reply_message_id, items_json,
+        media_signature, content_signature, (error or "")[:500],
+    )
+    return row["id"] if row else None
+
+
+async def due_pti_retries(limit: int = 20) -> list[dict]:
+    """Unresolved retries whose backoff has elapsed, oldest submission first."""
+    rows = await _pool_check().fetch(
+        """SELECT * FROM pti_retry_queue
+            WHERE resolved_at IS NULL AND next_attempt_at <= NOW()
+         ORDER BY created_at
+            LIMIT $1""",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def count_pending_pti_retries() -> int:
+    return await _pool_check().fetchval(
+        "SELECT COUNT(*) FROM pti_retry_queue WHERE resolved_at IS NULL")
+
+
+async def resolve_pti_retry(retry_id: int, outcome: str) -> None:
+    """Close a retry for good: 'done', 'gave_up', 'superseded' or 'stale'."""
+    await _pool_check().execute(
+        """UPDATE pti_retry_queue
+              SET resolved_at = NOW(), outcome = $2, attempts = attempts + 1
+            WHERE id = $1""",
+        retry_id, outcome,
+    )
+
+
+async def defer_pti_retry(retry_id: int, delay_seconds: int, error: str) -> int:
+    """Push a retry back by `delay_seconds`. Returns the new attempt count."""
+    return await _pool_check().fetchval(
+        """UPDATE pti_retry_queue
+              SET attempts = attempts + 1,
+                  last_error = $3,
+                  next_attempt_at = NOW() + ($2 || ' seconds')::interval
+            WHERE id = $1
+        RETURNING attempts""",
+        retry_id, str(int(delay_seconds)), (error or "")[:500],
+    )
 
 
 async def get_all_registered_groups() -> list[dict]:
