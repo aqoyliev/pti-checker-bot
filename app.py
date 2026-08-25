@@ -13,7 +13,7 @@ from utils.scheduler import compliance_loop
 from utils.pti_retry import pti_retry_loop
 from handlers.admin.units import units_refresh_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
-from utils.gemini import set_active_model
+from utils.gemini import get_active_model, set_active_model
 from webapp.server import start_webapp
 
 
@@ -32,8 +32,15 @@ async def on_startup(dispatcher):
     except Exception:
         pass
     stored_model = await get_setting("gemini_model")
-    if stored_model:
-        set_active_model(stored_model)  # ignored if it's not a known model id
+    if stored_model and not set_active_model(stored_model):
+        # A stored id that is no longer offered silently leaves the default in
+        # place, which is how a fleet ends up on a model nobody chose.
+        logging.warning("stored gemini_model %r is not selectable; staying on %s",
+                        stored_model, get_active_model())
+    # Log which model is actually live. The 2026-08-20 outage ran for days on the
+    # dearest model on the menu with nothing anywhere saying so -- the failover
+    # switches in memory, and the panel is the only other place it shows.
+    logging.info("Gemini model in use: %s", get_active_model())
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)
     asyncio.create_task(compliance_loop())
