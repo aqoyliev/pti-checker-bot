@@ -50,22 +50,12 @@ from utils.db import (
     unmark_non_drivers,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
-from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
+from utils.gemini import (AVAILABLE_GEMINI_MODELS, MODEL_HINTS, get_active_model,
+                          set_active_model)
 from webapp.auth import extract_user, parse_init_data, resolve_admin
 
 _INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 
-# Same admin-facing model hints as the inline panel.
-MODEL_HINTS = {
-    "gemini-2.5-pro": "2.5 — most accurate, slowest",
-    "gemini-2.5-flash": "2.5 — faster, cheaper",
-    "gemini-2.5-flash-lite": "2.5 — fastest, cheapest",
-    "gemini-3-pro-preview": "3.0 Pro (preview)",
-    "gemini-3-flash-preview": "3.0 Flash (preview)",
-    "gemini-3.1-pro-preview": "3.1 Pro (preview)",
-    "gemini-3.1-flash-lite": "3.1 Flash-Lite",
-    "gemini-3.5-flash": "3.5 Flash — newest, lots of capacity",
-}
 
 _dumps = partial(json.dumps, default=str)  # asyncpg rows carry datetimes
 

@@ -46,7 +46,8 @@ from utils.db import (
     set_setting,
 )
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
-from utils.gemini import AVAILABLE_GEMINI_MODELS, get_active_model, set_active_model
+from utils.gemini import (AVAILABLE_GEMINI_MODELS, MODEL_HINTS, get_active_model,
+                          set_active_model)
 
 PAGE_SIZE = 8
 MENU_TEXT = "<b>🛠 PTI Admin Panel</b>\n\nChoose a section:"
@@ -341,18 +342,6 @@ async def _render_admins() -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), kb
 
 
-# Short, admin-facing hint shown next to each model id. Keep the actual id as the
-# stored/selected value; these are just to remind which is which at a glance.
-_MODEL_HINTS = {
-    "gemini-2.5-pro": "2.5 — most accurate, slowest",
-    "gemini-2.5-flash": "2.5 — faster, cheaper",
-    "gemini-2.5-flash-lite": "2.5 — fastest, cheapest",
-    "gemini-3-pro-preview": "3.0 Pro (preview)",
-    "gemini-3-flash-preview": "3.0 Flash (preview)",
-    "gemini-3.1-pro-preview": "3.1 Pro (preview)",
-    "gemini-3.1-flash-lite": "3.1 Flash-Lite",
-    "gemini-3.5-flash": "3.5 Flash — newest, lots of capacity",
-}
 
 
 async def _render_model(is_super: bool) -> tuple[str, InlineKeyboardMarkup]:
@@ -366,7 +355,7 @@ async def _render_model(is_super: bool) -> tuple[str, InlineKeyboardMarkup]:
 
     lines = ["<b>🤖 AI Model</b>\n", f"Active: <code>{escape(active)}</code>\n"]
     for model in AVAILABLE_GEMINI_MODELS:
-        hint = _MODEL_HINTS.get(model, "")
+        hint = MODEL_HINTS.get(model, "")
         lines.append(f"• <code>{escape(model)}</code>" + (f" — {hint}" if hint else ""))
     lines.append(
         "\nTap a model to switch. Applies to the next inspection." if is_super

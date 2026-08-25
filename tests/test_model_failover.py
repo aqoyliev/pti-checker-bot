@@ -56,11 +56,12 @@ def _four_keys(monkeypatch):
 
 
 def test_a_404_on_one_key_still_tries_the_others(_four_keys):
-    """The whole point of keeping gemini-2.5-pro as the default.
+    """A 404 is per *account*, so one key refusing proves nothing about the rest.
 
-    Google retires a model per *account*: it 404s on the three newer keys and
-    works on the grandfathered one. Abandoning the model on the first 404 would
-    strand the fleet on a costlier model while a working key sat untried.
+    This is JRD's position on gemini-2.5-pro: three newer keys 404 it and the
+    grandfathered one serves it. Abandoning the model on the first 404 would
+    strand that fleet on a costlier model while a working key sat untried -- and
+    "costlier" is not hypothetical, the failover tail runs to $2.00/1M.
     """
     gemini.set_active_model(gemini.DEFAULT_GEMINI_MODEL)
     tried = []

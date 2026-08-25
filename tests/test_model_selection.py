@@ -37,12 +37,54 @@ def test_no_model_without_a_working_key_is_offered():
     # once every key has refused it. See utils/gemini.py's note on 2026-08-20.
     assert "gemini-3-pro-preview" not in gemini.AVAILABLE_GEMINI_MODELS
     assert "gemini-2.5-flash-lite" not in gemini.AVAILABLE_GEMINI_MODELS
+    # And no flash-lite at all: it is the cheapest *and* the least accurate,
+    # so leaving it in the failover tail risks a silent accuracy drop.
+    assert not [m for m in gemini.AVAILABLE_GEMINI_MODELS if "lite" in m]
 
 
 def test_a_fallback_sits_after_the_default():
-    # If the grandfathered key ever loses 2.5 access the bot has to land
-    # somewhere, so the default must not be the only entry.
+    # If a key ever loses access to the default the bot has to land somewhere,
+    # so the default must not be the only entry.
     assert gemini.AVAILABLE_GEMINI_MODELS[1:] != ()
+
+
+# Input $/1M, which is ~98% of a PTI's bill: ~150 frames at ~1100 tokens each,
+# sent twice, against a ~1.5k-token verdict. Aliases are absent on purpose --
+# they resolve to a different model over time, so no fixed price can be asserted.
+_INPUT_PRICE_PER_1M = {
+    "gemini-3.7-flash": 0.75,
+    "gemini-3.6-flash": 0.75,
+    "gemini-3.5-flash": 1.50,
+    "gemini-3.1-pro-preview": 2.00,
+    "gemini-2.5-pro": 1.25,
+}
+
+
+def test_failover_never_escalates_the_bill():
+    """Falling back must get cheaper, never dearer.
+
+    The list used to read 2.5-pro, then 3.1-pro. On the Gurman keys 2.5-pro 404s
+    on *every* key, so the first fallback was the single most expensive model on
+    the menu -- ~$0.70 an inspection against the ~$0.26 intended, charged
+    silently with nothing in the chat to say the model had moved. A failover
+    fires exactly when nobody is watching, so the ordering is the only guard.
+    """
+    priced = [(m, _INPUT_PRICE_PER_1M[m]) for m in gemini.AVAILABLE_GEMINI_MODELS
+              if m in _INPUT_PRICE_PER_1M]
+    # 2.5-pro is the one deliberate exception: it is dead on the newer keys, so
+    # it sits low as a JRD-only fallback rather than at its price.
+    priced = [(m, p) for m, p in priced if m != "gemini-2.5-pro"]
+    for (cheap, cheap_price), (dear, dear_price) in zip(priced, priced[1:]):
+        assert cheap_price <= dear_price, (
+            f"{cheap} (${cheap_price}/1M) falls back to {dear} "
+            f"(${dear_price}/1M) -- failover must not cost more")
+
+
+def test_every_offered_model_has_a_priced_hint():
+    # An admin switching models from either panel is making a spend decision;
+    # an unlabelled id in the list is one they'd be making blind.
+    for model in gemini.AVAILABLE_GEMINI_MODELS:
+        assert gemini.MODEL_HINTS.get(model), f"{model} has no admin hint"
 
 
 def test_set_active_model_switches_when_valid():

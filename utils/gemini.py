@@ -23,36 +23,85 @@ FILE_API_THRESHOLD = 50    # frames above this count are uploaded via File API i
 
 # The vision model used for every PTI pass. Admins switch this at runtime from the
 # /admin panel (set_active_model), and the choice is persisted in the DB and
-# reloaded on startup. "pro" is the most accurate; "flash"/"flash-lite" are faster
-# and cheaper. Keep DEFAULT first so a blank/unknown stored value falls back to it.
+# reloaded on startup. Keep DEFAULT first so a blank/unknown stored value falls
+# back to it; the rest of the tuple is the failover order.
 #
 # 2026-08-20: every ``gemini-2.5-*`` id started returning **404 NOT_FOUND** --
-# "no longer available to new users. Please update your code to use
-# models/gemini-3.1-pro-preview" -- and PTI checking stopped dead for ~2 days. Note
-# the failure mode: that is a *404*, not the 429/503 the retry path treats as
+# "no longer available to new users" -- and PTI checking stopped dead for ~2 days.
+# Note the failure mode: that is a *404*, not the 429/503 the retry path treats as
 # transient, so nothing failed over and every inspection simply errored out.
 #
-# **The 404 is per-key, not global.** Google grandfathers older accounts: a key
-# issued before the cutoff still serves 2.5, a newer one does not. 2.5-pro is kept
-# here as the default because it is the model every PTI prompt was tuned against
-# (and it is markedly cheaper than 3.1-pro), and because
-# ``pti_processor._call_gemini_with_retry`` only abandons a model once **every**
-# configured key has 404'd it -- so this degrades to 3.1-pro on its own if the
-# grandfathered key ever loses access, instead of taking the fleet down again.
+# **The 404 is per-account, not global.** Google grandfathers older AI Studio
+# projects: a key issued before the cutoff still serves 2.5, a newer one does not.
+# The two fleets landed on opposite sides of that line -- JRD's project (created
+# months earlier) still serves 2.5-pro, Gurman's (created 2026-08-21) 404s the
+# whole 2.5 family, pro *and* flash *and* flash-lite. So the default cannot be a
+# 2.5 id: on Gurman every key 404s it, the failover walks to the next entry, and
+# whatever sits there is what the fleet actually pays for.
 #
-# Order matters twice over: DEFAULT is first so a blank stored value falls back to
-# it, and the rest is the failover order. Everything below 2.5 was verified
-# callable on the production keys on 2026-08-22; ``gemini-3-pro-preview`` was not,
-# so don't add it back.
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+# **Cost is why the order is what it is.** A PTI is a vision workload -- ~150
+# frames at ~1100 tokens each, sent twice (broad pass + tire pass), against a
+# verdict of ~1.5k output tokens. Input price is therefore ~98% of the bill and
+# output price is nearly irrelevant, which inverts the usual ranking. Measured per
+# inspection on 2026-08-25 prices:
+#
+#     gemini-3.7-flash        $0.75/$3.75      ~$0.26   <- default
+#     gemini-3.6-flash        $0.75/$3.75      ~$0.26
+#     gemini-2.5-pro          $1.25/$10.00     ~$0.44   (grandfathered keys only)
+#     gemini-3.5-flash        $1.50/$9.00      ~$0.53
+#     gemini-3.1-pro-preview  $2.00/$12.00     ~$0.70
+#
+# The old list had 2.5-pro first and **3.1-pro second**, so Gurman's 404 walked it
+# straight onto the single most expensive model on the menu -- 2.7x the intended
+# spend, silently, with nothing in the chat to say so. Order failover so it
+# degrades in cost, never escalates: if you add a model, price it first and put it
+# where that price belongs.
+#
+# 3.7-flash's $0.75 input is a promotional rate **through 2026-12-31**; it doubles
+# to $1.50 on 2027-01-01, at which point re-check this table rather than assuming
+# the ordering still holds.
+#
+# ``gemini-2.5-pro`` stays selectable for JRD, whose keys still serve it, but it is
+# no longer the default because it is dead on half the estate. The two alias ids
+# are the tail of the failover chain on purpose: they always resolve to something
+# live, which is what you want once every pinned id has failed, but they can move
+# under you without notice so nothing should *start* on one. Every entry below was
+# verified callable on all four Gurman production keys on 2026-08-25.
+#
+# No flash-lite id is offered, though at ~$0.11 an inspection one would be the
+# cheapest thing here by far. Cheapest and weakest are the same model, and this
+# list is also the failover chain -- so including it means an unattended
+# fallback can put the least accurate model behind verdicts that reach drivers
+# as authoritative. The tire pass and the ABS-lamp rules exist because this
+# prompt is sensitive to exactly that. Trading accuracy for cost is a decision
+# to take deliberately, not one to leave lying in a failover tail.
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 AVAILABLE_GEMINI_MODELS = (
-    "gemini-2.5-pro",
-    "gemini-3.1-pro-preview",
-    "gemini-pro-latest",
-    "gemini-3-flash-preview",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
     "gemini-flash-latest",
+    "gemini-pro-latest",
 )
+# Admin-facing label for each id, shown by both the inline panel and the web
+# panel. It carries the **price** because picking a model here is a spend
+# decision -- ~$0.26 vs ~$0.70 per inspection is the difference between the top
+# and bottom of this list, and an admin choosing blind has no way to see that.
+# Lives here rather than in either panel so the two can't drift apart, and so it
+# sits next to the ordering rationale above that it has to stay consistent with.
+MODEL_HINTS = {
+    "gemini-3.7-flash": "$0.75/1M in — ~$0.26 a PTI (promo until 2027)",
+    "gemini-3.6-flash": "$0.75/1M in — ~$0.26 a PTI (promo until 2027)",
+    "gemini-3.5-flash": "$1.50/1M in — ~$0.53 a PTI",
+    "gemini-3.1-pro-preview": "$2.00/1M in — ~$0.70 a PTI, the dearest here",
+    "gemini-2.5-pro": "$1.25/1M in — ~$0.44 a PTI; 404s on newer keys",
+    "gemini-flash-latest": "alias — whatever Flash is current, price varies",
+    "gemini-pro-latest": "alias — whatever Pro is current, price varies",
+}
+
+
 _active_model = DEFAULT_GEMINI_MODEL
 
 
