@@ -548,6 +548,80 @@ async def upsert_group(group_id: int):
     )
 
 
+async def migrate_group_id(old_id: int, new_id: int) -> bool:
+    """Move a group's whole history onto the chat id Telegram gave it.
+
+    A basic group upgraded to a supergroup keeps none of its id: Telegram issues
+    a fresh one and answers every send to the old one with ``MigrateToChat``.
+    Until the rows follow, the unit is broken in both directions -- reminders go
+    to a dead id, and a PTI posted in the new chat finds no ``groups`` row, so
+    ``_group_ready`` refuses it *silently*. Three groups sat like that on
+    2026-08-25.
+
+    One transaction, because a half-moved group is worse than either end of it:
+    the unit would exist twice, and the compliance pass reads both.
+
+    Returns False and changes nothing when the new id already has a row --
+    merging two configured groups is a decision, not a repair.
+
+    The ``groups`` row is copied through ``to_jsonb`` rather than a column list
+    so that columns added by a later ALTER come across on their own; forgetting
+    one here would lose a group's unit or its notification settings.
+    """
+    if old_id == new_id:
+        return False
+    pool = _pool_check()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval(
+                "SELECT 1 FROM groups WHERE group_id = $1", new_id)
+            if exists:
+                return False
+            moved = await conn.fetchval(
+                """INSERT INTO groups
+                   SELECT (jsonb_populate_record(
+                               NULL::groups,
+                               to_jsonb(g) || jsonb_build_object('group_id', $2::bigint))).*
+                     FROM groups g
+                    WHERE g.group_id = $1
+                   RETURNING group_id""",
+                old_id, new_id,
+            )
+            if moved is None:
+                return False
+            # Children first: both FKs point at groups(group_id), and the old
+            # parent row can only go once nothing references it any more.
+            for table in ("group_drivers", "pti_log", "pending_proposals",
+                          "pti_retry_queue"):
+                await conn.execute(
+                    f"UPDATE {table} SET group_id = $2 WHERE group_id = $1",
+                    old_id, new_id,
+                )
+            # driver_verify is keyed on group_id alone, so it moves only into a
+            # free slot; an onboarding prompt already open on the new id wins.
+            await conn.execute(
+                """UPDATE driver_verify SET group_id = $2
+                    WHERE group_id = $1
+                      AND NOT EXISTS (SELECT 1 FROM driver_verify WHERE group_id = $2)""",
+                old_id, new_id,
+            )
+            await conn.execute("DELETE FROM driver_verify WHERE group_id = $1", old_id)
+            # Activity counts are per (group, day) and the middleware has been
+            # counting under the new id since the moment of the upgrade, so the
+            # two sides are summed rather than one overwriting the other.
+            await conn.execute(
+                """INSERT INTO group_message_days (group_id, day, msg_count)
+                   SELECT $2, day, msg_count FROM group_message_days WHERE group_id = $1
+                   ON CONFLICT (group_id, day) DO UPDATE
+                       SET msg_count = group_message_days.msg_count + EXCLUDED.msg_count""",
+                old_id, new_id,
+            )
+            await conn.execute(
+                "DELETE FROM group_message_days WHERE group_id = $1", old_id)
+            await conn.execute("DELETE FROM groups WHERE group_id = $1", old_id)
+    return True
+
+
 async def mark_group_inactive(group_id: int):
     await _pool_check().execute(
         "UPDATE groups SET is_active = FALSE WHERE group_id = $1", group_id,
