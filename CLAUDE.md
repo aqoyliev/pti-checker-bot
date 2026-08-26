@@ -532,6 +532,54 @@ which read as though a vote were still waiting somewhere. Nothing in the panels
 says that any more — an admin edit is simply immediate. Don't reintroduce the
 phrase in user-facing copy either.
 
+## The tire pass: it observes in one call and decides in another
+
+`PTI_TIRE_PASS` (default on) runs a second Gemini pass over the same frames that
+judges **only** tread wear, because the broad pass juggles 8 areas across 150+
+frames and overlooks a single worn tire. That much is old. What is new — and is
+the part to leave alone — is that the pass is **two calls**, and only the first
+one sees the frames.
+
+**Asked to inspect, the model under-reports.** On JRD unit 2456's 2026-08-26
+clip, a trailer axle worn until the rib grooves were hairlines flush with the
+tread, an inspector-framed pass returned `tire_defect: false` over all 325
+frames, over a 41-frame close-up window, over 19 frames, over 6, and over a
+2-frame pair against the deepest tire in the clip. Rewriting the carve-outs did
+not fix it; neither did cutting the frame count. Asked to **describe** the same
+frames with no verdict to reach, the same model called those grooves "almost
+flush on a flat, smoothed tread face with virtually no open channel shadow" and
+ranked them last of every tire in the walkaround, every run.
+
+So `call_gemini_tires` is: `TIRE_SURVEY_PROMPT` over the frames (observe and
+rank, decide nothing) → `TIRE_DECIDE_PROMPT` over the survey's own JSON (apply
+the policy, no images). The decision costs ~1k tokens against the survey's ~350k.
+End to end on that clip it went from 0/3 to 3/3, with no healthy tire flagged.
+Four things hold it up, and `tests/test_tire_two_call_pass.py` pins them:
+
+- **The survey names no verdict.** No "report", "flag", "defect", "out-of-service"
+  or CFR citation — that vocabulary is what flipped the same observation from
+  "flush" to "open channel".
+- **The decision never gets the frames back.** Re-looking is the step that fails.
+- **Center tread and shoulder are separate fields.** With one field they merge,
+  and the outermost rib — smoother by design on every commercial tire — reads as
+  wear: a healthy stack of spares came back "shallow and close to flush", word
+  for word what the worn axle got. The decision may never report on the strength
+  of `shoulder_note`.
+- **Depth, never presence.** A rib groove leaves a traceable wavy line right up
+  until it is gone, so the old rib-tire carve-out ("you can still see a groove")
+  is precisely what read a worn-out rib tire as fine. An open channel is dark,
+  wide and shadowed inside; a worn-out one is a faint line flush with a flat face.
+
+Two older guards are deliberately gone. The contrast no longer has to be against
+**the adjacent dual in the same frame** — a close-up of a worn tire never has
+that frame, so the one case this pass exists for was the case it structurally
+could not report — and "never flag all tires worn" is gone too, because an axle
+wears out as a set and a matched pair is exactly what a driver films up close.
+What they guarded against, a uniform rib set that merely *looks* shallow, is
+covered instead by the depth test and by the survey's rule to skip distant,
+oblique and wet tires. Promoted findings are still forced to `oos=false`
+(`merge_tire_pass`) — worn tread is an advisory, never out-of-service.
+
 ## Behavior under high load
 
 `PTI_MAX_CONCURRENCY` (env, default **3**) caps how many inspections run

@@ -645,83 +645,186 @@ def call_gemini_photos(
             _delete_files_background(client, uploaded_files)
 
 
-# A narrow, single-purpose system prompt for a SECOND Gemini pass that looks at the
-# SAME frames but judges ONLY dual-tire tread wear. The broad PTI pass juggles 8
-# areas across ~150+ frames and reliably overlooks a single worn tire (attention
-# dilution); given the one job, the model attends to every tire and catches it.
-# Evidence must be CONCRETE (smooth/featureless center, grooves absent, contrast vs
-# the adjacent dual) and avoid vague conclusions, so promoted issues survive
-# utils.pti_processor.filter_hallucinated_issues unchanged.
-TIRE_SYSTEM_PROMPT = """You are a commercial-truck TIRE inspector. You are given frames from a \
-pre-trip inspection (PTI) walkaround. Your ONLY job is to judge DUAL-TIRE TREAD WEAR. Ignore \
-everything else (lights, brakes, frame, leaks, mirrors, ABS, etc.) — never report anything that is \
-not tire tread wear.
+# The SECOND Gemini pass, which looks at the same frames as the broad one and judges
+# ONLY tire tread wear. The broad PTI pass juggles 8 areas across ~150+ frames and
+# reliably overlooks a single worn tire (attention dilution); given the one job, the
+# model attends to every tire.
+#
+# **It is two calls, and that split is the whole thing.** Asked to inspect, the model
+# under-reports: on JRD unit 2456's 2026-08-26 clip -- a trailer axle worn until the
+# rib grooves were hairlines flush with the tread -- an inspector-framed pass returned
+# `tire_defect: false` over all 325 frames, over a 41-frame close-up window, over 19
+# frames, over 6, and over a 2-frame pair against the deepest tire in the clip. Asked
+# to DESCRIBE the same frames with no verdict to reach, the same model called those
+# grooves "almost flush on a flat, smoothed tread face with virtually no open channel
+# shadow" and ranked them last, every run. So the image call only observes, and a
+# second, text-only call applies the policy to what it wrote.
+#
+# What each half must keep:
+#  - The survey names no verdict and asks for no decision. Wording that invites one
+#    ("report", "flag", "is this acceptable", "when in doubt PASS") is what flipped the
+#    same observation from "flush" to "open channel", so it stays out.
+#  - The survey describes the CENTER band and the SHOULDER in SEPARATE fields. With one
+#    field they merge, and the outermost rib -- smoother by design on every commercial
+#    tire -- reads as wear: a healthy stack of spares at 1:39 came back "shallow and
+#    close to flush", indistinguishable from the genuinely worn tire.
+#  - The decision reads text only. It never gets the images back, because re-looking is
+#    exactly the step that fails.
+#  - Depth, never presence. A rib groove leaves a traceable wavy line right up until it
+#    is gone, so "you can still see a groove" -- the old rib-tire carve-out -- is what
+#    read a worn-out rib tire as fine. An open channel is dark, wide and shadowed
+#    inside; a worn-out one is a faint line flush with a flat face.
+#
+# Two guards the old prompt used are deliberately absent. It required the contrast to
+# be against the adjacent dual IN THE SAME FRAME -- which a close-up of a worn tire
+# never has, so the one case this pass exists for was the case it could not report --
+# and it said "never flag all tires worn", though an axle wears out as a set and a
+# matched pair is exactly what gets filmed up close. What they guarded against, a
+# uniform rib set that merely looks shallow, is now covered by the depth test and by
+# the survey's rule to skip distant, oblique and wet tires.
+#
+# Evidence stays CONCRETE (a flush line where the deepest tire has an open, shadowed
+# channel) so promoted issues survive utils.pti_processor.filter_hallucinated_issues.
+TIRE_SURVEY_PROMPT = """You are analysing TIRE TREAD DEPTH in frames from a commercial-truck walkaround. Ignore everything else in \
+the frames (lights, brakes, frame, leaks, mirrors, ABS) — tread depth is the only subject. This is an \
+OBSERVATION task: describe and rank what you see. Do not judge whether any tire is acceptable, and do not \
+decide anything.
 
-Examine EVERY frame. The same tires appear in many frames from slightly different angles; a defect \
-that is clear in even ONE good frame is a real defect — do not let it average out across the others.
+SURVEY. Go through the frames and list every tire whose tread face is shown CLOSE enough and HEAD-ON enough \
+to judge: its tread fills a good part of the frame and you can see across the center of the tread. For each \
+one record:
+ - the timestamp,
+ - "center_grooves": what the grooves in the CENTER of the tread look like — how DARK they are compared with \
+the rubber beside them, how WIDE, and whether you can see DOWN INTO an open channel with shadow inside, or \
+whether the line lies FLUSH with a flat tread face. The CENTER band only: the outermost rib at each SHOULDER \
+is smoother and shallower by design on every commercial tire, so say nothing about it here.
+ - "shoulder_note": anything you noticed about the shoulder, kept separate so it cannot be mistaken for the \
+center.
+Leave out tires that are small in the frame, seen side-on down the length of the trailer, or reduced to a \
+foreshortened edge behind an outer dual — depth cannot be read from those, and a worn-looking edge at a \
+distance is viewing angle, not wear. Leave out WET tires unless the view is close, head-on and in focus: \
+water fills the grooves and a wet sheen reads as falsely bald.
 
-Report a tire ONLY when it is CLEARLY worn out: the CENTER tread (NOT the shoulder) of ONE dual is \
-smooth/featureless/bald — the circumferential grooves worn completely AWAY (a flat, groove-free band, NOT \
-merely shallow) — while the ADJACENT dual in the SAME frame still shows clear grooves. That contrast against \
-the neighbouring dual is what makes it certain. Do NOT \
-report borderline cases ("a bit smoother", "slightly more worn"); only tires that are plainly worn out.
+RANK the tires you listed from MOST remaining CENTER tread depth to LEAST. Absolute tread depth cannot be \
+read from a photo, but a difference in depth can, so the ranking is the point of this pass. Rank rib tires \
+against rib tires where you can — a shallow rib tread and a deep drive lug are different designs, not \
+different amounts of wear.
 
-REQUIRED VIEW — judge a tire ONLY from a CLOSE, roughly HEAD-ON shot. Flag a worn dual ONLY when that tire is \
-shown in a CLOSE-UP where its tread FACE fills a large part of the frame and you can see the FULL WIDTH of its \
-center tread band clearly and in focus — the kind of frame a driver gets when they deliberately film a problem \
-tire up close. If the tire is small or distant in the frame, seen side-on along the length of the trailer, or \
-the inner dual is only a foreshortened edge / a shadow tucked behind the outer dual, you CANNOT judge its \
-center tread — do NOT flag it (a worn-looking edge at a distance is viewing angle, not proof of wear). A \
-genuinely worn tire that matters WILL be shown up close; never infer wear from a far, oblique walkaround frame.
+Highway rib tires have WAVY (zigzag) circumferential grooves. As such a tire wears out the wavy bottom of \
+the groove reaches the surface, so what is left is a faint wavy hairline on a flat face. Being able to trace \
+a continuous wavy line says nothing about its depth — describe the DEPTH of the line, not its presence.
 
-DO NOT report (these are NOT defects):
- - the outer SHOULDER being smoother than the center (normal tire anatomy),
- - mixed tread PATTERNS (two different tire models on one axle is normal),
- - same-tire comparisons (center vs shoulder, or left vs right of one tire),
- - normal SHALLOW RIB-pattern trailer/steer tires: if you can still see continuous circumferential grooves \
-the tire is NOT worn smooth, even when the ribs look low — only a flat, groove-free band counts,
- - uniformly smooth-looking tires with no grooved neighbour to contrast against (a uniform rib-pattern set \
-is normal, not wear). Never report "all tires worn",
- - WET / rain-soaked / freshly-washed tires: water fills the grooves and a wet sheen makes the tread look \
-smoother and balder than it is. When the tire shows droplets, road spray, or a wet shine, do NOT report wear \
-unless the grooves are UNMISTAKABLY gone on a clear, head-on, in-focus view — when wet, default to PASS.
-Never quote a tread-depth number or "wear bars". Be conservative: when in doubt, do not report.
+Be plain about what you see. If a center groove is a wide dark slot you can see into, say so. If it is a \
+faint line lying flush on a flat face, say that just as plainly — this pass is only an observation, and \
+nothing is decided from it here.
 
-For each defect, write "evidence" as a CONCRETE visual observation — e.g. "center tread of the inner \
-dual is smooth and featureless with no visible grooves, while the adjacent outer dual still shows deep \
-grooves". Do NOT use vague conclusions like "worn", "severe wear", "tread is low", or "tire is worn".
+Also note, separately, whether the walkaround showed the tires at all (every wheel position, or only some).
 
-CLASSIFICATION — per company policy, worn/bald tread is an ADVISORY, never out-of-service: set "oos": \
-false on EVERY tire-wear finding. (Exposed cords, tread/sidewall separation, a bulge, or a flat would be \
-out-of-service, but those are out of scope here — report tread WEAR only.) The driver must still see the \
-worn tire so they replace it — finding it matters; it is just not OOS.
+Return ONLY this JSON (no prose):
+{
+  "survey": [
+    {"timestamp": "M:SS",
+     "center_grooves": "<how dark, how wide, open channel with shadow inside or flush line on a flat face>",
+     "shoulder_note": "<anything about the shoulder, or empty>"}
+  ],
+  "ranked_most_to_least_depth": ["M:SS", "M:SS", "..."],
+  "tires_fully_shown": true/false
+}"""
+
+
+# The policy half of the tire pass — see the note above TIRE_SURVEY_PROMPT for why
+# deciding is a separate, text-only call.
+TIRE_DECIDE_PROMPT = """You are applying a fleet's tire policy to TREAD OBSERVATIONS that were already made from a pre-trip \
+inspection video. There are no images here — you are given the observations as JSON and you judge the \
+descriptions, nothing else. Do not imagine detail that is not written down, and do not soften an observation \
+because it sounds severe: the looking has been done, your job is only to apply the rule to it.
+
+Each entry is one tire: the timestamp it was seen at, "center_grooves" describing the grooves in the CENTER \
+of its tread, and "shoulder_note" describing its shoulder. The entries are ranked from most remaining center \
+tread depth to least.
+
+THE RULE. Report a tire when its "center_grooves" describes grooves that have LOST THEIR DEPTH — flush, \
+almost flush, nearly flush, or approaching flush with the tread face; lying on a flat or smoothed face; no \
+visible depth; no, virtually no, or minimal shadow inside; worn away. That tire's tread grooves are gone and \
+the driver needs to replace it.
+
+Do NOT report:
+ - a tire whose "center_grooves" says the grooves are open channels with shadow inside — however SHALLOW, \
+NARROW, MODERATE or low the same sentence also calls them. A shallow open channel is a working tire; only a \
+groove that has lost its depth is a finding.
+ - a tire on the strength of its "shoulder_note". The outermost rib at each shoulder is smoother and \
+shallower by design on every commercial tire, so a flat, smooth or worn shoulder is normal and is never \
+itself a finding.
+ - a tire that is merely lower in the ranking than another. The ranking tells you where to look; only the \
+description decides.
+When a description points both ways, take the phrase about DEPTH and SHADOW as the answer: "shallow but open \
+with visible shadow" is not reported, "shallow and almost flush with minimal shadow" is.
+
+For each tire you report, write:
+ - "text": "(M:SS) <the tire as the observation identifies it, e.g. trailer tire>: center tread worn smooth \
+(49 CFR 393.75)"
+ - "evidence": the entry's own center_grooves observation, set against the top-ranked entry's — e.g. "center \
+tread grooves lie almost flush on a flat face with virtually no shadow inside, against the tire at 1:04 \
+whose center channels are wide and deeply shadowed". Quote what was observed; do not add vague conclusions \
+like "worn", "severe wear", "tread is low", or "tire is worn", and never quote a tread-depth number or "wear \
+bars".
+
+CLASSIFICATION — per company policy, worn/bald tread is an ADVISORY, never out-of-service: set "oos": false \
+on EVERY finding. (Exposed cords, tread/sidewall separation, a bulge, or a flat would be out-of-service, but \
+none of those are what this pass looks at.) The driver must still see the worn tire so they replace it — \
+finding it matters; it is just not OOS.
 
 Return ONLY this JSON (no prose):
 {
   "tire_defect": true/false,
   "issues": [
-    {"text": "(M:SS) <which tire, e.g. trailer driver-side rear inner dual>: center tread worn smooth (49 CFR 393.75)",
-     "evidence": "<concrete visual observation, >=20 chars>",
+    {"text": "(M:SS) <tire>: center tread worn smooth (49 CFR 393.75)",
+     "evidence": "<the observation, >=20 chars>",
      "oos": false}
-  ],
-  "tires_fully_shown": true/false
+  ]
 }"""
 
 
-def call_gemini_tires(images: list[tuple], history: list[dict] | None = None, api_key: str | None = None):
-    """Focused second pass: judge ONLY dual-tire tread wear over the same images.
+def _call_gemini_tire_decision(survey: dict, api_key: str | None = None):
+    """Apply the tire policy to the survey's own words. No images, by design.
 
-    Returns the raw Gemini response (JSON shaped per TIRE_SYSTEM_PROMPT). Callers
-    merge its OOS findings into the main result; see utils.pti_processor.merge_tire_pass.
+    Handing the frames back is the step that fails (see the note above
+    TIRE_SURVEY_PROMPT), so this call never sees them: it reads the descriptions the
+    survey wrote and decides which of them describe a groove that has lost its depth.
+    Costs ~1k tokens next to the survey's ~350k.
+    """
+    client = genai.Client(api_key=_resolve_api_key(api_key))
+    return client.models.generate_content(
+        model=_active_model,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=TIRE_DECIDE_PROMPT,
+            temperature=0,
+            response_mime_type="application/json",
+        ),
+        contents=[json.dumps(survey, ensure_ascii=False),
+                  "Apply the rule to these observations and return the JSON result."],
+    )
+
+
+def call_gemini_tires(images: list[tuple], history: list[dict] | None = None, api_key: str | None = None):
+    """Focused second pass: judge ONLY tire tread wear over the same images.
+
+    Two calls — an observation pass over the frames, then a text-only decision on what
+    it observed. Returns the DECISION's raw Gemini response, shaped like the old
+    single-call one (`tire_defect` + `issues`), so callers are unchanged; see
+    utils.pti_processor.merge_tire_pass. Both calls use the same key, so the failover
+    in _call_gemini_with_retry retries the pair.
     """
     n = len(images)
-    return call_gemini_photos(
+    survey = parse_result(call_gemini_photos(
         images,
         history=history,
-        system_prompt=TIRE_SYSTEM_PROMPT,
-        closing=f"Examine all {n} image(s) above for dual-tire tread wear ONLY and return the tire JSON result.",
+        system_prompt=TIRE_SURVEY_PROMPT,
+        closing=f"Survey all {n} image(s) above for tire tread depth and return the survey JSON.",
         api_key=api_key,
-    )
+    ))
+    logging.info(f"Tire survey: {len(survey.get('survey') or [])} tire(s) described")
+    return _call_gemini_tire_decision(survey, api_key=api_key)
 
 
 def delete_frames(frames: list[tuple[float, str]]) -> None:
