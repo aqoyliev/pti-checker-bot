@@ -532,6 +532,52 @@ which read as though a vote were still waiting somewhere. Nothing in the panels
 says that any more — an admin edit is simply immediate. Don't reintroduce the
 phrase in user-facing copy either.
 
+## The fleet reports
+
+`scripts/fleet_report.py` builds the two PDFs the fleet is used to seeing — a
+one-page **fleet inspection statistics** sheet and a multi-page **driver
+inspection report** — for any fleet and any window:
+
+```bash
+python scripts/fleet_report.py --fleet jrd-pti --last-week
+python scripts/fleet_report.py --fleet jrd-pti --since 2026-08-17 --until 2026-08-24
+```
+
+It needs `DATABASE_URL` (or `--database-url`) and nothing else. Rendering is
+headless Chromium (`--print-to-pdf`) over generated HTML, so there is no PDF
+library to keep current. Every statement it runs is a SELECT.
+
+- **It does not import the `utils` package.** `data/config.py` demands
+  `BOT_TOKEN` and every other bot secret at import time, so the scoring module
+  is loaded by path. A job that prints a PDF must not need credentials it cannot
+  use — and must not be blocked from running because a bot secret is absent.
+- **The window is half-open `[since, until)` in fleet-local time**, so
+  `--last-week` is the most recently *completed* Monday 00:00 → Monday 00:00.
+  Run on a Monday it reports the week that just ended, never the one in
+  progress. `pti_log.submitted_at` is naive UTC and is converted with `--tz`
+  (default `FLEET_TZ`) before days are bucketed; get that wrong and every
+  submission near midnight lands on the wrong day.
+- **The completeness score is fixed by what the fleet has already been shown**
+  (`utils/report_scoring.py`): 85 pts for required areas filmed — 8, or 9 once
+  the optional under-hood check appears in the footage — 5 for the fire
+  extinguisher, 10 less 2 per "not visible" sub-item. `tests/test_report_scoring.py`
+  pins it to rows copied out of the 6 Aug 2026 gurman report, so a change that
+  moves a published number fails the suite. The score is **not** the verdict:
+  PASS/FAIL is still only "was every required area filmed", and the
+  extinguisher never fails an inspection.
+- **A silent unit is the headline, not a silent driver** — two drivers share a
+  truck and often only one uses the app. The stats sheet counts active groups
+  that submitted nothing in the window, and says separately how many of those
+  have never sent one *at all*, which a windowed count cannot tell you.
+- **A driver who submitted nothing still appears**, greyed, with `—` for an
+  average rather than 0% — a missing inspection is the report's subject, and 0%
+  reads as a bad walkaround instead of no walkaround.
+- Inactive groups are excluded everywhere; an unreadable `result_json` scores 0
+  with every area counted missing, because a submission the pipeline could not
+  read is not evidence of a walkaround.
+
+CSVs of the same numbers land beside the PDFs, unrounded.
+
 ## Behavior under high load
 
 `PTI_MAX_CONCURRENCY` (env, default **3**) caps how many inspections run
