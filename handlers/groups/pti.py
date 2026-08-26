@@ -16,7 +16,7 @@ from utils.db import (
     set_truck_plate, set_trailer, set_truck_unit,
     reset_group_reminders, enqueue_pti_retry,
 )
-from utils.pti_processor import process_mixed_media
+from utils.pti_processor import deliver_result, process_mixed_media
 from utils.enforcement import handle_pti_passed
 from handlers.groups.monitoring import buffer_message, get_album_media
 
@@ -513,11 +513,10 @@ async def _run_pti(
         return  # error path; process_mixed_media already edited the status message
 
     # The result is always shown now: a truck change is resolved from the video
-    # itself, so there is nothing left to hold the driver's verdict for.
-    try:
-        await status_msg.edit_text(text, parse_mode="HTML")
-    except Exception:
-        logging.exception("Failed to render PTI result")
+    # itself, so there is nothing left to hold the driver's verdict for. It goes
+    # out as a *new* reply quoting the video, not as an edit of the progress
+    # message — see deliver_result for why.
+    result_msg = await deliver_result(reply, status_msg, text)
 
     await _handle_pti_result(
         message, text, data,
@@ -526,7 +525,7 @@ async def _run_pti(
         replied_message_id=reply.message_id,
         media_signature=signature,
         content_signature=content_sig,
-        result_message_id=status_msg.message_id,
+        result_message_id=getattr(result_msg, "message_id", None),
     )
 
 

@@ -44,7 +44,7 @@ from utils.db import (
     get_recent_ptis,
     resolve_pti_retry,
 )
-from utils.pti_processor import process_mixed_media
+from utils.pti_processor import deliver_result, process_mixed_media
 
 # How often the queue is looked at. Minutes, not seconds: the failures this
 # recovers from last hours, and a tight loop would mostly re-check an empty table.
@@ -169,10 +169,7 @@ async def _run_one(row: dict) -> str:
             raise RuntimeError(failure.get("error") or "retryable failure")
         return "gave_up"
 
-    try:
-        await status_msg.edit_text(text + _NOTE, parse_mode="HTML")
-    except Exception:
-        logging.exception("PTI retry %s: could not render the result", retry_id)
+    result_msg = await deliver_result(target, status_msg, text + _NOTE)
 
     await _handle_pti_result(
         target, text, data,
@@ -181,7 +178,7 @@ async def _run_one(row: dict) -> str:
         replied_message_id=row["reply_message_id"],
         media_signature=row["media_signature"],
         content_signature=row["content_signature"],
-        result_message_id=getattr(status_msg, "message_id", None),
+        result_message_id=getattr(result_msg, "message_id", None),
     )
     return "done"
 

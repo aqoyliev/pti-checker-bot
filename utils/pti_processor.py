@@ -734,11 +734,11 @@ async def process_mixed_media(
     `items` is a list of dicts: {"kind": "photo"|"image_doc"|"video"|"video_note"|"video_doc", "obj": <telegram file obj>}
 
     Returns ``(text, data, status_msg)`` — the formatted PASS/FAIL text, the raw
-    parsed dict, and the bot's status message in the chat. On success the status
-    message is left with the "Analyzing..." progress text; the caller chooses what
-    to render there (full result, or a hold message during vehicle-change vote).
-    On error the status message is edited with the error and ``(None, None, status_msg)``
-    is returned.
+    parsed dict, and the bot's *progress* message in the chat. On success that
+    message still reads "Analyzing..."; the caller passes it and the text to
+    ``deliver_result``, which posts the verdict as a fresh reply to the media and
+    then removes it. On error the progress message is edited with the error and
+    ``(None, None, status_msg)`` is returned.
 
     ``on_failure(retryable: bool, error: str)`` is called before returning on any
     error path, so the caller can queue the submission for a later re-run. The
@@ -948,3 +948,56 @@ async def process_mixed_media(
                 os.remove(path)
             except OSError:
                 pass
+
+
+async def deliver_result(reply_to, status_msg, text: str):
+    """Post the finished verdict as a **new** reply to the driver's media and
+    remove the progress message. Returns the message the verdict ended up in.
+
+    The verdict used to be edited into the "Analyzing…" message. An inspection
+    takes minutes, so by the time one finished that message had scrolled well up
+    the chat, and an edit raises no notification — a driver saw their result only
+    if they thought to go looking for it. A fresh message lands at the bottom
+    with the inspected video quoted above it.
+
+    **Send first, delete second.** If the send fails there is still one message
+    in the chat that can carry the outcome; deleting first would leave the driver
+    with nothing at all. A leftover progress message is noise, a lost verdict is
+    not.
+    """
+    sent = None
+    try:
+        sent = await reply_to.reply(
+            text, parse_mode="HTML", allow_sending_without_reply=False,
+        )
+    except Exception as e:
+        # Same fallback as the progress message: a post by an anonymous admin
+        # cannot be quoted, and neither can a video the driver deleted while the
+        # inspection ran.
+        logging.warning(
+            f"PTI result reply-quote unavailable ({type(e).__name__}: {e}); "
+            f"sending the result without a quote."
+        )
+        try:
+            sent = await reply_to.answer(text, parse_mode="HTML")
+        except Exception:
+            logging.exception("Failed to post the PTI result")
+
+    if sent is None:
+        # Nothing new reached the chat, so the progress message is the only place
+        # the verdict can appear — keep it and render there, as before.
+        try:
+            await status_msg.edit_text(text, parse_mode="HTML")
+            return status_msg
+        except Exception:
+            logging.exception("Failed to render the PTI result")
+            return None
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        # Deleting our own message can fail (48-hour limit, revoked rights). The
+        # driver already has the verdict; a stray "Analyzing…" is not worth an
+        # error path.
+        logging.warning("Could not remove the PTI progress message", exc_info=True)
+    return sent
