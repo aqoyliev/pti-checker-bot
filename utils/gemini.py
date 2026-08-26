@@ -8,10 +8,14 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import httpcore
+import httpx
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
 load_dotenv()
@@ -158,11 +162,50 @@ class VideoTooLongError(Exception):
         super().__init__(f"Video duration {duration:.0f}s exceeds the {MAX_VIDEO_DURATION}s limit")
 
 
+# A resumable upload session that dies mid-transfer comes back as a *400*, not a
+# 5xx: ``400 Bad Request {'message': 'Upload has already been terminated.'}``.
+# Nothing about the file is wrong -- a fresh session almost always takes it -- but
+# a 400 reads as "permanently rejected" everywhere else, so it has to be named
+# explicitly. Seen live on 2026-08-25, where it sank a whole 445-frame inspection
+# and printed the raw API error into the driver's group.
+_UPLOAD_ATTEMPTS = 3
+_UPLOAD_BACKOFF = 1.0
+
+
+def is_retryable_upload_error(e: BaseException) -> bool:
+    """True for an upload that failed *in transit* rather than being refused."""
+    if isinstance(e, genai_errors.ServerError):
+        return True
+    if isinstance(e, genai_errors.ClientError):
+        if getattr(e, "code", None) == 429:
+            return True
+        text = str(e).lower()
+        return "upload" in text and ("terminated" in text or "aborted" in text)
+    return isinstance(e, (httpx.HTTPError, httpcore.NetworkError, OSError))
+
+
 def _upload_one(client, path: str, mime_type: str, label: str):
-    return client.files.upload(
-        file=path,
-        config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=label[:40]),
-    )
+    """Upload one frame, retrying a torn-down upload session.
+
+    Frames go up 8 at a time and a long PTI is hundreds of them, so a single
+    dropped session must not sink the inspection. Only transit failures are
+    retried; a genuinely rejected file (bad mime, auth) still fails on the first
+    attempt.
+    """
+    for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
+        try:
+            return client.files.upload(
+                file=path,
+                config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=label[:40]),
+            )
+        except Exception as e:
+            if attempt == _UPLOAD_ATTEMPTS or not is_retryable_upload_error(e):
+                raise
+            logging.warning(
+                f"Upload of {label!r} failed ({type(e).__name__}), attempt "
+                f"{attempt}/{_UPLOAD_ATTEMPTS}; retrying"
+            )
+            time.sleep(_UPLOAD_BACKOFF * attempt)
 
 
 def _delete_files_background(client, files: list):

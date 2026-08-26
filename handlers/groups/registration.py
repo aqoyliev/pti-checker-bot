@@ -10,7 +10,7 @@ from handlers.admin.onboard import start_onboarding
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
-    bump_setup_nag,
+    bump_setup_nag, migrate_group_id,
 )
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
@@ -27,6 +27,31 @@ INTRO_MESSAGE = (
 # the unit comes off the title/description and the drivers are picked by an
 # admin in DM. /adddriver and /setunit still work as a manual escape hatch,
 # they are just not advertised to the group.
+
+
+@dp.message_handler(content_types=[types.ContentType.MIGRATE_TO_CHAT_ID,
+                                   types.ContentType.MIGRATE_FROM_CHAT_ID])
+async def on_chat_migrated(message: types.Message):
+    """Follow a group that Telegram upgraded to a supergroup.
+
+    The upgrade replaces the chat id outright, and the bot is not re-added, so
+    nothing else in the flow ever learns the new one: the old id keeps taking
+    reminders that bounce, and a PTI sent in the new chat is refused by
+    ``_group_ready`` because no ``groups`` row matches it -- silently, which is
+    what makes this worth catching at the service message rather than waiting
+    for something to fail.
+
+    Telegram announces the upgrade twice, once on each side, and both are
+    handled: the pair is the same either way round, and ``migrate_group_id`` is
+    a no-op the second time.
+    """
+    if message.migrate_to_chat_id:
+        old_id, new_id = message.chat.id, message.migrate_to_chat_id
+    else:
+        old_id, new_id = message.migrate_from_chat_id, message.chat.id
+    if await migrate_group_id(old_id, new_id):
+        logging.info("group %s was upgraded to a supergroup; moved it to %s",
+                     old_id, new_id)
 
 
 @dp.message_handler(content_types=types.ContentType.NEW_CHAT_MEMBERS)
