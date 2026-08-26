@@ -11,6 +11,7 @@ from aiogram.utils.exceptions import (
     CantRestrictChatOwner,
     ChatNotFound,
     MethodIsNotAvailable,
+    MigrateToChat,
     NotEnoughRightsToRestrict,
 )
 
@@ -19,7 +20,7 @@ from data.config import ADMINS, ENFORCEMENT_ENABLED
 from utils.db import (
     get_all_registered_groups, get_drivers,
     get_pti_count_this_week, get_last_pti,
-    mark_group_inactive, mark_reminder_sent,
+    mark_group_inactive, mark_reminder_sent, migrate_group_id,
 )
 from utils.reminder_logic import may_remind
 
@@ -211,6 +212,16 @@ async def run_compliance_check():
             try:
                 await bot.send_message(group_id, reminder)
                 await mark_reminder_sent(group_id, now)
+            except MigrateToChat as e:
+                # Upgraded to a supergroup: the chat moved, it is not gone, so
+                # this must not reach _deregister_group below. Nothing is sent
+                # or stamped this pass -- mark_reminder_sent names the id that
+                # has just moved -- and the next hourly pass finds the group
+                # under its new id with its history intact.
+                if await migrate_group_id(group_id, e.migrate_to_chat_id):
+                    logging.info("Group %s was upgraded to supergroup %s; moved it",
+                                 group_id, e.migrate_to_chat_id)
+                continue
             except _UNREACHABLE_EXCEPTIONS as e:
                 await _deregister_group(group_id, type(e).__name__)
                 continue

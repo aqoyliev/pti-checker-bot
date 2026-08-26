@@ -103,6 +103,24 @@ require real secrets. Keep new unit tests pure (no network / no DB).
   each. A fresh PTI still clears the overdue state inside that window (`reset`
   writes nothing to the chat), and the admin report is not a reminder: it still
   lists every overdue driver every pass.
+- **A `MigrateToChat` is a move, not a failure.** When a basic group is upgraded
+  to a supergroup Telegram issues a brand-new chat id, and it is not just the
+  reminders that break: a PTI posted in the new chat finds no `groups` row, so
+  `_group_ready` refuses it *silently*. `db.migrate_group_id` moves the whole
+  history in one transaction (`handlers/groups/registration.on_chat_migrated`
+  catches the service message; the two hourly senders catch the exception in
+  case that update was missed). Neither sender re-sends after migrating: every
+  stamp the caller writes is keyed on the id that just moved, so the send waits
+  for the next pass rather than going out with its 24-hour slot unstamped. It
+  must never reach the unreachable/deactivate path — the chat moved, it is live.
+- **A dropped Gemini upload comes back as a 400, and is still transient.**
+  `Upload has already been terminated.` means the resumable session died
+  mid-transfer, not that the file was refused. `_upload_one` retries it (a long
+  PTI is hundreds of frames, 8 at a time, so one dropped session must not sink
+  the inspection) and `pti_processor._is_transient` counts it, so an exhausted
+  retry fails over to the next API key and shows the try-again message instead
+  of printing raw API JSON into the driver's group. Don't fold it back into a
+  plain 400.
 - **There is no calendar-based "nudge" reminder — only the overdue one.** A
   twice-weekly nudge (#8, `decide_weekly`) used to fire every Monday and Thursday
   at 14:00 UTC regardless of same-day activity, so a driver who had already

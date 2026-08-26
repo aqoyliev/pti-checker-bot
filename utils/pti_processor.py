@@ -25,6 +25,18 @@ def _is_service_overload(e: Exception) -> bool:
     return isinstance(e, genai_errors.ClientError) and getattr(e, "code", None) == 429
 
 
+def _is_transient(e: BaseException) -> bool:
+    """Worth another attempt — on the next API key, or as the 'try again' message.
+
+    A dropped upload session belongs here even though it arrives as a 400: the
+    frame is fine, the transfer isn't. Without it the whole inspection died on
+    the first attempt and the driver got the raw API JSON.
+    """
+    return (isinstance(e, _TRANSIENT_NET_ERRORS)
+            or _is_service_overload(e)
+            or is_retryable_upload_error(e))
+
+
 def _is_model_retired(e: Exception) -> bool:
     """404 from Gemini meaning *this key may not use this model*.
 
@@ -58,6 +70,7 @@ from utils.gemini import (
     extract_frames,
     get_active_model,
     get_api_keys,
+    is_retryable_upload_error,
     parse_result,
     set_active_model,
 )
@@ -178,7 +191,7 @@ async def _call_gemini_with_retry(fn, *args, **kwargs):
                     last_exc = e
                     logging.warning(f"Gemini model {model} unavailable on key #{i + 1}/{len(ordered)} (404)")
                     continue
-                if not (isinstance(e, _TRANSIENT_NET_ERRORS) or _is_service_overload(e)):
+                if not _is_transient(e):
                     raise
                 last_exc = e
                 if i + 1 < len(ordered):
@@ -251,7 +264,7 @@ async def _run_split_passes(all_images: list, keys: list[str], history: list[dic
                 logging.warning(f"Split chunk lost: key cannot serve {model} (404)")
                 overload_exc = r
                 continue
-            if not (isinstance(r, _TRANSIENT_NET_ERRORS) or _is_service_overload(r)):
+            if not _is_transient(r):
                 raise r
             overload_exc = r
             continue
@@ -902,7 +915,7 @@ async def process_mixed_media(
         return text, data, status_msg
 
     except (genai_errors.ServerError, genai_errors.ClientError) as e:
-        if not _is_service_overload(e):
+        if not _is_transient(e):
             logging.exception("PTI mixed-media processing error")
             await status_msg.edit_text(f"An error occurred: {e}")
             # A model every key has refused, an exhausted quota, a billing wall:
@@ -911,7 +924,7 @@ async def process_mixed_media(
             _failed(_is_model_retired(e) or getattr(e, "code", None) in (401, 403, 429),
                     f"{type(e).__name__}: {str(e)[:200]}")
             return None, None, status_msg
-        logging.warning(f"Gemini overloaded after retries (mixed-media flow): {type(e).__name__}")
+        logging.warning(f"Gemini transient failure after retries (mixed-media flow): {type(e).__name__}: {str(e)[:150]}")
         await status_msg.edit_text(OVERLOAD_USER_MESSAGE)
         _failed(True, f"overloaded: {type(e).__name__}")
         return None, None, status_msg

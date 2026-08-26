@@ -19,7 +19,9 @@ import logging
 from datetime import datetime
 from html import escape
 
-from aiogram.utils.exceptions import BotBlocked, BotKicked, ChatNotFound, MethodIsNotAvailable
+from aiogram.utils.exceptions import (
+    BotBlocked, BotKicked, ChatNotFound, MethodIsNotAvailable, MigrateToChat,
+)
 
 from loader import bot
 from utils.email_alerts import send_overdue_alert
@@ -29,6 +31,7 @@ from utils.db import (
     get_last_pti_for_group,
     mark_escalation_reminded,
     mark_group_inactive,
+    migrate_group_id,
     mark_overdue_reminded,
     mark_reminder_sent,
     mark_unreachable,
@@ -95,7 +98,7 @@ def _escalation_text(drivers: list[dict]) -> str:
 
 
 async def _send(group_id: int, text: str) -> bool:
-    """Send a reminder; return False if the group looks unreachable.
+    """Send a reminder; return False if nothing should be written for this id.
 
     Deactivation needs UNREACHABLE_LIMIT *consecutive* failures. A single one
     proves nothing: the bot talks to a local Bot API server whose chat state is
@@ -107,6 +110,29 @@ async def _send(group_id: int, text: str) -> bool:
         await bot.send_message(group_id, text, parse_mode="HTML")
         await clear_unreachable(group_id)
         return True
+    except MigrateToChat as e:
+        # The group was upgraded to a supergroup and the service message that
+        # announces it never reached the handler (the bot was down, or the
+        # update aged out of long polling). Nothing here is unreachable -- the
+        # chat moved -- so follow it and deliver to the new id rather than
+        # spending a strike, which is what turned this into an hourly error for
+        # three groups on 2026-08-25.
+        new_id = e.migrate_to_chat_id
+        if await migrate_group_id(group_id, new_id):
+            logging.info("Group %s was upgraded to supergroup %s; moved it",
+                         group_id, new_id)
+        else:
+            logging.warning(
+                "Group %s migrated to %s but the rows could not be moved "
+                "(the new id already has a group)", group_id, new_id,
+            )
+        # Deliberately not re-sent here. Every stamp the caller writes next --
+        # last_reminder_at, overdue_reminded_at -- is keyed on group_id, and
+        # the row this one names has just moved, so those writes would hit
+        # nothing and the unit would be reminded again an hour later. The next
+        # pass finds it under its new id with its history intact and reminds it
+        # normally, which costs one hour and keeps the one-a-day cap honest.
+        return False
     except _UNREACHABLE as e:
         strikes = await mark_unreachable(group_id)
         if strikes >= UNREACHABLE_LIMIT:
@@ -136,7 +162,8 @@ async def post_reminder(group_id: int, text: str, now: datetime,
       True  — sent, and the slot is now stamped
       None  — the unit was already reminded within 24 hours; nothing sent, and
               nothing is wrong
-      False — the group looked unreachable; stop messaging it this pass
+      False — nothing was sent and nothing should be written for this
+              group_id this pass: it looked unreachable, or the chat moved
     """
     if not may_remind(now, last_reminder_at):
         return None
