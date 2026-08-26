@@ -23,11 +23,10 @@ and only runs once the admin confirms. Nothing is written until then, not even
 the list itself.
 
 Between two lists, the titles are swept on their own once a day
-(``run_title_sweep``). A title naming a different unit re-files the
-group if that unit is on the stored list and retires it if it isn't; a title
-that has stopped naming a unit retires it; a title still naming the stored unit
-is silent, even if that unit has left the list -- that last one belongs to the
-confirmed sweep below. It runs unattended, so it reads the titles fresh from
+(``run_title_sweep``). A title naming a different unit re-files the group under
+it; a title that has stopped naming a unit retires it; a title still naming the
+stored unit is silent, even if that unit has left the list -- that last one
+belongs to the confirmed sweep below. It runs unattended, so it reads the titles fresh from
 Telegram and skips every group it cannot read: "couldn't fetch" must never be
 mistaken for "the truck is gone".
 
@@ -152,7 +151,7 @@ def groups_to_deactivate(groups: list[dict], units: list[str]) -> list[dict]:
     return out
 
 
-def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
+def title_unit_changes(groups: list[dict]) -> list[dict]:
     """Active groups whose title now names a different unit than the one on file.
 
     Returns ``[{"group": g, "old": str, "new": str}]``, oldest unit first.
@@ -162,24 +161,28 @@ def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
     number would be retired by the sweep below for a unit that simply moved.
     Refreshing first is what keeps a live truck from being deactivated.
 
-    A parsed title is only a *suggestion* (a bare digit-run regex measured 79.5%
-    across the fleet, and six titles produced a different valid unit rather than
-    nothing), so three things must all hold before one is offered, and even then
-    an admin confirms it:
+    **The title is taken at its word.** A rename used to additionally require
+    the parsed number to be on the stored active-units list. That requirement
+    was dropped on 2026-08-26 at the fleet's instruction -- the rule is that a
+    title naming a new unit *is* the truck changing. The list is pasted in by
+    hand and goes stale between pastes (JRD's was twelve days old at the time),
+    so a truck that had just arrived was never on it and its rename was skipped
+    in silence, which is the failure the fleet actually hits. The cost, stated
+    plainly: a misparsed or mistyped title now re-files a group unattended. The
+    sweep reports every rename it made and the panel reverses one.
+
+    Three things still hold, because they are integrity rather than
+    corroboration:
 
     * the group is already configured -- an un-onboarded group belongs to
       onboarding, which asks a human about the very same guess;
     * the title does not read as retired ("INACTIVE", "moved") -- those are
       about to be deactivated anyway, and their titles are the least reliable;
-    * the parsed number is on the incoming weekly list. This is the real
-      corroboration: it means the title names a truck the fleet says is running,
-      not a phone number, a year or a typo.
-
-    Collisions are dropped rather than guessed at: if two groups' titles claim
-    the same unit, or the claimed unit is already another active group's, none
-    of them move. Two groups filed under one unit is the failure this avoids.
+    * no collision. If two groups' titles claim the same unit, or the claimed
+      unit is already another active group's, none of them move. Two groups
+      filed under one unit is not a worse guess, it is a broken denominator --
+      the hourly compliance pass reads both.
     """
-    wanted = {normalize_unit(u) for u in units}
     active = [g for g in groups if g.get("is_active", True)]
     taken = {normalize_unit(g.get("unit_number")) for g in active}
 
@@ -192,7 +195,7 @@ def title_unit_changes(groups: list[dict], units: list[str]) -> list[dict]:
         if not title or looks_retired(title):
             continue
         parsed = normalize_unit(parse_unit(title) or "")
-        if not parsed or parsed == stored or parsed not in wanted:
+        if not parsed or parsed == stored:
             continue
         candidates.append({"group": g, "old": stored, "new": parsed})
 
@@ -229,10 +232,11 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
     the one place it may still be read that way is ``/units``, where a human
     previews the casualties and confirms them.
 
-    So a title naming some *other* unit is now simply left alone here. If that
-    number is on the list, ``title_unit_changes`` re-files the group; if it
-    isn't, nothing happens at all, which is the correct answer when the only
-    thing saying the truck is dead is a list that drops live ones.
+    So a title naming some *other* unit is simply not this function's business:
+    ``title_unit_changes`` re-files the group under the number the title now
+    carries. Retiring and re-filing are different answers to a changed title,
+    and only the second one is reversible from the panel without losing a
+    group's history.
 
     Skipped on purpose:
 
@@ -431,7 +435,7 @@ async def cmd_units(message: types.Message):
     # Order matters: re-file first, then decide what to retire. A truck whose
     # number changed this week is still running, and judging it on the number it
     # no longer has would deactivate a live group.
-    renames = title_unit_changes(groups, units)
+    renames = title_unit_changes(groups)
     moved = apply_renames(groups, renames)
     casualties = groups_to_deactivate(moved, units)
     # Reported either way, including on the quiet path where nothing changes:
@@ -681,11 +685,11 @@ async def run_title_sweep() -> str | None:
     groups = [g for g in await get_all_groups() if g.get("is_active", True)]
     fresh, skipped = await _refresh_titles(groups)
 
-    units = list(await get_active_units())
     # Same order as the weekly sweep: re-file first, then judge what is left. A
-    # truck that moved to a listed unit is not a truck that lost its number --
-    # judging it before the re-file would retire it for naming the new one.
-    renames = title_unit_changes(fresh, units)
+    # truck whose title now names another unit is not a truck that lost its
+    # number -- judging it before the re-file would retire it for naming the
+    # new one.
+    renames = title_unit_changes(fresh)
     casualties = title_deactivations(apply_renames(fresh, renames))
 
     if not renames and not casualties:
@@ -887,10 +891,9 @@ async def cmd_retitle(message: types.Message):
 
     ``run_title_sweep`` only reaches this once a day; a title that changes just
     after a sweep otherwise waits until tomorrow to be re-filed. This runs
-    the exact same check (``title_unit_changes``, same corroboration against
-    the stored active-units list -- a bare title guess is never enough on its
-    own) whenever an admin wants it, and hands the result to a human who can
-    deselect any candidate before confirming, same as /titlecheck.
+    the exact same check (``title_unit_changes``) whenever an admin wants it,
+    and hands the result to a human who can deselect any candidate before
+    confirming, same as /titlecheck.
     """
     if message.from_user.id not in _ADMIN_IDS:
         return
@@ -900,7 +903,7 @@ async def cmd_retitle(message: types.Message):
     groups = [g for g in await get_all_groups() if g.get("is_active", True)]
     fresh, skipped = await _refresh_titles(groups)
     units = list(await get_active_units())
-    renames = title_unit_changes(fresh, units)
+    renames = title_unit_changes(fresh)
 
     if not renames:
         text = "🟢 No group's title names a different unit from the active list."

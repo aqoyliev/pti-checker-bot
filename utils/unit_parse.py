@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import re
 
-# "SUB <sublease number> // <real unit>" -- the real unit is the second number.
-_SUB = re.compile(r"\bSUB\b\s*#?\s*\d{3,7}\s*[/|-]+\s*(\d{3,7})", re.IGNORECASE)
 # The unit itself: 3-7 digits, optionally carrying one or two letters glued on
 # either side, with a letter prefix allowed to join through a hyphen. All four
 # shapes are real fleet numbers -- "F9121", "ML2432", "1002FT", "T-120" -- and
@@ -29,6 +27,13 @@ _SUB = re.compile(r"\bSUB\b\s*#?\s*\d{3,7}\s*[/|-]+\s*(\d{3,7})", re.IGNORECASE)
 # worse. Letters never cross a space, so "1136 LORISTON" stays 1136 and does
 # not become "1136 LO".
 _UNIT = r"[A-Za-z]{0,2}-?\d{3,7}[A-Za-z]{0,2}"
+# "SUB <sublease number> // <real unit>" -- the real unit is the SECOND number.
+# The word "unit" may sit between the two ("SUB-Unit# 543659 - 488090"), and it
+# has to be swallowed here rather than left to _LABELLED, which would otherwise
+# read the sublease number as the unit and re-file the group under it.
+_SUB = re.compile(
+    rf"\bSUB\b[\s#:-]*(?:UNIT|TRUCK)?[\s#:-]*\d{{3,7}}\s*[/|-]+\s*({_UNIT})",
+    re.IGNORECASE)
 # "UNIT# 1216", "UNIT 1216", "TRUCK# 147085", "Unit: 001A"
 _LABELLED = re.compile(rf"\b(?:UNIT|TRUCK)\b\s*[#:]?\s*({_UNIT})", re.IGNORECASE)
 # A bare leading number: "1136 LORISTON...", "0822 // FRANCOIS...",

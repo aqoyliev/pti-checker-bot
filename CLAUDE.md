@@ -264,8 +264,7 @@ re-checks every active group's title and reports only when something changed:
 
 | The title now names | Result |
 | --- | --- |
-| a different unit, on the stored active list | re-filed |
-| a different unit, **not** on the list | **nothing** — see below |
+| a different unit | re-filed under it |
 | no unit at all, or INACTIVE / moved | deactivated |
 | the same unit it always did | silent, even if that unit left the list |
 
@@ -308,11 +307,19 @@ What remains is still a much wider net than the weekly list's: ~20% of fleet
 titles carry no parseable number. Reversing one is a manual panel decision, same
 as any other reactivation.
 
-A title parse is still only a suggestion, so a rename is offered only when the
-group is already configured, its title doesn't read as retired, and — the real
-corroboration — **the parsed number is on the incoming list**. Collisions (two
-titles claiming one unit, or a unit another active group already holds) are
-dropped rather than guessed at. Nothing is written without the admin confirming.
+A rename needs the group to be already configured and its title not to read as
+retired. It used to need one more thing — **the parsed number on the incoming
+list** — and that was **removed 2026-08-26 at the fleet's instruction: a title
+naming a new unit *is* the truck changing.** The list is pasted in by hand and
+goes stale between pastes (JRD's was twelve days old), so requiring it skipped,
+in silence, exactly the case a rename exists for: a truck that had just
+arrived. The cost is real and was measured before the change — across both
+fleets it turned 1 re-file into 3, and one of the two new ones was a misparse
+(`SUB-Unit# 543659 - 488090` read as 543659; `_SUB` now swallows that "unit"
+so the sublease number can't be claimed by `_LABELLED`). Collisions (two titles
+claiming one unit, or a unit another active group already holds) are still
+dropped rather than guessed at — two groups under one unit is a broken
+compliance denominator, not a worse guess.
 
 **The weekly list also retires groups.** Any active group whose `unit_number` is
 missing from the new list is deactivated (`groups_to_deactivate` →

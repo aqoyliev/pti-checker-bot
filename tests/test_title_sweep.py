@@ -108,14 +108,13 @@ def test_already_inactive_group_is_skipped():
 
 def test_a_renamed_group_is_not_retired_for_losing_its_old_number():
     groups = [_g(1, "1225", "UNIT 1330 / MAGAN")]
-    renames = title_unit_changes(groups, ["1330"])
+    renames = title_unit_changes(groups)
     assert _dead(apply_renames(groups, renames)) == []
 
 
 def test_rename_and_retire_can_both_happen_in_one_sweep():
     groups = [_g(1, "1225", "UNIT 1330 / A"), _g(2, "1400", "INACTIVE - B")]
-    units = ["1330", "1400"]
-    renames = title_unit_changes(groups, units)
+    renames = title_unit_changes(groups)
     after = apply_renames(groups, renames)
     assert [(r["old"], r["new"]) for r in renames] == [("1225", "1330")]
     assert _dead(after) == [2]
@@ -127,7 +126,7 @@ def test_a_collision_leaves_both_groups_alone():
     # unresolved collision must not turn into a deactivation through the back
     # door.
     groups = [_g(1, "1225", "UNIT 1330 / A"), _g(2, "1226", "UNIT 1330 / B")]
-    renames = title_unit_changes(groups, ["1330"])
+    renames = title_unit_changes(groups)
     assert renames == []
     assert _dead(apply_renames(groups, renames)) == []
 

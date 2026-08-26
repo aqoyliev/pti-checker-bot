@@ -42,6 +42,9 @@ from utils.unit_parse import (
     # sub-leases: the FIRST number is the sublease, the second is the unit
     ("SUB 588197 // 212566 FARAH, MOHAMED ABDI", "212566"),
     ("SUB 429819 /// 728443 - EVARIS, PIERRE", "728443"),
+    # ... including when "unit" sits between the two, which would otherwise let
+    # the labelled rule claim the sublease number
+    ("SUB-Unit# 543659 - 488090 - BRITO, DANYLLO / MEDEIROS, RONIVALDO", "488090"),
     # no unit present at all
     ("GELIN, BIENNEL / EMMANUEL DEME", None),
     ("COBO, JORGE / BURGOS, JUAN", None),

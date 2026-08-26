@@ -72,7 +72,7 @@ def test_a_renamed_group_covers_its_new_unit_not_its_old_one():
     # the number it no longer has.
     groups = [_g(1, "1225", "UNIT 1330 / MAGAN")]
     units = ["1330"]
-    moved = apply_renames(groups, title_unit_changes(groups, units))
+    moved = apply_renames(groups, title_unit_changes(groups))
 
     assert _missing(moved, units) == []
     assert _missing(groups, units) == ["1330"]
