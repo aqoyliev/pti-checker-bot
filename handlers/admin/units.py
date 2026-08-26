@@ -22,8 +22,8 @@ once flipped ``is_active`` FALSE across the fleet -- so the sweep is *previewed*
 and only runs once the admin confirms. Nothing is written until then, not even
 the list itself.
 
-Between two lists, the titles are swept on their own three times a week
-(Mon/Wed/Fri, ``run_title_sweep``). A title naming a different unit re-files the
+Between two lists, the titles are swept on their own once a day
+(``run_title_sweep``). A title naming a different unit re-files the
 group if that unit is on the stored list and retires it if it isn't; a title
 that has stopped naming a unit retires it; a title still naming the stored unit
 is silent, even if that unit has left the list -- that last one belongs to the
@@ -81,7 +81,7 @@ from utils.db import (
     set_setting,
 )
 from utils.group_activity import GROUP_QUIET_DAYS, has_full_window, quiet_groups
-from utils.unit_parse import looks_retired, parse_unit
+from utils.unit_parse import looks_retired, parse_unit, title_names_unit
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
@@ -236,6 +236,12 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
 
     Skipped on purpose:
 
+    * **A title that still prints the stored unit.** ``parse_unit`` is a guess
+      about a *format*; "is my own number still on this title?" is not, so it
+      is asked first and vetoes the retirement (``title_names_unit``). A
+      hyphenated prefix the regex could not read -- "T-120 QUINTERO, JOHN /
+      ..." -- retired a running truck on 2026-08-26. A ``looks_retired`` marker
+      still wins over it, since the fleet leaves the number on those titles.
     * **No stored unit.** An un-onboarded group has no truck to retire, and its
       title not parsing is precisely the case onboarding exists to ask a human
       about -- deactivating it would end that conversation before it started.
@@ -253,6 +259,11 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
             continue
         title = g.get("title")
         if not title:
+            continue
+        if not looks_retired(title) and title_names_unit(title, stored):
+            # The number on file is still printed on the title, whatever
+            # parse_unit made of the format. A retired marker still wins: the
+            # fleet writes "INACTIVE - 1225 MAGAN" with the number left intact.
             continue
         parsed = normalize_unit(parse_unit(title) or "")
         if looks_retired(title) or not parsed:
@@ -570,8 +581,6 @@ async def cmd_quiet(message: types.Message):
 # so it leans on the guards in the two pure functions above -- above all the
 # rule that a re-file needs the new number to be on the stored active list.
 
-# Which days it runs, UTC. Three times a week, spread evenly.
-TITLE_SWEEP_WEEKDAYS = frozenset({0, 2, 4})  # Mon, Wed, Fri
 _TITLE_SWEEP_KEY = "title_sweep_last_run_on"
 # Pause between get_chat calls; ~150 groups, so this costs half a minute and
 # keeps the sweep well clear of Telegram's rate limits.
@@ -579,14 +588,14 @@ _TITLE_FETCH_DELAY = 0.2
 
 
 def title_sweep_due(now: datetime, last_run: date | None) -> bool:
-    """True on a sweep day that hasn't been swept yet.
+    """True on a day that has not been swept yet — every day, UTC.
 
     Keyed on the date rather than an elapsed interval so the schedule can't
     drift: a restart, a slow tick or a run that took an hour still leaves the
-    next sweep on the next sweep day, and never twice in one day.
+    next sweep on the next day, and never twice in one day. The six-hourly tick
+    therefore reaches a due sweep within six hours and finds the other three
+    ticks already done.
     """
-    if now.weekday() not in TITLE_SWEEP_WEEKDAYS:
-        return False
     return last_run != now.date()
 
 
@@ -876,8 +885,8 @@ def _retitle_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboardMar
 async def cmd_retitle(message: types.Message):
     """On-demand version of the title sweep's rename half.
 
-    ``run_title_sweep`` only reaches this Mon/Wed/Fri; a title that changes the
-    day after a sweep otherwise waits up to two days to be re-filed. This runs
+    ``run_title_sweep`` only reaches this once a day; a title that changes just
+    after a sweep otherwise waits until tomorrow to be re-filed. This runs
     the exact same check (``title_unit_changes``, same corroboration against
     the stored active-units list -- a bare title guess is never enough on its
     own) whenever an admin wants it, and hands the result to a human who can
@@ -1048,8 +1057,8 @@ async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
 
 async def units_refresh_loop():
     """Background loop: nudge the admins when the units list goes stale, sweep
-    the group titles three times a week, and keep the message-count buckets from
-    growing without bound.
+    the group titles once a day, and keep the message-count buckets from growing
+    without bound.
 
     One loop rather than three tasks — the tick is six hours and every step is
     guarded, so a step that throws costs only itself.

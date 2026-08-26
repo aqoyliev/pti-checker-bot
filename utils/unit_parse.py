@@ -22,14 +22,18 @@ import re
 
 # "SUB <sublease number> // <real unit>" -- the real unit is the second number.
 _SUB = re.compile(r"\bSUB\b\s*#?\s*\d{3,7}\s*[/|-]+\s*(\d{3,7})", re.IGNORECASE)
+# The unit itself: 3-7 digits, optionally carrying one or two letters glued on
+# either side, with a letter prefix allowed to join through a hyphen. All four
+# shapes are real fleet numbers -- "F9121", "ML2432", "1002FT", "T-120" -- and
+# dropping the letters returns a *different* unit rather than none, which is
+# worse. Letters never cross a space, so "1136 LORISTON" stays 1136 and does
+# not become "1136 LO".
+_UNIT = r"[A-Za-z]{0,2}-?\d{3,7}[A-Za-z]{0,2}"
 # "UNIT# 1216", "UNIT 1216", "TRUCK# 147085", "Unit: 001A"
-_LABELLED = re.compile(r"\b(?:UNIT|TRUCK)\b\s*[#:]?\s*(\d{3,7})", re.IGNORECASE)
-# A bare leading number: "1136 LORISTON...", "0822 // FRANCOIS...". Also
-# tolerates one or two letters glued directly onto the digits with no space
-# ("F9121 BOYKIN...", "ML2432 DEANS...") -- some units in the fleet carry a
-# letter prefix, and dropping it would silently return the wrong unit. Still
-# anchored to the very start of the title, same as the plain-digit case.
-_LEADING = re.compile(r"^\s*[^\w]*([A-Za-z]{0,2}\d{3,7})\b")
+_LABELLED = re.compile(rf"\b(?:UNIT|TRUCK)\b\s*[#:]?\s*({_UNIT})", re.IGNORECASE)
+# A bare leading number: "1136 LORISTON...", "0822 // FRANCOIS...",
+# "T-120 QUINTERO...". Anchored to the very start of the title.
+_LEADING = re.compile(rf"^\s*[^\w]*({_UNIT})\b")
 
 
 def parse_unit(title: str | None) -> str | None:
@@ -75,6 +79,32 @@ def guess_unit(title: str | None, description: str | None = None) -> tuple[str |
     if unit:
         return unit, "description"
     return None, ""
+
+
+def title_names_unit(title: str | None, unit: str | None) -> bool:
+    """True if `unit` is still printed in `title`, as a whole token.
+
+    A narrower question than `parse_unit`: not "what unit does this title name?"
+    but "is the unit already on file still on it?" — which needs no guessing, so
+    it holds for whatever format the fleet invents next.
+
+    That distinction retired a running truck on 2026-08-26. The title sweep
+    decides a group is dead when its title stops naming a unit, and it read that
+    off `parse_unit` alone; the group titled "T-120 QUINTERO, JOHN / ..." had its
+    number printed right there, and only the regex could not read a hyphenated
+    prefix. Consulting the stored unit first can only ever *prevent* a
+    deactivation, so a format nobody anticipated now costs a missed re-file
+    instead of a live group.
+
+    Bounded by non-alphanumeric edges on both sides: "120" must not match inside
+    "21203", and "1002" must not match inside "1002FT" — a title naming 1002FT
+    is not a title naming 1002.
+    """
+    unit = (unit or "").strip()
+    if not title or not unit:
+        return False
+    return bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(unit)}(?![A-Za-z0-9])",
+                          title, re.IGNORECASE))
 
 
 def looks_retired(title: str | None) -> bool:

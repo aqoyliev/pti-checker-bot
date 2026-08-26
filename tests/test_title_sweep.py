@@ -41,6 +41,31 @@ def test_title_still_naming_a_unit_is_left_alone():
     assert _dead([_g(1, "1225", "1225 / MAGAN")]) == []
 
 
+# ---------- a stored unit on the title vetoes the retirement ----------
+
+def test_a_unit_the_parser_cannot_read_is_not_a_missing_unit():
+    """The 2026-08-26 regression: a running JRD truck retired for its own name.
+
+    parse_unit could not read a hyphenated letter prefix, so a title with the
+    number printed on it read as "no unit at all". The stored unit is now looked
+    for directly, which needs no guess about the format.
+    """
+    assert _dead([_g(1, "T-120", "T-120 QUINTERO, JOHN / LOUISSAINT, JEAN R")]) == []
+
+
+def test_the_veto_matches_whole_tokens_only():
+    # Titles that parse to nothing, so only the veto could save them.
+    # "120" inside "21203" is not this group's unit still being on the title...
+    assert _dead([_g(1, "120", "MAGAN, MOHAMED 21203")]) == [1]
+    # ...and a title naming 1002FT is not a title naming 1002.
+    assert _dead([_g(1, "1002", "MAGAN, MOHAMED 1002FT")]) == [1]
+
+
+def test_a_retired_marker_still_wins_over_the_veto():
+    # The fleet leaves the number on these: "INACTIVE - 1225 MAGAN".
+    assert _dead([_g(1, "1225", "INACTIVE - 1225 MAGAN")]) == [1]
+
+
 # ---------- the active list is never consulted here ----------
 
 def test_a_title_naming_some_other_unit_is_never_retired():
@@ -113,22 +138,14 @@ def _at(y, m, d) -> datetime:
     return datetime(y, m, d, 7, 0)
 
 
-def test_runs_on_monday_wednesday_friday():
-    # 2026-08-10 is a Monday.
-    assert title_sweep_due(_at(2026, 8, 10), None)
-    assert title_sweep_due(_at(2026, 8, 12), None)
-    assert title_sweep_due(_at(2026, 8, 14), None)
-
-
-def test_does_not_run_on_other_days():
-    assert not title_sweep_due(_at(2026, 8, 11), None)
-    assert not title_sweep_due(_at(2026, 8, 13), None)
-    assert not title_sweep_due(_at(2026, 8, 15), None)
-    assert not title_sweep_due(_at(2026, 8, 16), None)
+def test_runs_every_day():
+    # 2026-08-10 is a Monday; the whole week is a sweep day now.
+    for day in range(10, 17):
+        assert title_sweep_due(_at(2026, 8, day), None)
 
 
 def test_does_not_run_twice_in_one_day():
-    # The six-hourly tick hits every sweep day four times over.
+    # The six-hourly tick hits every day four times over.
     assert not title_sweep_due(_at(2026, 8, 12), date(2026, 8, 12))
 
 

@@ -13,6 +13,7 @@ from utils.unit_parse import (
     looks_retired,
     parse_unit,
     parse_unit_from_description,
+    title_names_unit,
 )
 
 
@@ -27,9 +28,14 @@ from utils.unit_parse import (
     ("1136 LORISTON, ALEX FRANCOIS // JOSEPH , ANTOINE", "1136"),
     ("0822 // FRANCOIS, DIKENS / HERNANDEZ, FRANCOIS", "0822"),
     ("1157 / MCCLAIN, DRANTON / SIMS, RANDY A", "1157"),
-    # a letter prefix glued straight onto the leading digits is part of the unit
+    # letters are part of the unit: glued in front, joined by a hyphen, or
+    # trailing. All four shapes are live fleet numbers.
     ("F9121 BOYKIN, LEON / MARTINEZ HERNANDEZ, MARIO (ML)", "F9121"),
     ("ML2432 DEANS, DAVID", "ML2432"),
+    ("T-120 QUINTERO, JOHN / LOUISSAINT, JEAN R (ML)", "T-120"),
+    ("1002FT SMITH, JOHN", "1002FT"),
+    # ... but never across a space, or a surname becomes part of the number
+    ("1136 LO", "1136"),
     # ... but a unit buried after other words is still out of reach -- the
     # parser only ever looks at the very start of the title.
     ("TEAM \U0001F981 2336 IBRAAHIIMI, LIBAN / ABDIRAHMAN AWIL", None),
@@ -45,6 +51,25 @@ from utils.unit_parse import (
 ])
 def test_parse_unit(title, expected):
     assert parse_unit(title) == expected
+
+
+@pytest.mark.parametrize("unit,title,expected", [
+    # the 2026-08-26 regression: the number was on the title all along
+    ("T-120", "T-120 QUINTERO, JOHN / LOUISSAINT, JEAN R (ML)", True),
+    ("1225", "1225 / MAGAN", True),
+    ("1225", "UNIT# 1225 MAGAN", True),
+    ("1225", "MAGAN, MOHAMED", False),
+    # whole tokens only, both edges
+    ("120", "21203 MAGAN", False),
+    ("1002", "MAGAN 1002FT", False),
+    ("1002FT", "1002FT MAGAN", True),
+    # case is not a reason to retire a truck
+    ("t-120", "T-120 QUINTERO", True),
+    ("", "1225 MAGAN", False),
+    ("1225", None, False),
+])
+def test_title_names_unit(unit, title, expected):
+    assert title_names_unit(title, unit) is expected
 
 
 def test_labelled_unit_wins_over_a_leading_number():

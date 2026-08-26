@@ -258,9 +258,9 @@ group when its truck changes — so a group still filed under the old number wou
 be retired for a unit that merely moved. Both land in one `apply_units_sweep`
 transaction, renames applied first.
 
-**Titles are also swept on their own, three times a week.** Between weekly
-lists, `run_title_sweep` (Mon/Wed/Fri UTC, from `units_refresh_loop`) re-checks
-every active group's title and reports only when something changed:
+**Titles are also swept on their own, once a day.** Between weekly lists,
+`run_title_sweep` (daily, keyed on the UTC date, from `units_refresh_loop`)
+re-checks every active group's title and reports only when something changed:
 
 | The title now names | Result |
 | --- | --- |
@@ -270,7 +270,7 @@ every active group's title and reports only when something changed:
 | the same unit it always did | silent, even if that unit left the list |
 
 The last row belongs to `/units`, where a human confirms it. It writes
-unattended, so three things hold it up:
+unattended, so four things hold it up:
 
 - **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
   cache — the cache is refreshed opportunistically from the message middleware,
@@ -281,6 +281,17 @@ unattended, so three things hold it up:
   was mass-deactivated once before.
 - **Un-onboarded groups are never retired** — no stored unit means no truck, and
   an unparseable title there is the question onboarding is waiting to ask.
+- **A title still printing the stored unit is never retired**, whatever
+  `parse_unit` made of it (`title_names_unit`). "Does this title name *a* unit?"
+  is a guess about a format; "is *my* number still on it?" is not. On
+  2026-08-26 the daily sweep retired a running JRD truck titled
+  `T-120 QUINTERO, JOHN / ...` — the number was right there and only the regex
+  could not read a hyphenated prefix. Unit numbers are **not always digits**:
+  `T-120`, `F9121`, `ML2432` and `1002FT` are all real, so `_UNIT` in
+  `utils/unit_parse.py` allows one or two letters glued on either side and a
+  hyphen after a letter prefix — never across a space, or "1136 LORISTON"
+  would parse as "1136 LO". A `looks_retired` marker still overrides the veto:
+  the fleet leaves the number on those titles.
 
 **`title_deactivations` reads the title alone — it never consults
 `active_units`.** It used to have a second rule (retire a group whose title
