@@ -21,7 +21,14 @@ from html import escape
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.types import ContentType, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import (
+    ContentType,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonDefault,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 from aiogram.utils.exceptions import MessageNotModified
 
 from data.config import ADMINS, WEBAPP_URL
@@ -80,6 +87,29 @@ async def _is_admin(user_id: int) -> bool:
 async def _is_super(user_id: int) -> bool:
     row = await _admin_row(user_id)
     return bool(row and row.get("is_super_admin"))
+
+
+async def sync_menu_button(user_id: int) -> None:
+    """Point an admin's chat menu button at the Mini App, so the panel is one
+    tap away instead of a remembered /admin.
+
+    Per chat, never the bot-wide default: almost everyone who opens a DM with
+    this bot is a driver, and a global web_app button would offer every one of
+    them a panel that then refuses them. A non-admin is *reset* rather than
+    skipped, so someone removed from the admin list loses the shortcut on their
+    next /start instead of keeping a button that only ever answers "no".
+
+    Best effort. The inline "Open Web Panel" button in /admin is the real
+    entrypoint and works whether or not Telegram accepts this.
+    """
+    if not WEBAPP_URL:
+        return
+    button = (MenuButtonWebApp(text="Open", web_app=WebAppInfo(url=WEBAPP_URL))
+              if await _is_admin(user_id) else MenuButtonDefault())
+    try:
+        await bot.set_chat_menu_button(chat_id=user_id, menu_button=button)
+    except Exception:
+        logging.exception("could not set the menu button for %s", user_id)
 
 
 # ---------- keyboards ----------
@@ -372,6 +402,7 @@ async def cmd_admin(message: types.Message, state: FSMContext):
         return  # stay silent so the panel isn't discoverable by non-admins
     await state.finish()
     await message.answer(MENU_TEXT, reply_markup=_menu_kb(await _is_super(message.from_user.id)))
+    await sync_menu_button(message.from_user.id)
 
 
 @dp.message_handler(commands=["cancel"], chat_type=PRIVATE, state="*")

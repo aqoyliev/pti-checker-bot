@@ -1,6 +1,7 @@
 from aiogram import types
 from aiogram.dispatcher.filters.builtin import CommandStart
 
+from handlers.admin.panel import sync_menu_button
 from loader import dp
 
 
@@ -12,3 +13,6 @@ async def bot_start(message: types.Message):
         "Use <code>/check</code> in the group by replying to a photo or video to run a PTI inspection.",
         parse_mode="HTML",
     )
+    # After the greeting, not before: an admin gets the Mini App shortcut, and
+    # a driver's hello must not wait on a Telegram call they gain nothing from.
+    await sync_menu_button(message.from_user.id)
