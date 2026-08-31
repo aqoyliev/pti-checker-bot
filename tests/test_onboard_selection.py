@@ -5,9 +5,6 @@ DATTUS LIVENSTONN"), and picking the wrong row silently stores the wrong
 user_id -- which is the whole point of the picker. Numbering the picks makes a
 mis-tap visible before Save.
 """
-import asyncio
-from unittest.mock import AsyncMock
-
 from handlers.admin import onboard
 from utils.userbot import Member
 
@@ -84,33 +81,6 @@ def test_body_lists_the_picks_in_order():
 def test_marker_falls_back_when_more_picks_than_ordinals():
     many = list(range(len(onboard._ORDINALS) + 1))
     assert onboard._marker(many, many[-1]) == "✅"
-
-
-# --- unit checked against the active-units list -------------------------
-
-def test_guess_survives_when_it_is_an_active_unit(monkeypatch):
-    monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value={"1234", "1216"}))
-    assert asyncio.run(onboard._checked_guess("1234 SANON ARLETTE", "")) == ("1234", "title")
-
-
-def test_guess_is_dropped_when_the_unit_is_retired(monkeypatch):
-    # The title still names a truck that has left the fleet, so the admin is
-    # shown "not found" rather than a confidently wrong unit.
-    monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value={"1216"}))
-    assert asyncio.run(onboard._checked_guess("1234 SANON ARLETTE", "")) == (None, "")
-
-
-def test_check_is_skipped_while_no_list_exists(monkeypatch):
-    # Empty table = no list supplied yet. Don't reject every unit on day one.
-    monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value=set()))
-    assert asyncio.run(onboard._checked_guess("1234 SANON ARLETTE", "")) == ("1234", "title")
-
-
-def test_no_guess_never_consults_the_list(monkeypatch):
-    called = AsyncMock(return_value={"1234"})
-    monkeypatch.setattr(onboard, "get_active_units", called)
-    assert asyncio.run(onboard._checked_guess("SANON ARLETTE", "")) == (None, "")
-    called.assert_not_awaited()
 
 
 # --- known non-drivers hidden from the picker ---------------------------

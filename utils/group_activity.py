@@ -1,6 +1,6 @@
 """Which truck chats have gone quiet — derived from traffic, not from a flag.
 
-``groups.is_active`` is an administrative switch: the weekly ``/units`` sweep and
+``groups.is_active`` is an administrative switch: the daily title sweep and
 the admin panel set it. It answers "should this group still be running?", not
 "is anyone actually using it?" — a group stays TRUE until someone acts.
 

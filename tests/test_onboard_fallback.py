@@ -17,9 +17,6 @@ from utils.userbot import Member
 def _stub_userbot(monkeypatch, members=()):
     monkeypatch.setattr(onboard.userbot, "list_members", AsyncMock(return_value=list(members)))
     monkeypatch.setattr(onboard.userbot, "get_description", AsyncMock(return_value=""))
-    # The unit guess is checked against the active-units list, which is a DB
-    # read; these tests are about admin reachability, so stub it out.
-    monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value=set()))
     monkeypatch.setattr(onboard, "get_non_driver_ids", AsyncMock(return_value=set()))
 
 

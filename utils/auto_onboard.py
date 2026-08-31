@@ -12,8 +12,7 @@ testable without a session or a database.
 The bar is deliberately high, because a wrong auto-save is silent. Every one of
 these must hold, or the normal picker is sent instead:
 
-  * a unit was parsed AND survived the active-units check (the caller's
-    _checked_guess already applies that);
+  * a unit was parsed from the group's title or description;
   * the About text yields exactly as many numbers as a group has drivers --
     three numbers means one of them belongs to dispatch, and guessing which
     is exactly the kind of silent misattribution this avoids;

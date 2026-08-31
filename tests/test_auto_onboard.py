@@ -41,8 +41,8 @@ def test_configures_when_both_numbers_are_members():
 
 
 def test_no_unit_means_ask():
-    # _checked_guess already returns None for a unit that is not on the active
-    # list, so "no unit" also covers "the parsed unit is retired".
+    # The caller passes None whenever the title and description yield no
+    # number at all.
     plan, reason = plan_auto_config(None, PHONES, RESOLVED, MEMBERS)
 
     assert plan is None
@@ -158,7 +158,6 @@ def _wire(monkeypatch, *, lookup, description=ABOUT, members=ROSTER):
                         AsyncMock(return_value=list(members)))
     monkeypatch.setattr(onboard.userbot, "get_description",
                         AsyncMock(return_value=description))
-    monkeypatch.setattr(onboard, "get_active_units", AsyncMock(return_value=set()))
     monkeypatch.setattr(onboard, "get_non_driver_ids", AsyncMock(return_value=set()))
     monkeypatch.setattr(onboard, "_ADMIN_IDS", [7564871221])
     monkeypatch.setattr(onboard.phone_lookup, "is_configured", lambda: True)

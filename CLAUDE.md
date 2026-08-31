@@ -206,7 +206,7 @@ case of a single name and a single driver. Two drivers sharing a surname pair to
 neither. A name that can't be placed is **reported, not guessed** — a wrong name
 on a `user_id` reads as authoritative — and the fix for those is a per-group
 `/onboard <group_id>`, which resolves the numbers properly. Preview then
-confirm, like `/units`, and the confirmed write is one transaction
+confirm, like `/titlecheck`, and the confirmed write is one transaction
 (`set_driver_names`).
 
 Three rules that are easy to undo by accident:
@@ -247,29 +247,17 @@ the buttons, the overflow note, and `_passed_over()`, since someone who never
 appeared on screen must not be swept into a fleet-wide non-driver decision.
 Everything about *membership* still reads the full roster.
 
-The unit guess is also checked against `active_units` before being offered, so a
-title naming a retired truck reads as "not found". An admin refreshes that list
-weekly with `/units …` (replaced wholesale); an empty table disables the check
-rather than rejecting every unit.
-
-**The weekly list first re-files, then retires.** `/units` runs
-`title_unit_changes` before `groups_to_deactivate`, because the fleet renames a
-group when its truck changes — so a group still filed under the old number would
-be retired for a unit that merely moved. Both land in one `apply_units_sweep`
-transaction, renames applied first.
-
-**Titles are also swept on their own, once a day.** Between weekly lists,
-`run_title_sweep` (daily, keyed on the UTC date, from `units_refresh_loop`)
-re-checks every active group's title and reports only when something changed:
+**Titles are swept once a day.** `run_title_sweep` (keyed on the UTC date, from
+`title_sweep_loop`) re-checks every active group's title and reports only when
+something changed:
 
 | The title now names | Result |
 | --- | --- |
 | a different unit | re-filed under it |
 | no unit at all, or INACTIVE / moved | deactivated |
-| the same unit it always did | silent, even if that unit left the list |
+| the same unit it always did | silent |
 
-The last row belongs to `/units`, where a human confirms it. It writes
-unattended, so four things hold it up:
+It writes unattended, so four things hold it up:
 
 - **Titles are read fresh from Telegram** (`get_chat`), not from the `groups.title`
   cache — the cache is refreshed opportunistically from the message middleware,
@@ -292,59 +280,39 @@ unattended, so four things hold it up:
   would parse as "1136 LO". A `looks_retired` marker still overrides the veto:
   the fleet leaves the number on those titles.
 
-**`title_deactivations` reads the title alone — it never consults
-`active_units`.** It used to have a second rule (retire a group whose title
-names a unit that is *not* on the stored list), added 2026-08-13 and **removed
-2026-08-17: the fleet's weekly list is not trustworthy, it omits trucks that are
-running.** That rule stacked two unreliable inputs with nothing to catch the
-result — a ~79.5%-accurate title parse against a list with holes in it — and
-wrote unattended three times a week, so either input being wrong retired a live
-group. Don't reintroduce it. Absence from that list is not evidence a truck is
-gone, and the one place it may still be read that way is `/units`, where a human
-previews the casualties and confirms them.
-
-What remains is still a much wider net than the weekly list's: ~20% of fleet
-titles carry no parseable number. Reversing one is a manual panel decision, same
-as any other reactivation.
+`title_deactivations` **reads the title alone**, and one rule is already a wide
+net: ~20% of fleet titles carry no parseable number. Reversing a retirement is a
+manual panel decision, same as any other reactivation — nothing here ever
+reactivates a group on its own.
 
 A rename needs the group to be already configured and its title not to read as
-retired. It used to need one more thing — **the parsed number on the incoming
-list** — and that was **removed 2026-08-26 at the fleet's instruction: a title
-naming a new unit *is* the truck changing.** The list is pasted in by hand and
-goes stale between pastes (JRD's was twelve days old), so requiring it skipped,
-in silence, exactly the case a rename exists for: a truck that had just
-arrived. The cost is real and was measured before the change — across both
-fleets it turned 1 re-file into 3, and one of the two new ones was a misparse
-(`SUB-Unit# 543659 - 488090` read as 543659; `_SUB` now swallows that "unit"
-so the sublease number can't be claimed by `_LABELLED`). Collisions (two titles
-claiming one unit, or a unit another active group already holds) are still
-dropped rather than guessed at — two groups under one unit is a broken
-compliance denominator, not a worse guess.
+retired. Collisions — two titles claiming one unit, or a unit another active
+group already holds — are dropped rather than guessed at: two groups under one
+unit is a broken compliance denominator, not a worse guess. Making the title
+authoritative on 2026-08-26 turned 1 re-file into 3 across both fleets, and one
+of the two new ones was a misparse (`SUB-Unit# 543659 - 488090` read as 543659;
+`_SUB` now swallows that "unit" so a sublease number can't be claimed by
+`_LABELLED`).
 
-**The weekly list also retires groups.** Any active group whose `unit_number` is
-missing from the new list is deactivated (`groups_to_deactivate` →
-`apply_units_sweep`). Three rules keep that from going wrong:
+**There is no active-units list any more.** An admin used to paste the fleet's
+live unit numbers weekly (`/units`): onboarding refused any unit missing from
+that list, and every group filed under a unit that fell off it was retired,
+behind a preview and a confirmation. It was **removed on 2026-08-31 at the
+fleet's instruction — the list was never trustworthy.** It had already lost the
+unattended half of the job on 2026-08-17, when "retire a group whose title names
+a unit not on the list" stacked a ~79.5%-accurate title parse against a list with
+holes in it and retired live groups three times a week; it lost the rename gate
+on 2026-08-26, because the list went stale between pastes (JRD's was twelve days
+old) and a truck that had just arrived was never on it. What was left could still
+retire running trucks off one truncated paste. Gone with it: the `active_units`
+table, `/units` and its confirmation flow, the weekly nag, `groups_to_deactivate`,
+`units_without_groups`, `scripts/load_fleet_roster.py` and `utils/fleet_roster.py`.
+**Don't reintroduce any of it** — absence from a roster is not evidence a truck is
+gone. A unit is decided from the group's own title and the driver's own video.
 
-- **Preview, then confirm — then one transaction.** One pasted message
-  deactivating groups fleet-wide is precisely how `is_active` once went FALSE
-  across the fleet, so `/units` shows what would be retired and writes *nothing*
-  — not even the list — until the admin confirms. The confirmed write stores the
-  list and retires the groups in a **single transaction** (`apply_units_sweep`),
-  so the stored state can never disagree with what the admin was told happened.
-- **Deactivate only.** A unit reappearing on a later list never reactivates its
-  group; that stays a manual panel decision.
-- **No unit ⇒ untouched.** A group still awaiting onboarding has no unit to
-  match, and "not in the list" must not mean "retired" for it.
-
-**And the reverse question.** `units_without_groups` answers "which units on
-this list have no active group?" — trucks whose chat was never created, never
-had the bot added, or is still un-onboarded with no unit stored. Every other
-report is driven off the groups the bot already knows, so those trucks are
-invisible to all of them, which is exactly what makes them worth naming: nothing
-can be inspected for them. A unit held only by a *deactivated* group is listed
-with that group attached, because the fix there is a reactivation, not a new
-chat. It is reported on both paths, including the quiet one where nothing is
-written — a truck with no chat is news either way.
+> The table is left in place on the live databases rather than dropped. It is
+> unread, and dropping a column of fleet history is not something a deploy
+> should do on its own.
 
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
@@ -448,8 +416,8 @@ railway run py -3.11 scripts/tg_session_to_railway.py \
 
 Two different things, deliberately kept apart:
 
-- **`groups.is_active`** is an administrative switch — the weekly `/units` sweep
-  and the panel's Deactivate/Reactivate set it. It says whether a group *should*
+- **`groups.is_active`** is an administrative switch — the daily title sweep and
+  the panel's Deactivate/Reactivate set it. It says whether a group *should*
   still be running, not whether anyone is using it.
 - **Quiet** is derived from traffic: at most `GROUP_QUIET_MAX_MESSAGES` (env,
   default **3**) human messages in `GROUP_QUIET_DAYS` (env, default **3**) days.
@@ -467,14 +435,14 @@ small row instead of thousands, and pruning is a single `DELETE`. That is also
 why the middleware is **not** throttled — a count needs every message.
 
 Quiet is a **reporting** status, surfaced by `/quiet` in DM **on demand only**.
-It used to ride along with the weekly units ask; that was removed on 2026-08-17,
-because a quiet truck is not a retired one — a driver who films his PTI and says
-nothing else is indistinguishable from an idle truck — so the list sat directly
-above "paste this week's active units", next to a decision it cannot answer.
-Don't re-attach it there. Two rules:
+It used to ride along with the weekly units ask — detached on 2026-08-17, and
+the ask itself is gone as of 2026-08-31. A quiet truck is not a retired one: a
+driver who films his PTI and says nothing else is indistinguishable from an idle
+truck, so the list sat next to a decision it cannot answer. Don't attach it to a
+retirement decision anywhere else either. Two rules:
 
-- It never writes `is_active`. Deactivation belongs to the `/units` sweep, where
-  a human confirms it; quiet is evidence, not a decision.
+- It never writes `is_active`. Deactivation belongs to the title sweep and
+  `/titlecheck`, where a human confirms it; quiet is evidence, not a decision.
 - It never gates a reminder or a broadcast. A group nobody has posted in for
   three days is exactly the one the overdue reminder is for, and a silent truck
   is a missing inspection — so quiet groups stay in the compliance denominator.

@@ -13,7 +13,7 @@ half of what onboarding does:
   * a pairing that isn't proven is reported, not guessed. The unproven ones are
     a per-group `/onboard <group_id>`, where the numbers *are* resolved.
 
-Preview then confirm, like /units: one command that renames drivers fleet-wide
+Preview then confirm, like /titlecheck: one command that renames drivers fleet-wide
 is worth showing before it writes.
 """
 from __future__ import annotations

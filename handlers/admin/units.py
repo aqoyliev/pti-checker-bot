@@ -1,60 +1,42 @@
-"""The fleet's active unit numbers, supplied by an admin once a week.
+"""Keeping each group filed under the unit its own title names.
 
 Onboarding guesses a unit from a group's title or description, but a title
-outlives the truck: groups get renamed late, or not at all, so a guess can name
-a unit that left the fleet months ago. Checking the guess against the current
-list turns that into an honest "not found" instead of a confidently wrong unit
-silently attached to a group.
+outlives the truck: groups get renamed late, or not at all. So the titles are
+swept once a day (``run_title_sweep``). A title naming a different unit re-files
+the group under it; a title that has stopped naming a unit retires it; a title
+still naming the stored unit is silent. The sweep runs unattended, so it reads
+the titles fresh from Telegram and skips every group it cannot read: "couldn't
+fetch" must never be mistaken for "the truck is gone".
 
-The list is replaced wholesale rather than merged -- the weekly list *is* the
-fleet, so a truck that drops off it has to disappear here too.
+  /titlecheck   preview the groups whose title says the truck is gone
+  /retitle      preview the groups whose title now names a different unit
+  /quiet        the groups that have gone quiet (display only)
 
-  /units                    show the current list's size and age
-  /units 1332 1303 728453   replace the list (space, comma or newline separated)
+Both previews are human-confirmed and per-group toggle, so a title change
+doesn't have to wait for the next sweep day.
 
-An empty table disables the check rather than rejecting every unit, so the
-feature is inert until the first list arrives.
+A weekly active-units list used to live here too: an admin pasted the fleet's
+live unit numbers, onboarding refused any unit missing from that list, and every
+group filed under a unit that fell off it was retired. **Removed on 2026-08-31 --
+the list was never trustworthy enough to carry that weight.** It had already lost
+the unattended half of the job on 2026-08-17 for the reasons measured in
+``title_deactivations`` below, and what remained still let one truncated paste
+retire running trucks. A unit is now decided from the group's own title and the
+driver's own video, never from a list of what the fleet is supposed to have.
 
-A truck leaving the list also retires its group: any active group whose
-``unit_number`` is missing from the new list is deactivated. That is a big,
-fleet-wide write driven by one pasted message, and a truncated or mistyped paste
-once flipped ``is_active`` FALSE across the fleet -- so the sweep is *previewed*
-and only runs once the admin confirms. Nothing is written until then, not even
-the list itself.
+Two deliberate asymmetries outlived it:
 
-Between two lists, the titles are swept on their own once a day
-(``run_title_sweep``). A title naming a different unit re-files the group under
-it; a title that has stopped naming a unit retires it; a title still naming the
-stored unit is silent, even if that unit has left the list -- that last one
-belongs to the confirmed sweep below. It runs unattended, so it reads the titles fresh from
-Telegram and skips every group it cannot read: "couldn't fetch" must never be
-mistaken for "the truck is gone".
-
-Two commands reach into that same sweep on demand, each covering one half:
-``/titlecheck`` previews the deactivations, ``/retitle`` previews the renames.
-Both are human-confirmed, per-group toggle, so a title change doesn't have to
-wait for the next sweep day.
-
-The paste is also answered with the reverse question: which units on the list
-have *no* active group (``units_without_groups``). Every other report here is
-driven off the groups the bot already knows, so a truck whose chat was never
-created — or never had the bot added — is invisible to all of them, and that is
-precisely a truck nobody is inspecting.
-
-Two deliberate asymmetries:
-
-- **Deactivate only.** A unit reappearing on a later list does not reactivate
-  its group; that stays a manual panel decision, so the weekly paste can never
-  undo a deactivation someone made for an unrelated reason.
-- **A group with no unit is left alone.** The list is about trucks, and a group
-  still waiting for onboarding has no unit to match -- reading that as "not in
-  the list" would retire every group before it was ever configured.
+- **Deactivate only.** Nothing here reactivates a group; that stays a manual
+  panel decision, so a sweep can never undo a deactivation someone made for an
+  unrelated reason.
+- **A group with no unit is left alone.** A group still waiting for onboarding
+  has no unit to match, and reading that as "gone" would retire every group
+  before it was ever configured.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from datetime import date, datetime, timedelta
 from html import escape
 from time import monotonic
@@ -65,11 +47,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from data.config import ADMINS
 from loader import bot, dp
 from utils.db import (
-    active_units_updated_at,
     apply_title_sweep,
-    apply_units_sweep,
     deactivate_group_ids,
-    get_active_units,
     get_all_groups,
     get_group_message_counts,
     get_setting,
@@ -84,72 +63,23 @@ from utils.unit_parse import looks_retired, parse_unit, title_names_unit
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
 
-# A pending /units confirmation, per admin: {"units": [...], "casualties": [...]}.
-# In memory on purpose — a prompt that doesn't survive a restart is the safe
-# failure mode for a write this wide, and the admin just re-pastes the list.
-_pending: dict[int, dict] = {}
 # A pending /titlecheck confirmation, per admin:
 # {"candidates": [...], "selected": {group_id, ...}, "at": ...}. "selected" is
 # mutated in place by toggle taps; only tc:ok/tc:no ever pop the entry.
-# Kept apart from _pending above so the two flows can never overwrite each other.
+# In memory on purpose — a prompt that doesn't survive a restart is the safe
+# failure mode for a write this wide, and the admin just re-runs the command.
 _pending_titlecheck: dict[int, dict] = {}
-# Same shape as _pending_titlecheck, for /retitle. A third, separate dict for
-# the same reason as the second: /units, /titlecheck and /retitle can be run
-# back to back by the same admin without one's confirmation clobbering another's.
+# Same shape, for /retitle. A separate dict so /titlecheck and /retitle can be
+# run back to back by the same admin without one's confirmation clobbering
+# the other's.
 _pending_retitle: dict[int, dict] = {}
 # How long a preview stays answerable before it's treated as stale.
 _PENDING_TTL = 600  # seconds
 # Cap the previewed groups so a fleet-wide sweep can't exceed Telegram's message limit.
 _PREVIEW_LIMIT = 30
 
-# Kept apart from the list's own updated_at: asking must not look like the list
-# was refreshed, or /units would report an age that is really the age of a nag.
-_LAST_ASKED_KEY = "active_units_last_asked_at"
-
-# How stale the list may get before the bot asks for a fresh one.
-REFRESH_AFTER = timedelta(days=7)
-# How often the loop wakes up to check that age.
+# How often the loop wakes up.
 CHECK_INTERVAL = timedelta(hours=6)
-
-_ASK_TEXT = (
-    "📋 <b>Weekly check — active units</b>\n\n"
-    "Send me this week's active unit numbers so I can tell a live truck from a "
-    "retired one when a new group shows up.\n\n"
-    "Reply with:\n<code>/units 1332 1303 728453 ...</code>"
-)
-
-
-def parse_units(raw: str) -> list[str]:
-    """Unit numbers out of a pasted blob: space, comma, newline or tab separated.
-
-    Keeps leading zeros ("001", "0822" are real units), so these stay strings.
-    Anything that isn't a run of digits is dropped rather than guessed at.
-    """
-    return [tok for tok in re.split(r"[^0-9]+", raw or "") if tok]
-
-
-def groups_to_deactivate(groups: list[dict], units: list[str]) -> list[dict]:
-    """Active groups whose unit is missing from the new weekly list.
-
-    Pure, so the sweep's blast radius can be asserted in tests without a DB.
-    Units are compared through ``normalize_unit`` because group units were typed
-    or imported ("<1304 >") while the list is parsed to bare digit runs.
-
-    Skipped on purpose: groups already inactive (nothing to do) and groups with
-    no unit at all -- an un-onboarded group isn't a retired truck.
-    """
-    wanted = {normalize_unit(u) for u in units}
-    out: list[dict] = []
-    for g in groups:
-        if not g.get("is_active", True):
-            continue
-        unit = normalize_unit(g.get("unit_number"))
-        if not unit:
-            continue
-        if unit not in wanted:
-            out.append(g)
-    return out
-
 
 def title_unit_changes(groups: list[dict]) -> list[dict]:
     """Active groups whose title now names a different unit than the one on file.
@@ -164,8 +94,8 @@ def title_unit_changes(groups: list[dict]) -> list[dict]:
     **The title is taken at its word.** A rename used to additionally require
     the parsed number to be on the stored active-units list. That requirement
     was dropped on 2026-08-26 at the fleet's instruction -- the rule is that a
-    title naming a new unit *is* the truck changing. The list is pasted in by
-    hand and goes stale between pastes (JRD's was twelve days old at the time),
+    title naming a new unit *is* the truck changing. The list was pasted in by
+    hand and went stale between pastes (JRD's was twelve days old at the time),
     so a truck that had just arrived was never on it and its rename was skipped
     in silence, which is the failure the fleet actually hits. The cost, stated
     plainly: a misparsed or mistyped title now re-files a group unattended. The
@@ -218,8 +148,7 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
     Pure, and it reads the **title alone**. One rule: the title no longer names
     a unit, because the fleet either marks the group dead ("INACTIVE - ANTON,
     ROGEL", "this group has been moved") or drops the number off it. ~20% of
-    fleet titles carry no parseable number, so this is already a much wider net
-    than the weekly list's.
+    fleet titles carry no parseable number, so this is already a wide net.
 
     There used to be a second rule -- retire a group whose title names a unit
     that isn't on the stored active list -- and it was **removed on 2026-08-17
@@ -227,10 +156,10 @@ def title_deactivations(groups: list[dict]) -> list[dict]:
     nothing to catch the result: a title parse measured at 79.5% (six known
     titles, e.g. "1275 - NEGRON..." on a group really filed as 2003, parse to a
     *different* valid number) against a list that omits live trucks. Either one
-    alone retires a running group, unattended, three times a week. Don't
-    reintroduce it: absence from that list is not evidence a truck is gone, and
-    the one place it may still be read that way is ``/units``, where a human
-    previews the casualties and confirms them.
+    alone retires a running group, unattended, three times a week. The list
+    itself is gone as of 2026-08-31 (see this module's docstring), but the
+    reasoning outlived it: absence from any roster is not evidence a truck is
+    gone. Retiring a group wants a human, which is what ``/titlecheck`` is for.
 
     So a title naming some *other* unit is simply not this function's business:
     ``title_unit_changes`` re-files the group under the number the title now
@@ -286,46 +215,6 @@ def apply_renames(groups: list[dict], renames: list[dict]) -> list[dict]:
             for g in groups]
 
 
-def units_without_groups(groups: list[dict], units: list[str]) -> list[dict]:
-    """Units on the new list that no active group is filed under.
-
-    The other half of the weekly reconciliation: ``groups_to_deactivate`` finds
-    chats whose truck is gone, this finds trucks whose chat is missing. Those are
-    the units that can never produce an inspection -- the group was never
-    created, the bot was never added, or it is sitting there un-onboarded with no
-    unit stored -- and nothing else in the bot would ever mention them, because
-    everything is driven off the groups it already knows.
-
-    Returns ``[{"unit": str, "inactive": group|None}]`` in the order the admin
-    pasted them. A unit held only by a *deactivated* group is reported with that
-    group attached, because the fix there is a reactivation rather than a new
-    chat, and telling the two apart is the whole value of the line.
-
-    Pure. Run on post-rename rows, or a truck that just moved reads as missing
-    under the number it no longer has.
-    """
-    live: set[str] = set()
-    retired: dict[str, dict] = {}
-    for g in groups:
-        unit = normalize_unit(g.get("unit_number"))
-        if not unit:
-            continue
-        if g.get("is_active", True):
-            live.add(unit)
-        else:
-            retired.setdefault(unit, g)
-
-    out: list[dict] = []
-    seen: set[str] = set()
-    for raw in units:
-        unit = normalize_unit(raw)
-        if not unit or unit in live or unit in seen:
-            continue
-        seen.add(unit)
-        out.append({"unit": unit, "inactive": retired.get(unit)})
-    return out
-
-
 def _group_line(g: dict) -> str:
     unit = escape(normalize_unit(g.get("unit_number")) or "—")
     title = escape(g.get("title") or str(g["group_id"]))
@@ -335,211 +224,6 @@ def _group_line(g: dict) -> str:
 def _rename_line(r: dict) -> str:
     title = escape(r["group"].get("title") or str(r["group"]["group_id"]))
     return f"• <b>{escape(r['old'])} → {escape(r['new'])}</b> — {title}"
-
-
-def _missing_block(missing: list[dict]) -> list[str]:
-    """The 'trucks with no chat' section, shared by the preview and the result."""
-    if not missing:
-        return []
-    shown = missing[:_PREVIEW_LIMIT]
-    lines = [f"📭 <b>{len(missing)} unit(s) on this list have no active group</b> "
-             f"— nothing can be inspected for them:", ""]
-    for m in shown:
-        dead = m["inactive"]
-        if dead is None:
-            lines.append(f"• <b>{escape(m['unit'])}</b>")
-        else:
-            title = escape(dead.get("title") or str(dead["group_id"]))
-            lines.append(f"• <b>{escape(m['unit'])}</b> — group exists but is "
-                         f"deactivated: {title}")
-    if len(missing) > len(shown):
-        lines.append(f"…and {len(missing) - len(shown)} more.")
-    return lines
-
-
-def _confirm_text(units: list[str], casualties: list[dict],
-                  renames: list[dict] | None = None,
-                  missing: list[dict] | None = None) -> str:
-    renames = renames or []
-    lines = [f"📋 <b>{len(units)} active units</b> ready to store.", ""]
-
-    if renames:
-        shown = renames[:_PREVIEW_LIMIT]
-        lines += [
-            f"🔄 <b>{len(renames)} group(s) renamed their unit</b> — the title now "
-            f"names a truck on this list, so they'd be re-filed first:",
-            "",
-            *[_rename_line(r) for r in shown],
-        ]
-        if len(renames) > len(shown):
-            lines.append(f"…and {len(renames) - len(shown)} more.")
-        lines.append("")
-
-    if casualties:
-        shown = casualties[:_PREVIEW_LIMIT]
-        lines += [
-            f"⚠️ <b>{len(casualties)} group(s) would be deactivated</b> — their unit "
-            f"is not on this list:",
-            "",
-            *[_group_line(g) for g in shown],
-        ]
-        if len(casualties) > len(shown):
-            lines.append(f"…and {len(casualties) - len(shown)} more.")
-        lines.append("")
-
-    block = _missing_block(missing or [])
-    if block:
-        lines += block + [""]
-
-    lines.append("Nothing has been saved yet. Confirm to store the list"
-                 + (", re-file the renamed groups" if renames else "")
-                 + (" and deactivate these groups." if casualties else "."))
-    return "\n".join(lines)
-
-
-def _confirm_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("✅ Confirm", callback_data="un:ok"),
-        InlineKeyboardButton("✖️ Cancel", callback_data="un:no"),
-    )
-    return kb
-
-
-def _describe(count: int, updated: datetime | None) -> str:
-    if not count:
-        return ("No active-units list yet — every unit guess is accepted as-is.\n"
-                "Send <code>/units 1332 1303 ...</code> to set one.")
-    if updated is None:
-        return f"{count} active units stored (age unknown)."
-    days = (datetime.utcnow() - updated).days
-    when = "today" if days == 0 else f"{days} day{'s' if days != 1 else ''} ago"
-    return f"{count} active units stored, last updated {when}."
-
-
-@dp.message_handler(commands=["units"], chat_type=types.ChatType.PRIVATE)
-async def cmd_units(message: types.Message):
-    if message.from_user.id not in _ADMIN_IDS:
-        return
-
-    raw = message.get_args() or ""
-    units = parse_units(raw)
-
-    if not units:
-        current = await get_active_units()
-        await message.answer(_describe(len(current), await active_units_updated_at()),
-                             parse_mode="HTML")
-        return
-
-    groups = await get_all_groups()
-    # Order matters: re-file first, then decide what to retire. A truck whose
-    # number changed this week is still running, and judging it on the number it
-    # no longer has would deactivate a live group.
-    renames = title_unit_changes(groups)
-    moved = apply_renames(groups, renames)
-    casualties = groups_to_deactivate(moved, units)
-    # Reported either way, including on the quiet path where nothing changes:
-    # "this truck has no chat" is news whether or not anything is being written.
-    missing = units_without_groups(moved, units)
-
-    if casualties or renames:
-        # Nothing is written yet — not the list, not the renames, not the
-        # deactivations. They all land together in _apply(), or none do.
-        _pending[message.from_user.id] = {
-            "units": units,
-            "casualties": casualties,
-            "renames": renames,
-            "missing": missing,
-            "at": monotonic(),
-        }
-        await message.answer(_confirm_text(units, casualties, renames, missing),
-                             parse_mode="HTML", reply_markup=_confirm_kb())
-        return
-
-    await message.answer(await _apply(units, [], [], missing), parse_mode="HTML")
-
-
-async def _apply(units: list[str], casualties: list[dict],
-                 renames: list[dict] | None = None,
-                 missing: list[dict] | None = None) -> str:
-    """Re-file renamed groups, store the list, retire what fell off it.
-
-    All three writes happen in one transaction (``apply_units_sweep``), so the
-    stored state can never disagree with what the admin is told happened.
-    """
-    renames = renames or []
-    group_ids = [g["group_id"] for g in casualties]
-    pairs = [(r["group"]["group_id"], r["new"]) for r in renames]
-    added, removed, deactivated, refiled = await apply_units_sweep(
-        units, group_ids, pairs)
-
-    lines = [f"✅ <b>{len(units)} active units stored.</b>"]
-    if added:
-        lines.append(f"+{len(added)} new: {', '.join(sorted(added)[:20])}"
-                     + (" …" if len(added) > 20 else ""))
-    if removed:
-        lines.append(f"−{len(removed)} removed: {', '.join(sorted(removed)[:20])}"
-                     + (" …" if len(removed) > 20 else ""))
-    if not added and not removed:
-        lines.append("No change from the previous list.")
-
-    if pairs:
-        lines.append(f"\n🔄 <b>{refiled} group(s) re-filed</b> from their title:")
-        lines += [f"  {escape(r['old'])} → {escape(r['new'])}" for r in renames[:20]]
-        logging.info("units sweep re-filed %s groups from titles: %s", refiled, pairs)
-
-    if group_ids:
-        lines.append(f"\n💤 <b>{deactivated} group(s) deactivated</b> — unit no "
-                     f"longer on the list.")
-        logging.info("units sweep deactivated %s groups: %s", deactivated, group_ids)
-
-    block = _missing_block(missing or [])
-    if block:
-        lines += [""] + block
-        logging.info("units sweep: %s listed unit(s) have no active group: %s",
-                     len(missing), [m["unit"] for m in missing])
-    return "\n".join(lines)
-
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("un:"))
-async def units_confirm_callback(query: types.CallbackQuery):
-    uid = query.from_user.id
-    if uid not in _ADMIN_IDS:
-        await query.answer("Not allowed.", show_alert=True)
-        return
-
-    state = _pending.pop(uid, None)
-    if state is None or monotonic() - state["at"] > _PENDING_TTL:
-        # Re-pasting the list is cheap; acting on a stale preview is not — the
-        # fleet may have changed since it was drawn.
-        await query.message.edit_text("That confirmation expired — send /units again.")
-        await query.answer()
-        return
-
-    if query.data == "un:no":
-        await query.message.edit_text("✖️ Cancelled — nothing was saved.")
-        await query.answer()
-        return
-
-    # A failure here must be visible. Letting it escape to the global error
-    # handler leaves the preview on screen still reading "nothing has been saved
-    # yet", with no way to tell whether the sweep ran.
-    try:
-        text = await _apply(state["units"], state["casualties"],
-                            state.get("renames", []), state.get("missing", []))
-    except Exception:
-        logging.exception("units sweep failed for admin %s", uid)
-        await query.message.edit_text(
-            "⚠️ <b>Something went wrong — nothing was saved.</b>\n"
-            "The list and the group changes are applied together, so neither "
-            "took effect. Send /units again to retry.",
-            parse_mode="HTML",
-        )
-        await query.answer()
-        return
-
-    await query.message.edit_text(text, parse_mode="HTML")
-    await query.answer()
 
 
 async def _quiet_report() -> str:
@@ -578,12 +262,11 @@ async def cmd_quiet(message: types.Message):
 
 # ---------- the automatic title sweep ----------
 #
-# The same two decisions the weekly /units paste makes, run on a timer against
-# the group titles alone: a title naming a different listed unit re-files the
-# group, a title that has stopped naming a unit retires it, and a title that
-# still says what it said is silent. Unlike /units this writes without asking,
-# so it leans on the guards in the two pure functions above -- above all the
-# rule that a re-file needs the new number to be on the stored active list.
+# Two decisions on a timer, against the group titles alone: a title naming a
+# different unit re-files the group, a title that has stopped naming a unit
+# retires it, and a title that still says what it said is silent. It writes
+# without asking anyone, so it leans entirely on the guards in the two pure
+# functions above -- collisions, unreadable titles, unconfigured groups.
 
 _TITLE_SWEEP_KEY = "title_sweep_last_run_on"
 # Pause between get_chat calls; ~150 groups, so this costs half a minute and
@@ -902,14 +585,11 @@ async def cmd_retitle(message: types.Message):
                                   "take a minute for the full fleet…")
     groups = [g for g in await get_all_groups() if g.get("is_active", True)]
     fresh, skipped = await _refresh_titles(groups)
-    units = list(await get_active_units())
     renames = title_unit_changes(fresh)
 
     if not renames:
-        text = "🟢 No group's title names a different unit from the active list."
-        if not units:
-            text += ("\n\n<i>No active-units list is stored, so nothing can be "
-                     "corroborated. Send /units first.</i>")
+        text = ("🟢 No group's title names a different unit from the one it is "
+                "filed under.")
         if skipped:
             text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
         await status.edit_text(text, parse_mode="HTML")
@@ -923,7 +603,7 @@ async def cmd_retitle(message: types.Message):
         "at": monotonic(),
     }
     lines = [f"🔄 <b>{len(renames)} active group(s)</b> whose title now names a "
-             f"different unit on the active list:", ""]
+             f"different unit:", ""]
     lines += [_rename_line(r) for r in shown]
     if len(renames) > len(shown):
         lines.append(f"…and {len(renames) - len(shown)} more -- re-run "
@@ -1013,64 +693,14 @@ async def run_title_sweep_if_due(now: datetime | None = None) -> bool:
     return True
 
 
-async def _last_asked_at() -> datetime | None:
-    raw = await get_setting(_LAST_ASKED_KEY)
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
+async def title_sweep_loop():
+    """Background loop: sweep the group titles once a day, and keep the
+    message-count buckets from growing without bound.
 
-
-async def ask_for_units_if_stale(now: datetime | None = None) -> bool:
-    """DM the admins for a fresh list when the current one is a week old.
-
-    Returns True if the ask went out. Two clocks, deliberately: the list's own
-    age decides *whether* a refresh is due, and the last-asked time keeps an
-    unanswered ask from repeating every cycle for a week.
-    """
-    now = now or datetime.utcnow()
-
-    updated = await active_units_updated_at()
-    if updated is not None and now - updated < REFRESH_AFTER:
-        return False
-
-    asked = await _last_asked_at()
-    if asked is not None and now - asked < REFRESH_AFTER:
-        return False
-
-    # The quiet list used to ride along here. It doesn't any more: a truck being
-    # quiet is not evidence it is retired -- a driver who films his PTI and says
-    # nothing else looks identical to an idle truck -- so printing it directly
-    # above "paste this week's active units" put a list next to a decision it
-    # cannot answer. It is still available on demand with /quiet.
-    sent = False
-    for admin_id in _ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, _ASK_TEXT, parse_mode="HTML")
-            sent = True
-        except Exception:
-            logging.exception("could not ask admin %s for the units list", admin_id)
-
-    if sent:
-        await set_setting(_LAST_ASKED_KEY, now.isoformat())
-    return sent
-
-
-async def units_refresh_loop():
-    """Background loop: nudge the admins when the units list goes stale, sweep
-    the group titles once a day, and keep the message-count buckets from growing
-    without bound.
-
-    One loop rather than three tasks — the tick is six hours and every step is
+    One loop rather than two tasks — the tick is six hours and every step is
     guarded, so a step that throws costs only itself.
     """
     while True:
-        try:
-            await ask_for_units_if_stale()
-        except Exception:
-            logging.exception("units refresh loop failed")
         try:
             await run_title_sweep_if_due()
         except Exception:

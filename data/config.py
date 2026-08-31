@@ -57,9 +57,9 @@ ENFORCEMENT_ENABLED = env.bool("ENFORCEMENT_ENABLED", default=False)
 # GROUP_QUIET_DAYS days. The threshold is a count, not zero, on purpose — a
 # stray "ok" or a sticker is not evidence a truck is in service.
 #
-# Reporting only. It never writes is_active (deactivation comes from the weekly
-# /units sweep) and never gates a reminder: a silent truck is a missing
-# inspection, so quiet groups stay in the compliance denominator.
+# Reporting only. It never writes is_active (deactivation comes from the daily
+# title sweep and the admin panel) and never gates a reminder: a silent truck
+# is a missing inspection, so quiet groups stay in the compliance denominator.
 GROUP_QUIET_DAYS = env.int("GROUP_QUIET_DAYS", default=3)
 GROUP_QUIET_MAX_MESSAGES = env.int("GROUP_QUIET_MAX_MESSAGES", default=3)
 

@@ -80,12 +80,6 @@ def test_a_title_naming_some_other_unit_is_never_retired():
     assert _dead([_g(1, "1225", "UNIT 9999 / MAGAN")]) == []
 
 
-def test_a_delisted_unit_is_not_the_sweep_s_business():
-    # Retiring a truck for falling off the list belongs to /units, where an
-    # admin previews the casualties and confirms them.
-    assert _dead([_g(1, "1225", "1225 / MAGAN")]) == []
-
-
 # ---------- what it refuses to touch ----------
 
 def test_unconfigured_group_is_never_retired():

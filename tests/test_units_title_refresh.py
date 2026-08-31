@@ -1,15 +1,11 @@
 """Re-filing a group when its title starts naming a different unit.
 
 Pure: no DB. This decides whether a truck's group gets moved to another unit
-number automatically. Since 2026-08-26 the title is taken at its word -- the
-stored active-units list is no longer consulted -- so what is left to test is
-that the *integrity* guards survived that.
+number automatically. The title is taken at its word -- there is no roster to
+corroborate it against -- so what is left to test is that the *integrity* guards
+hold on their own.
 """
-from handlers.admin.units import (
-    apply_renames,
-    groups_to_deactivate,
-    title_unit_changes,
-)
+from handlers.admin.units import apply_renames, title_unit_changes
 
 
 def _g(gid: int, unit, title, active=True) -> dict:
@@ -74,27 +70,6 @@ def test_titleless_group_is_skipped():
 def test_units_compare_normalized():
     # Stored "<1330 >" is unit 1330, so the title names no change at all.
     assert title_unit_changes([_g(1, "<1330 >", "UNIT 1330 / A")]) == []
-
-
-# ---------- ordering: rename before deactivate ----------
-
-def test_renamed_group_is_not_deactivated_for_its_old_unit():
-    # The whole reason renames run first. Truck moved 1225 -> 1330; 1330 is on
-    # the weekly list and 1225 is not. Judged on the old number -- which the
-    # /units sweep below still does consult the list for -- it would be retired.
-    groups = [_g(1, "1225", "UNIT 1330 / MAGAN")]
-    units = ["1330"]
-    renames = title_unit_changes(groups)
-    after = apply_renames(groups, renames)
-    assert groups_to_deactivate(after, units) == []
-
-
-def test_a_genuinely_retired_group_still_gets_deactivated():
-    groups = [_g(1, "1225", "1225 / MAGAN")]
-    units = ["1330"]
-    renames = title_unit_changes(groups)
-    after = apply_renames(groups, renames)
-    assert [g["group_id"] for g in groups_to_deactivate(after, units)] == [1]
 
 
 def test_apply_renames_leaves_other_groups_untouched():

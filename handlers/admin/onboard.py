@@ -33,7 +33,6 @@ from utils.auto_onboard import plan_auto_config
 from utils.driver_names import parse_driver_names
 from utils.db import (
     clear_non_drivers,
-    get_active_units,
     get_drivers,
     get_group,
     get_non_driver_ids,
@@ -80,26 +79,6 @@ _UNPICKED = "▫️"
 
 def _key(admin_id: int, group_id: int) -> tuple[int, int]:
     return (admin_id, group_id)
-
-
-async def _checked_guess(title: str, description: str) -> tuple[str | None, str]:
-    """Guess the unit, then keep it only if it is an active unit.
-
-    A group title outlives the truck -- groups get renamed late, or never -- so
-    a parsed number can name a unit that left the fleet months ago. Rather than
-    offer it, fall back to "not found" and make the admin say what it is.
-    An empty units list means none has been supplied yet, so the check is
-    skipped rather than rejecting everything.
-    """
-    unit, source = guess_unit(title, description)
-    if not unit:
-        return None, ""
-    active = await get_active_units()
-    if active and unit not in active:
-        logging.info("unit %s parsed from %s is not in the active list — ignoring",
-                     unit, source)
-        return None, ""
-    return unit, source
 
 
 def _marker(selected: list[int], user_id: int) -> str:
@@ -205,9 +184,6 @@ def _text(admin_id: int, group_id: int) -> str:
     source = st.get("unit_source") or ""
     label = f"Unit (from {source})" if source else "Unit (not found)"
     lines.append(f"<b>{label}:</b> <code>{escape(str(unit))}</code>")
-    if st.get("unit_inactive"):
-        lines.append("⚠️ That unit is not in the active list — check it before "
-                     "saving.")
     if st["retired_marker"]:
         lines.append("⚠️ The title says this group is inactive/moved — check "
                      "it is really the live chat before saving.")
@@ -309,7 +285,7 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
     roster = [m for m in members if not m.is_bot]
-    unit, unit_source = await _checked_guess(title, description)
+    unit, unit_source = guess_unit(title, description)
     hidden = await get_non_driver_ids()
 
     # The About text usually names both drivers by phone number. When all of it
@@ -377,7 +353,7 @@ async def _rebuild_pending(admin_id: int, group_id: int) -> dict | None:
     title = chat.title or str(group_id)
     members = await userbot.list_members(group_id)
     description = await userbot.get_description(group_id)
-    unit, unit_source = await _checked_guess(title, description)
+    unit, unit_source = guess_unit(title, description)
 
     st = {
         "title": title,
@@ -451,7 +427,7 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         # A description that was unreadable before may carry the unit now. Never
         # overwrite a unit the admin typed by hand.
         if st.get("unit_source") != "you":
-            st["unit"], st["unit_source"] = await _checked_guess(
+            st["unit"], st["unit_source"] = guess_unit(
                 st["title"], st["description"])
 
         try:
@@ -568,11 +544,6 @@ async def on_unit_typed(message: types.Message, state: FSMContext):
         return
     st["unit"] = message.text.strip()
     st["unit_source"] = "you"
-    # A hand-typed unit is never rejected — the admin may be configuring a truck
-    # before it reaches the weekly list — but an off-list number is worth saying
-    # out loud, since it is usually a typo.
-    active = await get_active_units()
-    st["unit_inactive"] = bool(active) and st["unit"] not in active
     await message.answer(_text(message.from_user.id, group_id), parse_mode="HTML",
                          reply_markup=_keyboard(message.from_user.id, group_id))
 

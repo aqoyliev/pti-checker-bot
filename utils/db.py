@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 
 import asyncpg
 from data.config import DATABASE_URL, FLEET_TZ
@@ -133,24 +132,6 @@ async def init_db():
                 verified_at TIMESTAMP
             );
 
-            -- The fleet's currently-active unit numbers, replaced wholesale by
-            -- an admin (see handlers/admin/units.py). Onboarding only offers a
-            -- unit it can find in here, so a group named after a retired truck
-            -- reads as "not found" instead of quietly configuring a dead unit.
-            -- Empty table = no list supplied yet, which disables the check
-            -- rather than rejecting everything.
-            CREATE TABLE IF NOT EXISTS active_units (
-                unit     TEXT PRIMARY KEY,
-                added_at TIMESTAMP DEFAULT NOW()
-            );
-
-            -- The trailer the office has assigned to that truck, from the wider
-            -- roster paste (utils/fleet_roster.py). Nullable on purpose: the
-            -- weekly /units list is unit numbers only, so a unit added by the
-            -- sweep simply has no trailer recorded. Never read as a verdict --
-            -- what a truck is actually pulling comes from the video.
-            ALTER TABLE active_units ADD COLUMN IF NOT EXISTS trailer TEXT;
-
             -- People confirmed *not* to be drivers, fleet-wide: dispatchers,
             -- safety staff, owners. They sit in many driver groups, so once an
             -- admin has passed over someone during onboarding there is no point
@@ -275,125 +256,7 @@ async def set_setting(key: str, value: str) -> None:
     )
 
 
-# ---------- active units ----------
-
-ACTIVE_UNITS_UPDATED_KEY = "active_units_updated_at"
-
-
-async def get_active_units() -> set[str]:
-    """Every active unit number. Empty set means "no list supplied yet"."""
-    rows = await _pool_check().fetch("SELECT unit FROM active_units")
-    return {r["unit"] for r in rows}
-
-
-async def set_fleet_roster(rows: list[dict]) -> tuple[int, int]:
-    """Upsert ``[{"unit", "trailer"}, ...]`` into the active list.
-
-    Returns ``(added, updated)``.
-
-    **Adds and updates only — it never deletes.** Retiring a unit deactivates
-    the groups filed under it, and that decision belongs to ``/units``, where an
-    admin is shown the casualties and confirms them (see
-    ``handlers/admin/units.py``). A roster paste is a statement about the trucks
-    it lists, not about the ones it leaves out, so loading one can't retire
-    anything by omission.
-
-    One transaction, so a half-loaded roster can't leave the list disagreeing
-    with what the caller was told it wrote.
-    """
-    clean = [(normalize_unit(r["unit"]), (r.get("trailer") or "").strip() or None)
-             for r in rows if normalize_unit(r.get("unit"))]
-    if not clean:
-        return 0, 0
-
-    pool = _pool_check()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
-            await conn.executemany(
-                """INSERT INTO active_units (unit, trailer) VALUES ($1, $2)
-                   ON CONFLICT (unit) DO UPDATE SET trailer = EXCLUDED.trailer""",
-                clean,
-            )
-            await conn.execute(
-                """INSERT INTO app_settings (key, value) VALUES ($1, $2)
-                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
-                ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
-            )
-    units = {u for u, _ in clean}
-    added = len(units - existing)
-    return added, len(units) - added
-
-
-async def get_fleet_roster() -> dict[str, str | None]:
-    """``{unit: trailer or None}`` for every active unit."""
-    rows = await _pool_check().fetch("SELECT unit, trailer FROM active_units")
-    return {r["unit"]: r["trailer"] for r in rows}
-
-
-async def apply_units_sweep(
-    units: list[str], group_ids: list[int],
-    renames: list[tuple[int, str]] | None = None,
-) -> tuple[set[str], set[str], int, int]:
-    """Store the weekly list, re-file renamed groups, retire what fell off it.
-
-    Returns ``(added, removed, deactivated_count, refiled_count)``.
-
-    ``renames`` re-files a group under the unit its title now names, and is
-    applied *before* the deactivation so a truck whose number changed this week
-    isn't retired under the number it no longer has. It only ever sets
-    ``unit_number`` -- never ``setup_complete`` -- because a group being re-filed
-    is already configured, and flipping that flag here would hide an
-    un-onboarded group from the setup nag forever.
-
-    One transaction on purpose. These were previously two independent writes, so
-    a failure between them left the list replaced but no group retired, while the
-    admin's screen still read "nothing has been saved yet" — the stored state and
-    the reported state disagreeing in the one flow that can deactivate trucks
-    fleet-wide. Either both land or neither does.
-
-    The updated-at stamp is written inside the transaction too: rolling back the
-    list while leaving the stamp fresh would suppress the next weekly ask.
-    """
-    pool = _pool_check()
-    wanted = {u.strip() for u in units if u.strip()}
-    renames = renames or []
-    deactivated = refiled = 0
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            existing = {r["unit"] for r in await conn.fetch("SELECT unit FROM active_units")}
-            added, removed = wanted - existing, existing - wanted
-            if removed:
-                await conn.execute("DELETE FROM active_units WHERE unit = ANY($1::text[])",
-                                   list(removed))
-            if added:
-                await conn.executemany("INSERT INTO active_units (unit) VALUES ($1)",
-                                       [(u,) for u in added])
-            # Re-file before retiring, so a group that moved to a listed unit is
-            # judged on its new number rather than the one it just left.
-            for gid, new_unit in renames:
-                rows = await conn.fetch(
-                    """UPDATE groups SET unit_number = $1
-                        WHERE group_id = $2 AND COALESCE(is_active, TRUE) = TRUE
-                    RETURNING group_id""",
-                    normalize_unit(new_unit), gid,
-                )
-                refiled += len(rows)
-            if group_ids:
-                rows = await conn.fetch(
-                    """UPDATE groups SET is_active = FALSE
-                        WHERE group_id = ANY($1::bigint[])
-                          AND COALESCE(is_active, TRUE) = TRUE
-                    RETURNING group_id""",
-                    group_ids,
-                )
-                deactivated = len(rows)
-            await conn.execute(
-                """INSERT INTO app_settings (key, value) VALUES ($1, $2)
-                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()""",
-                ACTIVE_UNITS_UPDATED_KEY, datetime.utcnow().isoformat(),
-            )
-    return added, removed, deactivated, refiled
+# ---------- title sweep ----------
 
 
 async def apply_title_sweep(
@@ -403,13 +266,8 @@ async def apply_title_sweep(
 
     Returns ``(refiled_count, deactivated_count)``.
 
-    The same two writes ``apply_units_sweep`` makes, minus the weekly list --
-    this runs on a timer rather than off a pasted message, so there is no list to
-    store and no ``updated_at`` stamp to touch. Keeping the stamp out matters:
-    bumping it here would suppress the weekly ask for a fresh list.
-
-    One transaction, for the same reason as the weekly sweep: the summary DM'd to
-    the admin has to describe what actually landed. ``unit_number`` only, never
+    One transaction, so the summary DM'd to the admin describes what actually
+    landed rather than what was attempted. ``unit_number`` only, never
     ``setup_complete`` -- a group being re-filed is already configured, and
     flipping that flag would hide an un-onboarded group from the setup nag.
     """
@@ -435,17 +293,6 @@ async def apply_title_sweep(
                 )
                 deactivated = len(rows)
     return refiled, deactivated
-
-
-async def active_units_updated_at() -> datetime | None:
-    """When the list was last replaced, or None if it never has been."""
-    raw = await get_setting(ACTIVE_UNITS_UPDATED_KEY)
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
 
 
 # ---------- non-drivers (fleet-wide picker exclusions) ----------
@@ -1204,9 +1051,8 @@ async def set_group_active(group_id: int, active: bool):
 async def deactivate_group_ids(group_ids: list[int]) -> int:
     """Bulk-deactivate arbitrary groups. Returns how many were actually flipped.
 
-    For a manual, admin-confirmed bulk action (e.g. /titlecheck) that isn't tied
-    to the weekly active-units list -- it never touches ``active_units`` or its
-    ``updated_at`` stamp.
+    For a manual, admin-confirmed bulk action (e.g. /titlecheck), kept apart
+    from the daily sweep's own transaction in ``apply_title_sweep``.
     """
     if not group_ids:
         return 0
