@@ -10,7 +10,6 @@ from utils.set_bot_commands import set_default_commands
 from data.config import ADMINS
 from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
-from utils.pti_retry import pti_retry_loop
 from handlers.admin.units import title_sweep_loop
 from handlers.groups.proposals import schedule_pending_reminders, setup_nag_loop
 from utils.gemini import get_active_model, set_active_model
@@ -46,9 +45,17 @@ async def on_startup(dispatcher):
     asyncio.create_task(compliance_loop())
     asyncio.create_task(setup_nag_loop())
     asyncio.create_task(title_sweep_loop())
-    # Inspections that failed while Gemini was down get re-run from here once it
-    # is answering again -- see utils/pti_retry.py.
-    asyncio.create_task(pti_retry_loop())
+    # utils/pti_retry.py is deliberately NOT started. Its re-runs were louder
+    # than the failures they recovered: every attempt posts its own status
+    # message, so one Gemini outage on 2026-08-31 left five "the analysis
+    # service is overloaded" messages in a DM World group for a single
+    # walkaround, hours apart, none of them an inspection result. A driver who
+    # is told to send /check again does exactly that, and that path already
+    # works. The module and its tests are kept for the 2026-08-20 case (every
+    # key locked out of the model, nobody re-sending because nothing worked);
+    # re-enable by restoring the create_task here and the enqueue in
+    # handlers/groups/pti.py -- but not before a retry stops narrating itself
+    # into the group.
     await schedule_pending_reminders()
 
 

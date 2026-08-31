@@ -558,3 +558,15 @@ limits. Excess submissions queue on an `asyncio.Semaphore` in
 instead of piling on. Gemini calls also retry with backoff and surface a friendly
 "overloaded" message on 5xx/429. Tune `PTI_MAX_CONCURRENCY` up only if the host
 has CPU/memory headroom.
+
+**The failed-inspection retry queue is off.** `utils/pti_retry.py` still exists
+and is still tested, but `app.py` does not start `pti_retry_loop` and
+`handlers/groups/pti.py` does not enqueue, so a failed inspection is reported to
+the driver and forgotten. Its re-runs were louder than the failures they
+recovered: every attempt posts its own status message, so one Gemini outage on
+2026-08-31 left five "the analysis service is overloaded" messages in a DM World
+group over 90 minutes — for one walkaround, and not one of them a result. The
+case it was built for is real (2026-08-20: every key locked out of the model, so
+re-sending never worked either), which is why the module is kept rather than
+deleted. Re-enabling means restoring both call sites **and** first making a retry
+that fails again do so silently.
