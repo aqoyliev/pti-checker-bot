@@ -26,7 +26,6 @@ _ADMIN_EXTRA = [
     types.BotCommand("admin", "Open the admin panel"),
     types.BotCommand("whois", "Look up a phone number's Telegram account"),
     types.BotCommand("fixnames", "Store drivers under their fleet names"),
-    types.BotCommand("units", "Update this week's active unit list"),
     types.BotCommand("titlecheck", "Check group titles for lost unit numbers"),
     types.BotCommand("retitle", "Re-file groups whose title now names another unit"),
     types.BotCommand("quiet", "List groups with little recent traffic"),
