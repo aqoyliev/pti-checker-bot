@@ -82,6 +82,10 @@ docker compose up   # or run the full stack (bot + local Bot API server)
 `tests/conftest.py` sets dummy env vars so importing the bot modules doesn't
 require real secrets. Keep new unit tests pure (no network / no DB).
 
+One company = one deployment: same `master`, its own Railway project, bot token,
+Postgres and Telegram sessions. `docs/deploy-new-fleet.md` is the runbook for
+standing one up.
+
 ## Conventions
 
 - Everything is `async`. Offload blocking work (ffmpeg, Gemini SDK) with
