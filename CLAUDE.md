@@ -353,7 +353,11 @@ group page picks from it by name. Four writes sit on top of it: add
 field that is a full manual setup path, so an un-onboarded group no longer has
 to wait for a DM prompt — the groups list carries a **Needs setup** filter
 because such a group has no unit and no last PTI and therefore sorts to the
-bottom of every other ordering.
+bottom of every other ordering. **Solo driver** is the same argument one step
+on: a unit registered with exactly one driver reads as normal everywhere — it
+has a unit, a driver and recent PTIs — but the About text names two numbers in
+144 of 147 groups, so one is either a team that lost a driver or an onboarding
+that half landed, and nothing else in the panel makes it visible.
 
 Three rules it does *not* share with the Telegram picker:
 
