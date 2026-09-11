@@ -257,13 +257,17 @@ async function renderGroups() {
   const active = gs.filter(g => g.is_active).length;
   const configured = gs.filter(g => g.is_active && g.setup_complete).length;
   const needSetup = active - configured;
+  // A unit almost always runs two drivers -- the About text names two numbers in
+  // 144 of 147 groups -- so exactly one is the anomaly worth surfacing: either a
+  // team that lost a driver, or an onboarding that only half landed.
+  const solo = gs.filter(g => g.is_active && g.drivers.length === 1).length;
 
   // Filters, not sorts: an un-onboarded group has no unit and no last PTI, so
   // it sorts to the bottom of every ordering here and is effectively invisible
   // in a fleet of 150. Being able to ask for just those is the only way to
   // work through them.
   const filters = [["setup", "⚙️ Needs setup"], ["nodrv", "👤 No drivers"],
-                   ["inactive", "💤 Inactive"]];
+                   ["solo", "🧍 Solo driver"], ["inactive", "💤 Inactive"]];
 
   view.innerHTML =
     '<div class="card"><div class="row">' +
@@ -271,6 +275,8 @@ async function renderGroups() {
       active + ' active · ' + configured + ' configured</span>' +
       (needSetup ? '<div class="hint" style="margin-top:2px">⚙️ ' + needSetup +
         ' active group(s) still need setting up.</div>' : "") +
+      (solo ? '<div class="hint" style="margin-top:2px">🧍 ' + solo +
+        ' active group(s) have only one driver.</div>' : "") +
       '</div></div></div>' +
     '<input type="text" id="q" placeholder="Search unit, title, driver…" style="margin-bottom:10px">' +
     '<div class="sortbar"><span class="hint" style="font-size:12px">Sort</span>' +
@@ -298,6 +304,7 @@ async function renderGroups() {
   const matchesFilter = g => {
     if (groupFilter === "setup")    return g.is_active && !g.setup_complete;
     if (groupFilter === "nodrv")    return g.is_active && !g.drivers.length;
+    if (groupFilter === "solo")     return g.is_active && g.drivers.length === 1;
     if (groupFilter === "inactive") return !g.is_active;
     return true;
   };
