@@ -68,6 +68,46 @@ def test_unknown_window_is_a_clean_400(stubbed):
     assert resp.status == 400
 
 
+def test_custom_range_is_half_open_on_the_inclusive_end_date(stubbed, monkeypatch):
+    """The admin picks an inclusive end date; the fetch window must still
+    reach through the end of that day, not stop at its midnight."""
+    captured = {}
+
+    async def _fetch(dsn, since_utc, until_utc):
+        captured["since"], captured["until"] = since_utc, until_utc
+        return EMPTY_DATA
+    monkeypatch.setattr(server._report, "fetch", _fetch)
+
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
+                query={"window": "custom", "since": "2026-08-17", "until": "2026-08-23"})
+
+    assert resp.status == 200
+    assert captured["until"] > captured["since"]
+    # 23rd inclusive -> the fetch window extends into the 24th.
+    assert captured["until"].day == 24
+
+
+def test_custom_range_missing_dates_is_a_clean_400(stubbed):
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
+                query={"window": "custom"})
+
+    assert resp.status == 400
+
+
+def test_custom_range_end_before_start_is_a_clean_400(stubbed):
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
+                query={"window": "custom", "since": "2026-08-23", "until": "2026-08-17"})
+
+    assert resp.status == 400
+
+
+def test_custom_range_bad_date_format_is_a_clean_400(stubbed):
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
+                query={"window": "custom", "since": "not-a-date", "until": "2026-08-23"})
+
+    assert resp.status == 400
+
+
 def test_missing_chromium_is_reported_not_raised(monkeypatch):
     monkeypatch.setattr(server._report, "fetch", AsyncMock(return_value=EMPTY_DATA))
 

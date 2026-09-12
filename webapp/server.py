@@ -585,20 +585,31 @@ async def api_broadcast(request: web.Request) -> web.Response:
 # directly instead of shelling out, since the web panel already has every
 # credential it needs.
 
-_REPORT_WINDOWS = {"last_week", "days7"}
+_REPORT_WINDOWS = {"last_week", "days7", "custom"}
 
 
-def _report_window(kind: str, tz: ZoneInfo) -> tuple[date, date]:
+def _report_window(kind: str, tz: ZoneInfo, since_s: str | None,
+                   until_s: str | None) -> tuple[date, date]:
     today = datetime.now(tz).date()
     if kind == "last_week":
         this_monday = today - timedelta(days=today.weekday())
         return this_monday - timedelta(days=7), this_monday
+    if kind == "custom":
+        # `until_s` is the last day the admin picked, inclusive -- one day is
+        # added here so the rest of the pipeline can keep working with a
+        # half-open [since, until) range, same as --since/--until on the CLI.
+        since = date.fromisoformat(since_s)
+        until = date.fromisoformat(until_s) + timedelta(days=1)
+        if until <= since:
+            raise ValueError("the end date must be on or after the start date")
+        return since, until
     return today - timedelta(days=6), today + timedelta(days=1)  # rolling 7 days
 
 
-async def _report_pdf(which: str, window: str) -> tuple[bytes, str]:
+async def _report_pdf(which: str, window: str, since_s: str | None,
+                      until_s: str | None) -> tuple[bytes, str]:
     tz = ZoneInfo(FLEET_TZ)
-    since, until = _report_window(window, tz)
+    since, until = _report_window(window, tz, since_s, until_s)
     since_utc = datetime.combine(since, datetime.min.time(), tz).astimezone(
         timezone.utc).replace(tzinfo=None)
     until_utc = datetime.combine(until, datetime.min.time(), tz).astimezone(
@@ -636,8 +647,14 @@ async def api_report_pdf(request: web.Request) -> web.Response:
     window = request.query.get("window", "last_week")
     if window not in _REPORT_WINDOWS:
         return _err(400, "Unknown window.")
+    since_s = request.query.get("since")
+    until_s = request.query.get("until")
+    if window == "custom" and not (since_s and until_s):
+        return _err(400, "Pick a start and end date.")
     try:
-        pdf_bytes, fname = await _report_pdf(which, window)
+        pdf_bytes, fname = await _report_pdf(which, window, since_s, until_s)
+    except ValueError as e:
+        return _err(400, str(e) or "Bad date range.")
     except SystemExit as e:
         # to_pdf raises this (not a normal Exception) when no Chromium binary
         # is on the box -- a CLI-style error the panel has to translate.
