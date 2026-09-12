@@ -69,6 +69,11 @@ GROUP_QUIET_MAX_MESSAGES = env.int("GROUP_QUIET_MAX_MESSAGES", default=3)
 # as UTC; only the week boundary shifts.
 FLEET_TZ = env.str("FLEET_TZ", default="America/New_York")
 
+# Cosmetic only: the headline on the web panel's report PDFs (see
+# webapp/server.py's /api/reports/*.pdf, scripts/fleet_report.py). Not a
+# database filter — one deployment already serves one fleet.
+FLEET_NAME = env.str("FLEET_NAME", default="Fleet")
+
 # Web admin panel (Telegram Mini App). The bot always starts a small aiohttp
 # server (webapp/server.py) that serves the panel UI + JSON API on WEBAPP_PORT —
 # on Railway the injected PORT wins, so generating a service domain "just works".

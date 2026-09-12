@@ -55,12 +55,14 @@
   .btn:disabled { opacity: .5; }
   .btn.inline { display: inline-block; width: auto; padding: 8px 14px; margin: 0; }
 
-  input[type=text], textarea {
+  input[type=text], textarea, select {
     width: 100%; border: 1px solid rgba(128,128,128,.3); border-radius: 10px;
     background: var(--bg); color: var(--text); padding: 10px 12px; font-size: 15px;
     outline: none;
   }
   textarea { min-height: 90px; resize: vertical; font-family: inherit; }
+  select { margin-bottom: 8px; }
+  .btn.half { width: calc(50% - 4px); display: inline-block; }
 
   .chip {
     display: inline-block; font-size: 12px; font-weight: 600;
@@ -691,7 +693,7 @@ async function renderStats() {
     el.onclick = () => { current = { tab: "groups", gid: Number(el.dataset.gid) }; render(); });
 }
 
-// ---------- tools (model + broadcast) ----------
+// ---------- tools (model + broadcast + reports) ----------
 
 async function renderTools() {
   view.innerHTML = '<div class="center">Loading…</div>';
@@ -714,7 +716,16 @@ async function renderTools() {
       'Sent as plain text to every active group.</div>' +
       '<textarea id="bcText" placeholder="Message…"></textarea>' +
       '<button class="btn" id="bcSend">Send broadcast</button>' +
-      '<div class="hint" id="bcResult" style="margin-top:6px"></div></div>';
+      '<div class="hint" id="bcResult" style="margin-top:6px"></div></div>' +
+    '<div class="card"><b>📄 Reports</b><div class="hint" style="margin:4px 0 8px">' +
+      'Two PDFs: fleet statistics, and inspections by driver.</div>' +
+      '<select id="repWindow">' +
+        '<option value="last_week">Last completed week (Mon–Sun)</option>' +
+        '<option value="days7">Last 7 days</option>' +
+      '</select>' +
+      '<button class="btn half" id="repStats">📊 Statistics</button> ' +
+      '<button class="btn half secondary" id="repDriver">🧑 Driver report</button>' +
+      '<div class="hint" id="repStatus" style="margin-top:6px"></div></div>';
 
   view.querySelectorAll('input[name=model]').forEach(r => r.onchange = async () => {
     try {
@@ -738,6 +749,39 @@ async function renderTools() {
     } catch (e) { toast(e.message); }
     btn.disabled = false; btn.textContent = "Send broadcast";
   };
+
+  document.getElementById("repStats").onclick = e => downloadReport("stats", e.currentTarget);
+  document.getElementById("repDriver").onclick = e => downloadReport("driver", e.currentTarget);
+}
+
+// Downloads a binary file behind the same "tma" auth as api() — a plain
+// <a href> can't carry that header, so the bytes come in via fetch and go
+// out again as a blob URL.
+async function downloadReport(which, btn) {
+  const status = document.getElementById("repStatus");
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Generating…"; status.textContent = "";
+  try {
+    const win = document.getElementById("repWindow").value;
+    const res = await fetch("/api/reports/" + which + ".pdf?window=" + win, {
+      headers: { "Authorization": "tma " + (tg ? tg.initData : "") },
+    });
+    if (!res.ok) {
+      let msg = "HTTP " + res.status;
+      try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const match = (res.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+    const fname = match ? match[1] : which + ".pdf";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast("Downloaded " + fname);
+  } catch (e) { status.textContent = "⚠️ " + e.message; }
+  btn.disabled = false; btn.textContent = orig;
 }
 
 // ---------- admins ----------

@@ -59,6 +59,10 @@ The other `process_*` functions in `pti_processor.py` are legacy/unused.
 ## Runtime requirements
 
 - `ffmpeg` (+ `ffprobe`) on PATH — used to extract video frames.
+- `chromium` on PATH (or one of `CHROME_CANDIDATES` in `scripts/fleet_report.py`)
+  — headless-renders the web panel's report PDFs. The Dockerfile installs it;
+  without it the Tools tab's report buttons fail with a clear error instead of
+  a crash.
 - PostgreSQL via `DATABASE_URL`.
 - `GEMINI_API_KEY`.
 - Optional local [Bot API server](https://github.com/tdlib/telegram-bot-api) via
@@ -581,6 +585,20 @@ python scripts/fleet_report.py --fleet jrd-pti --since 2026-08-17 --until 2026-0
 It needs `DATABASE_URL` (or `--database-url`) and nothing else. Rendering is
 headless Chromium (`--print-to-pdf`) over generated HTML, so there is no PDF
 library to keep current. Every statement it runs is a SELECT.
+
+**The web panel's Tools tab generates the same two PDFs on demand** — pick a
+window (last completed week, or a rolling 7 days) and download either one.
+`webapp/server.py`'s `/api/reports/{which}.pdf` calls `fetch`/`build`/
+`stats_html`/`driver_html`/`to_pdf` directly rather than shelling out (the
+web panel already holds every credential the CLI avoids needing), running
+`to_pdf`'s blocking Chromium subprocess in a thread so it doesn't stall the
+event loop. The PDF's headline uses `FLEET_NAME` (cosmetic only, default
+`"Fleet"`) — not `--fleet`, since one deployment already serves one fleet.
+This is *why the Dockerfile installs `chromium`* now: before this, a missing
+Chromium binary only broke a script nobody ran unattended; now it breaks a
+button in production, so `to_pdf`'s `SystemExit` is caught and turned into a
+plain "PDF rendering isn't available" panel error instead of a 500 with no
+explanation.
 
 - **It does not import the `utils` package.** `data/config.py` demands
   `BOT_TOKEN` and every other bot secret at import time, so the scoring module

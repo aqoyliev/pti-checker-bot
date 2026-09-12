@@ -12,15 +12,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 import time
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from html import escape
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
-from data.config import WEBAPP_PORT
+from data.config import DATABASE_URL, FLEET_NAME, FLEET_TZ, WEBAPP_PORT
 from loader import bot
+from scripts import fleet_report as _report
 from utils import userbot
 from utils.db import (
     add_admin,
@@ -575,6 +579,77 @@ async def api_broadcast(request: web.Request) -> web.Response:
     return _json({"ok": True, "sent": sent, "failed": failed})
 
 
+# ---------- fleet report PDFs ----------
+# scripts/fleet_report.py is also a standalone CLI (kept free of `utils` so it
+# never needs a bot token to print a PDF); this just calls its pure pieces
+# directly instead of shelling out, since the web panel already has every
+# credential it needs.
+
+_REPORT_WINDOWS = {"last_week", "days7"}
+
+
+def _report_window(kind: str, tz: ZoneInfo) -> tuple[date, date]:
+    today = datetime.now(tz).date()
+    if kind == "last_week":
+        this_monday = today - timedelta(days=today.weekday())
+        return this_monday - timedelta(days=7), this_monday
+    return today - timedelta(days=6), today + timedelta(days=1)  # rolling 7 days
+
+
+async def _report_pdf(which: str, window: str) -> tuple[bytes, str]:
+    tz = ZoneInfo(FLEET_TZ)
+    since, until = _report_window(window, tz)
+    since_utc = datetime.combine(since, datetime.min.time(), tz).astimezone(
+        timezone.utc).replace(tzinfo=None)
+    until_utc = datetime.combine(until, datetime.min.time(), tz).astimezone(
+        timezone.utc).replace(tzinfo=None)
+
+    data = await _report.fetch(DATABASE_URL, since_utc, until_utc)
+    agg = _report.build(data, tz, since, until)
+    meta = {
+        "fleet": _report.display_name(FLEET_NAME),
+        "scope": f"{FLEET_NAME} / production",
+        "since": since, "until": until,
+        "pulled": datetime.now(tz).date(),
+        "tz": FLEET_TZ,
+        "title": f"{FLEET_NAME} fleet inspection statistics",
+        "title_d": f"{FLEET_NAME} driver inspection report",
+    }
+    html_text = (_report.stats_html(agg, meta) if which == "stats"
+                else _report.driver_html(agg, meta))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "report.pdf"
+        # Shells out to headless Chromium; keep it off the event loop.
+        await asyncio.to_thread(_report.to_pdf, html_text, out)
+        pdf_bytes = out.read_bytes()
+
+    tag = f"{FLEET_NAME}-{until - timedelta(days=1):%Y%m%d}"
+    fname = f"{tag}.pdf" if which == "stats" else f"{tag}-driver-report.pdf"
+    return pdf_bytes, fname
+
+
+async def api_report_pdf(request: web.Request) -> web.Response:
+    which = request.match_info["which"]
+    if which not in ("stats", "driver"):
+        return _err(404, "Unknown report.")
+    window = request.query.get("window", "last_week")
+    if window not in _REPORT_WINDOWS:
+        return _err(400, "Unknown window.")
+    try:
+        pdf_bytes, fname = await _report_pdf(which, window)
+    except SystemExit as e:
+        # to_pdf raises this (not a normal Exception) when no Chromium binary
+        # is on the box -- a CLI-style error the panel has to translate.
+        return _err(500, str(e) or "PDF rendering isn't available on this server.")
+    logging.info("web panel: admin %s generated the %s report (%s)",
+                 request["admin"]["user_id"], which, window)
+    return web.Response(
+        body=pdf_bytes, content_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", index)
@@ -598,6 +673,7 @@ def build_app() -> web.Application:
     app.router.add_post("/api/admins", api_admins_add)
     app.router.add_delete("/api/admins/{uid}", api_admins_remove)
     app.router.add_post("/api/broadcast", api_broadcast)
+    app.router.add_get("/api/reports/{which}.pdf", api_report_pdf)
     return app
 
 

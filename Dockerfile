@@ -13,6 +13,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     ffmpeg \
+    chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=tgapi /telegram-bot-api /usr/local/bin/telegram-bot-api
