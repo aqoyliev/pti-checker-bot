@@ -579,7 +579,7 @@ async function openPicker(g) {
   }
   if (!drvUI.pick) return;   // cancelled while the roster was loading
 
-  // No roster (no userbot session, or the account isn't in the group) is the
+  // No roster (MTProto unconfigured, or the bot isn't in the group) is the
   // documented degraded path, not an error: fall back to a typed user id, the
   // same escape hatch /adddriver is.
   const manual =

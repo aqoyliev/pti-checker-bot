@@ -42,9 +42,11 @@ issues) is posted back into the group.
 - **`utils/driver_names.py`** — the fleet's driver name: parsing it out of a
   group's About text, and pairing it to a registered `user_id` (`/fixnames`,
   `handlers/admin/names.py`).
-- **`utils/userbot.py`** — read-only Telethon *user* session. It exists for the
-  one thing the Bot API cannot do: list a group's members.
-- **`utils/phone_lookup.py`** — a *second*, write-capable user session: phone
+- **`utils/userbot.py`** — read-only Telethon client, logged in as the bot
+  itself over MTProto. It exists for the one thing the Bot API cannot do: list
+  a group's members (plus the About text). No separate account needed — see
+  "Group onboarding" below.
+- **`utils/phone_lookup.py`** — a separate, write-capable *user* session: phone
   number → account (`/whois`, `scripts/tg_phone_lookup.py`). Separate account on
   purpose (below).
 - **`middlewares/throttling.py`** — anti-flood for text messages.
@@ -61,10 +63,10 @@ The other `process_*` functions in `pti_processor.py` are legacy/unused.
 - `GEMINI_API_KEY`.
 - Optional local [Bot API server](https://github.com/tdlib/telegram-bot-api) via
   `LOCAL_SERVER_URL` to lift the 20 MB file limit (the Dockerfile builds this).
-- Optional Telethon *user* session for the onboarding member picker:
-  `TELEGRAM_API_ID` + `TELEGRAM_API_HASH` (shared with the local Bot API server)
-  and `TELEGRAM_SESSION`. Without them onboarding still runs, just with no
-  member buttons. See "Group onboarding" below.
+- Optional `TELEGRAM_API_ID` + `TELEGRAM_API_HASH` (shared with the local Bot
+  API server) for the onboarding member picker — it logs the bot itself into
+  MTProto, no separate session. Without them onboarding still runs, just with
+  no member buttons. See "Group onboarding" below.
 
 ## Dev workflow
 
@@ -321,27 +323,27 @@ gone. A unit is decided from the group's own title and the driver's own video.
 `/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
 not advertised to the group any more.
 
-**One session per host.** Telegram revokes an authorization key seen from two IP
-addresses at once (`AuthKeyDuplicatedError`) and *both* copies die — this took
-out member lookup on 2026-08-09, when the session deployed to Railway was also
-used by a local script. `~/.pti-tg/fleet_audit` is for local tooling,
-`~/.pti-tg/bot_userbot` is for Railway, and they must never be the same file.
-Create one with `scripts/tg_login.py --name <n>`; recovery from a revoked key
-means moving the dead `.session` aside (Telethon retries it instead of
-prompting) and logging in again.
-
-Telethon also cannot address a chat by bare id on a fresh session — the access
-hash is only learned by walking the dialog list, so `get_entity(-100…)` raises
-`ValueError` and member lookup silently returns `[]`. `utils/userbot.py` warms
-the dialog cache once on the first unresolved chat; don't remove that.
+**The roster read no longer needs a user session at all.** Before 2026-09-12
+this ran on a *user* account (`TELEGRAM_SESSION`), and inherited the same
+"one session per host" fragility the lookup account still has below —
+Telegram revokes an authorization key seen from two IP addresses at once
+(`AuthKeyDuplicatedError`), which took out member lookup fleet-wide on
+2026-08-09 when the Railway session was also used by a local script. Measured
+against six live fleet groups (both chat shapes, none with the bot as admin),
+`channels.getParticipants` answers fully for a bot that is merely a member —
+admin rights are not required — so `utils/userbot.py` now logs in as the bot
+itself (`BOT_TOKEN`) over a `MemorySession`, the same credential the Bot API
+polling already uses. A bot token has no single-authorization-key limit, so
+there is no "don't reuse this session" rule to maintain, no `.session` file to
+generate or ship to Railway, and no dialog-cache warming — the entity is built
+directly from the id (`_peer`) instead of walked via `iter_dialogs`. The one
+thing this does not reach is `/whois`: `contacts.importContacts` is closed to
+bots, so phone lookup keeps needing the separate user account below.
 
 The userbot is strictly read-only (never sends, joins, leaves or edits) and
-connects lazily, so a bot that never onboards a group never opens the session.
-Every failure path degrades — a missing session, an unauthorized account, or a
-group the account is not in all yield "no member buttons", not an exception.
-`TELEGRAM_SESSION` is full access to the account it was made from: use a
-dedicated account and move it with `scripts/tg_session_to_railway.py`, which
-never prints the value.
+connects lazily, so a bot that never onboards a group never opens this MTProto
+client at all. Every failure path degrades — MTProto unconfigured, or a group
+the bot is not in — to "no member buttons", not an exception.
 
 ### The web panel's driver picker: a search, not a keyboard
 
@@ -376,7 +378,7 @@ Degrading works as it does for onboarding: no session, or an account that is not
 in the group, yields `available: false` plus the reason, and the panel falls back
 to a typed user id.
 
-## Phone number → account: the second userbot
+## Phone number → account: the lookup userbot
 
 `utils/phone_lookup.py` answers "whose Telegram account owns this number?",
 used by `/whois <phone…>` (admin DM) and `scripts/tg_phone_lookup.py`. Driver
@@ -393,9 +395,10 @@ and both halves of that matter:
   Every imported contact is deleted again in a `finally`, so the contact list is
   left as found, but the call is still a write and must not live in
   `utils/userbot.py`. A test asserts that module stays free of writes.
-- **It is the most rate-limited thing a user account can do.** The roster
-  session is load-bearing for onboarding; a contact-import limit picked up while
-  answering `/whois` must not be able to take member lookup down with it.
+- **It is the most rate-limited thing a user account can do.** That is also
+  why it could never move to the bot token the way the roster read did —
+  `contacts.importContacts` is closed to bots outright, not just rate-limited —
+  so `/whois` is the one piece of onboarding still tied to a user account at all.
 
 Three outcomes, and conflating the last two is the bug to avoid:
 
@@ -410,9 +413,10 @@ who is perfectly reachable, so the refusal raises. Observed live on 2026-08-12:
 the `Safety` account (`8554521339`) returns `retry_contacts` for every number
 including a control, which is why lookup gets its own, older account.
 
-The one-session-per-host rule applies here too: `lookup_userbot` is the Railway
-session, `lookup_local` is for `scripts/tg_phone_lookup.py`, and they are
-different sessions.
+The one-session-per-host rule still applies to this account: `lookup_userbot`
+is the Railway session, `lookup_local` is for `scripts/tg_phone_lookup.py`, and
+they are different sessions. (The roster read no longer has a session exposed
+to this at all — it runs on the bot token instead, above.)
 
 ```bash
 railway run py -3.11 scripts/tg_login.py --name lookup_userbot

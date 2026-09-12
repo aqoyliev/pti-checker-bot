@@ -79,7 +79,7 @@ def test_no_session_is_a_reason_not_an_error(roster, db):
 
     assert status == 200
     assert body["available"] is False
-    assert "userbot session" in body["reason"]
+    assert "isn't configured" in body["reason"]
 
 
 def test_an_empty_roster_says_the_account_is_probably_not_in_the_group(roster, db):

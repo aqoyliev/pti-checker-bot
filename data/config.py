@@ -94,23 +94,20 @@ SMTP_FROM = env.str("SMTP_FROM", default="") or SMTP_USER
 ALERT_EMAIL_TO = env.str("ALERT_EMAIL_TO", default="")
 
 # --- userbot (member lookup) ---
-# The Bot API cannot list group members, so onboarding borrows a *user* session
-# purely to read the roster. All three are optional: without them the feature
-# degrades to "no member buttons" rather than failing. See utils/userbot.py.
+# The Bot API cannot list group members, so onboarding reads the roster over
+# MTProto instead, logged in as the bot itself (TELEGRAM_API_ID/HASH are the
+# app credentials MTProto needs even for a bot login; BOT_TOKEN above is the
+# credential). Optional: without TELEGRAM_API_ID/HASH the feature degrades to
+# "no member buttons" rather than failing. See utils/userbot.py.
 TELEGRAM_API_ID = env.str("TELEGRAM_API_ID", default="")
 TELEGRAM_API_HASH = env.str("TELEGRAM_API_HASH", default="")
-# A Telethon StringSession — how the session travels to Railway (a .session file
-# would not survive a redeploy). Treat it like a password: it is full access to
-# the account it was made from.
-TELEGRAM_SESSION = env.str("TELEGRAM_SESSION", default="")
-TELEGRAM_SESSION_FILE = env.str("TELEGRAM_SESSION_FILE", default="")
 
 # --- lookup userbot (phone number -> account) ---
-# A *second*, separate user session, used only by utils/phone_lookup.py. It is
-# separate for two reasons: resolving a phone number means importing a contact,
-# which is a write, and utils/userbot.py is strictly read-only; and contact
-# import is the most heavily rate-limited thing a user account can do, so it
-# must not be able to get the roster session limited. Same API credentials, a
-# different account. Absent config disables the feature.
+# A separate *user* session, used only by utils/phone_lookup.py. It needs its
+# own account -- unlike the bot-token roster lookup above, contact import
+# (resolving a phone number) is a write, and it is closed to bots entirely.
+# It is also the most heavily rate-limited thing a user account can do, so it
+# must stay isolated from everything else. Same API credentials, its own
+# account. Absent config disables the feature.
 TELEGRAM_LOOKUP_SESSION = env.str("TELEGRAM_LOOKUP_SESSION", default="")
 TELEGRAM_LOOKUP_SESSION_FILE = env.str("TELEGRAM_LOOKUP_SESSION_FILE", default="")

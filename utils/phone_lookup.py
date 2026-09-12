@@ -1,4 +1,4 @@
-"""Phone number -> Telegram account, via a second user session.
+"""Phone number -> Telegram account, via a dedicated user session.
 
 Deliberately NOT part of utils/userbot.py. That module is strictly read-only,
 and there is no read-only way to do this: Telegram will only tell you which
@@ -8,11 +8,13 @@ imported contact is deleted again before this module returns, so the list is
 left as it was found, but the call is still a write and stays out of the
 read-only client.
 
-The second reason for a second account is rate limiting. Contact import is the
-most aggressively limited thing a user account can do — a young account is
-often refused outright — and the roster session is load-bearing for onboarding.
-Getting *that* account limited would take out member lookup fleet-wide, so the
-two never share an account.
+It also cannot run on the bot token the way the roster read
+(`utils/userbot.py`) does: `contacts.importContacts` is closed to bots
+outright, not merely rate-limited, so this is the one piece of onboarding
+still tied to a real user account. And contact import is itself the most
+aggressively limited thing a user account can do — a young account is often
+refused outright — which is why this account exists for nothing else and is
+never shared with anything.
 
 Three outcomes are worth telling apart, and only two of them are visible:
 
@@ -26,7 +28,8 @@ Three outcomes are worth telling apart, and only two of them are visible:
     LookupUnavailable rather than quietly reading as "no match".
 
 Configuration (absent config simply disables the feature):
-  TELEGRAM_API_ID / TELEGRAM_API_HASH        shared with the roster userbot
+  TELEGRAM_API_ID / TELEGRAM_API_HASH        shared with the bot-token roster
+                                              read (utils/userbot.py)
   TELEGRAM_LOOKUP_SESSION                    a Telethon StringSession
   TELEGRAM_LOOKUP_SESSION_FILE               path to a .session file (local dev)
 """

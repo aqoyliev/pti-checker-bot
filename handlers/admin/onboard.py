@@ -160,8 +160,9 @@ def _keyboard(admin_id: int, group_id: int) -> InlineKeyboardMarkup:
     elif st.get("show_all") and st["members"]:
         kb.row(InlineKeyboardButton("🙈 Hide known non-drivers",
                                     callback_data=f"ob:a:{group_id}:0"))
-    # Refresh is the fix for the commonest failure: the userbot account was not
-    # in the group when the prompt was built. Add it, tap this, get the roster.
+    # Refresh retries the roster read — for a transient MTProto hiccup, or
+    # Telegram not yet reflecting a membership change made after the prompt
+    # was built.
     kb.row(InlineKeyboardButton("🔄 Refresh members",
                                 callback_data=f"ob:r:{group_id}:0"))
     kb.row(
@@ -193,10 +194,8 @@ def _text(admin_id: int, group_id: int) -> str:
     if st.get("auto_note"):
         lines.append(f"ℹ️ Couldn't do this automatically: {escape(st['auto_note'])}.")
     if not st["members"]:
-        lines.append("\n⚠️ No member list available — the userbot account is "
-                     "probably not in this group. Add it, then tap "
-                     "<b>Refresh members</b>. (Or add drivers with /adddriver "
-                     "in the group.)")
+        lines.append("\n⚠️ No member list available. Tap <b>Refresh members</b> "
+                     "to try again, or add drivers with /adddriver in the group.")
     else:
         lines.append(f"\nTap up to {MAX_DRIVERS} drivers, then Save. "
                      f"Selected: {len(st['selected'])}/{MAX_DRIVERS}")
@@ -409,9 +408,10 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
         return
 
     if action == "r":
-        # The account was probably just added to the group. Re-read the roster
-        # and the About text; keep whatever drivers were already picked, minus
-        # anyone who is no longer a member.
+        # Re-read the roster and the About text -- an empty roster is usually a
+        # transient MTProto hiccup now that this runs on the bot's own token,
+        # not a missing account. Keep whatever drivers were already picked,
+        # minus anyone who is no longer a member.
         await call.answer("Checking…")
         members = await userbot.list_members(group_id)
         roster = [m for m in members if not m.is_bot]
@@ -439,8 +439,8 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
             pass
         if not st["members"]:
             await call.answer(
-                "Still no member list. Add the userbot account to the group "
-                "first, then tap Refresh again.", show_alert=True)
+                "Still no member list. Try again in a moment, or add drivers "
+                "with /adddriver in the group.", show_alert=True)
         return
 
     if action == "e":

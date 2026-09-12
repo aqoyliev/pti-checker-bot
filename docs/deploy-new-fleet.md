@@ -1,12 +1,12 @@
 # Standing up the bot for a new company
 
 One company = one deployment. Same code, same `master` branch, different
-Railway project: its own bot token, its own Postgres, its own Telegram user
-sessions. Nothing in the bot is keyed on which fleet it serves, so there is no
+Railway project: its own bot token, its own Postgres, its own Telethon lookup
+session. Nothing in the bot is keyed on which fleet it serves, so there is no
 code change to make — this document is the config and the order to do it in.
 
 Never share a database, a bot token or a Telethon session between two fleets.
-The session rule is not a preference: see [Userbot sessions](#3-userbot-sessions).
+The session rule is not a preference: see [The lookup userbot](#3-the-lookup-userbot).
 
 ## 1. Before you touch Railway
 
@@ -57,40 +57,43 @@ Per-fleet decisions — every one has a default, so set only what differs:
 | `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` | unset | Email on the overdue escalation. A silent no-op until all three are set. `SMTP_PASSWORD` must be a Gmail *App Password*. |
 | `GROUP_QUIET_DAYS` / `GROUP_QUIET_MAX_MESSAGES` | `3` / `3` | Only affects the `/quiet` report. |
 
-## 3. Userbot sessions
+## 3. The lookup userbot
 
-Two optional user accounts, each doing one thing the Bot API cannot:
+Member lookup (the onboarding driver picker, the web panel's member search)
+reads a group's roster over MTProto **as the bot itself** — `TELEGRAM_API_ID`/
+`TELEGRAM_API_HASH` above plus `BOT_TOKEN` are all it needs, no separate
+session to generate. It works for a bot that is merely a member of the group;
+admin rights are not required.
 
-- `TELEGRAM_SESSION` — reads a group's member list, which is what builds the
-  onboarding driver picker and the web panel's member search. Read-only.
+One optional *user* account remains, for the one thing a bot token cannot do:
+
 - `TELEGRAM_LOOKUP_SESSION` — resolves a phone number to an account (`/whois`,
   and the automatic onboarding path). Writes (a contact import, deleted again
   immediately) and is the most rate-limited thing an account can do, which is
-  why it is a **separate account**, not just a separate session.
+  why it is a dedicated account, used for nothing else.
 
-**Generate new sessions for the new project. Do not copy an existing fleet's.**
+**Generate a new session for the new project. Do not copy an existing fleet's.**
 Telegram revokes an authorization key seen from two IP addresses at once and
 *both* copies die — that took member lookup down across the fleet on
-2026-08-09. Extra sessions on the same account are fine (that is what
-Settings → Devices lists); one session in two places is not.
+2026-08-09 (back when it was also a user session). Extra sessions on the same
+account are fine (that is what Settings → Devices lists); one session in two
+places is not.
 
 ```
-railway run py -3.11 scripts/tg_login.py --name bot_userbot
+railway run py -3.11 scripts/tg_login.py --name lookup_userbot
 railway run py -3.11 scripts/tg_session_to_railway.py \
-    --service <new-service> --session bot_userbot --var TELEGRAM_SESSION
+    --service <new-service> --session lookup_userbot --var TELEGRAM_LOOKUP_SESSION
 ```
 
 `tg_login.py` is interactive (phone, code, 2FA) and needs a real terminal — it
 cannot be run through an agent or a pipe. Neither script ever prints the
 session value.
 
-The account must be **a member of the new company's groups**. It can only read
-a roster it is in; for a group it is not in, member lookup returns nothing.
+The account must be a member of the groups it needs to resolve numbers for.
 
-Skipping both sessions is supported: onboarding degrades to "no member
-buttons", `/whois` is off, and drivers are added by hand (`/adddriver`,
-`/setunit`, or the web panel's search — which also needs the session, so on a
-sessionless deployment the panel falls back to typing a user id).
+Skipping it is supported: `/whois` and the phone-based auto-config path are
+off, and drivers are added by hand (`/adddriver`, `/setunit`, or the web
+panel's search, which still works off the bot-token roster either way).
 
 ## 4. Verify the first deploy
 

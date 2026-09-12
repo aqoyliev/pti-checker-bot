@@ -41,7 +41,7 @@ _pending: dict[int, dict] = {}
 _PENDING_TTL = 900  # seconds; the scan itself takes minutes
 _PREVIEW_LIMIT = 25
 # Between About-text reads. The same courtesy the title sweep pays: this walks
-# the whole fleet on one user session.
+# the whole fleet on one MTProto connection.
 _FETCH_DELAY = 0.2
 
 

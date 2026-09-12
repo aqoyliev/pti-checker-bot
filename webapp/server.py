@@ -368,14 +368,13 @@ async def api_group_members(request: web.Request) -> web.Response:
         return _err(404, "Group not found.")
     if not userbot.is_configured():
         return _json({"available": False, "members": [], "reason":
-                      "No userbot session is configured, so member lists are "
+                      "Member lookup isn't configured, so member lists are "
                       "unavailable."})
 
     roster = [m for m in await userbot.list_members(gid) if not m.is_bot]
     if not roster:
         return _json({"available": False, "members": [], "reason":
-                      "No member list — the userbot account is probably not in "
-                      "this group."})
+                      "No member list — the bot is probably not in this group."})
 
     driver_ids = {d["user_id"] for d in await get_drivers(gid)}
     non_drivers = await get_non_driver_ids()
