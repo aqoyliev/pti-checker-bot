@@ -719,12 +719,7 @@ async function renderTools() {
       '<div class="hint" id="bcResult" style="margin-top:6px"></div></div>' +
     '<div class="card"><b>📄 Reports</b><div class="hint" style="margin:4px 0 8px">' +
       'Two PDFs: fleet statistics, and inspections by driver.</div>' +
-      '<select id="repWindow">' +
-        '<option value="last_week">Last completed week (Mon–Sun)</option>' +
-        '<option value="days7">Last 7 days</option>' +
-        '<option value="custom">Custom range…</option>' +
-      '</select>' +
-      '<div class="row" id="repCustom" hidden style="margin:-2px 0 8px">' +
+      '<div class="row" style="margin:0 0 8px">' +
         '<input type="date" id="repSince" style="flex:1">' +
         '<input type="date" id="repUntil" style="flex:1">' +
       '</div>' +
@@ -732,16 +727,11 @@ async function renderTools() {
       '<button class="btn half secondary" id="repDriver">🧑 Driver report</button>' +
       '<div class="hint" id="repStatus" style="margin-top:6px"></div></div>';
 
-  // Sensible defaults for the moment "Custom range" is picked, before the
-  // admin has touched either field: the same 7-day window the default option
-  // already shows, just editable.
+  // Default to the last 7 days -- both fields stay freely editable.
   const today = new Date(), weekAgo = new Date(today - 6 * 86400000);
   const isoDay = d => d.toISOString().slice(0, 10);
   document.getElementById("repSince").value = isoDay(weekAgo);
   document.getElementById("repUntil").value = isoDay(today);
-  document.getElementById("repWindow").onchange = e => {
-    document.getElementById("repCustom").hidden = e.target.value !== "custom";
-  };
 
   view.querySelectorAll('input[name=model]').forEach(r => r.onchange = async () => {
     try {
@@ -778,14 +768,10 @@ async function downloadReport(which, btn) {
   const orig = btn.textContent;
   btn.disabled = true; btn.textContent = "Generating…"; status.textContent = "";
   try {
-    const win = document.getElementById("repWindow").value;
-    let qs = "window=" + win;
-    if (win === "custom") {
-      const since = document.getElementById("repSince").value;
-      const until = document.getElementById("repUntil").value;
-      if (!since || !until) throw new Error("Pick a start and end date.");
-      qs += "&since=" + since + "&until=" + until;
-    }
+    const since = document.getElementById("repSince").value;
+    const until = document.getElementById("repUntil").value;
+    if (!since || !until) throw new Error("Pick a start and end date.");
+    const qs = "since=" + since + "&until=" + until;
     const res = await fetch("/api/reports/" + which + ".pdf?" + qs, {
       headers: { "Authorization": "tma " + (tg ? tg.initData : "") },
     });

@@ -1,6 +1,6 @@
 """The web panel's report-PDF download route.
 
-Exercises the wiring (window parsing, filename, error translation) with
+Exercises the wiring (date parsing, filename, error translation) with
 scripts.fleet_report's DB fetch and Chromium call stubbed out -- neither
 belongs in a pure unit test.
 """
@@ -26,6 +26,7 @@ def _call(handler, **kwargs):
 
 
 EMPTY_DATA = {"groups": [], "drivers": [], "window": [], "alltime": {}}
+A_RANGE = {"since": "2026-08-17", "until": "2026-08-23"}
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ def stubbed(monkeypatch):
 
 
 def test_stats_pdf_downloads_with_a_dated_filename(stubbed):
-    resp = _call(server.api_report_pdf, match_info={"which": "stats"})
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"}, query=A_RANGE)
 
     assert resp.status == 200
     assert resp.content_type == "application/pdf"
@@ -50,25 +51,18 @@ def test_stats_pdf_downloads_with_a_dated_filename(stubbed):
 
 
 def test_driver_pdf_filename_says_so(stubbed):
-    resp = _call(server.api_report_pdf, match_info={"which": "driver"})
+    resp = _call(server.api_report_pdf, match_info={"which": "driver"}, query=A_RANGE)
 
     assert "driver-report" in resp.headers["Content-Disposition"]
 
 
 def test_unknown_report_kind_is_a_clean_404(stubbed):
-    resp = _call(server.api_report_pdf, match_info={"which": "nonsense"})
+    resp = _call(server.api_report_pdf, match_info={"which": "nonsense"}, query=A_RANGE)
 
     assert resp.status == 404
 
 
-def test_unknown_window_is_a_clean_400(stubbed):
-    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
-                query={"window": "last_decade"})
-
-    assert resp.status == 400
-
-
-def test_custom_range_is_half_open_on_the_inclusive_end_date(stubbed, monkeypatch):
+def test_range_is_half_open_on_the_inclusive_end_date(stubbed, monkeypatch):
     """The admin picks an inclusive end date; the fetch window must still
     reach through the end of that day, not stop at its midnight."""
     captured = {}
@@ -78,8 +72,7 @@ def test_custom_range_is_half_open_on_the_inclusive_end_date(stubbed, monkeypatc
         return EMPTY_DATA
     monkeypatch.setattr(server._report, "fetch", _fetch)
 
-    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
-                query={"window": "custom", "since": "2026-08-17", "until": "2026-08-23"})
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"}, query=A_RANGE)
 
     assert resp.status == 200
     assert captured["until"] > captured["since"]
@@ -87,23 +80,29 @@ def test_custom_range_is_half_open_on_the_inclusive_end_date(stubbed, monkeypatc
     assert captured["until"].day == 24
 
 
-def test_custom_range_missing_dates_is_a_clean_400(stubbed):
-    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
-                query={"window": "custom"})
+def test_missing_dates_is_a_clean_400(stubbed):
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"})
 
     assert resp.status == 400
 
 
-def test_custom_range_end_before_start_is_a_clean_400(stubbed):
+def test_one_missing_date_is_a_clean_400(stubbed):
     resp = _call(server.api_report_pdf, match_info={"which": "stats"},
-                query={"window": "custom", "since": "2026-08-23", "until": "2026-08-17"})
+                query={"since": "2026-08-17"})
 
     assert resp.status == 400
 
 
-def test_custom_range_bad_date_format_is_a_clean_400(stubbed):
+def test_end_before_start_is_a_clean_400(stubbed):
     resp = _call(server.api_report_pdf, match_info={"which": "stats"},
-                query={"window": "custom", "since": "not-a-date", "until": "2026-08-23"})
+                query={"since": "2026-08-23", "until": "2026-08-17"})
+
+    assert resp.status == 400
+
+
+def test_bad_date_format_is_a_clean_400(stubbed):
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"},
+                query={"since": "not-a-date", "until": "2026-08-23"})
 
     assert resp.status == 400
 
@@ -116,7 +115,7 @@ def test_missing_chromium_is_reported_not_raised(monkeypatch):
 
     monkeypatch.setattr(server._report, "to_pdf", _no_chrome)
 
-    resp = _call(server.api_report_pdf, match_info={"which": "stats"})
+    resp = _call(server.api_report_pdf, match_info={"which": "stats"}, query=A_RANGE)
 
     assert resp.status == 500
     body = json.loads(resp.body)

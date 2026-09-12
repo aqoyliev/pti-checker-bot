@@ -231,14 +231,19 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
 
 # ---------------------------------------------------------------- charting
 
-def bar_chart(series, value_key, title, note, *, width=470, height=150,
+def bar_chart(series, value_key, title, note, *, width=470, height=185,
               label_every=1):
     """A labelled bar chart. Every plotted value is printed, so nothing here
-    depends on colour alone -- the reports are read in greyscale on phones."""
+    depends on colour alone -- the reports are read in greyscale on phones.
+
+    Font sizes here are viewBox user-units, not screen pixels -- with three
+    charts side by side the SVG is scaled down to roughly two-thirds of its
+    viewBox width, so text needs to run noticeably larger in-markup than the
+    plain HTML around it to still read as a normal size once rendered."""
     vals = [s[value_key] for s in series] or [0]
     top = max(max(vals), 1)
     n = len(series)
-    pad_l, pad_b, pad_t = 4, 18, 16
+    pad_l, pad_b, pad_t = 4, 26, 26
     plot_h = height - pad_b - pad_t
     slot = (width - pad_l) / max(n, 1)
     bw = max(2.0, min(slot * 0.68, 26))
@@ -258,10 +263,10 @@ def bar_chart(series, value_key, title, note, *, width=470, height=150,
         parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" '
                      f'height="{max(h, 0.6):.1f}" class="{cls}"/>')
         if v:
-            parts.append(f'<text x="{x + bw / 2:.1f}" y="{y - 3:.1f}" '
+            parts.append(f'<text x="{x + bw / 2:.1f}" y="{y - 6:.1f}" '
                          f'class="vlab">{v}</text>')
         if idx % label_every == 0 or idx == n - 1:
-            parts.append(f'<text x="{x + bw / 2:.1f}" y="{height - 5}" '
+            parts.append(f'<text x="{x + bw / 2:.1f}" y="{height - 8}" '
                          f'class="xlab">{html.escape(s["label"])}</text>')
     parts.append("</svg>")
     return (f'<div class="chartbox"><h3>{html.escape(title)}</h3>'
@@ -273,48 +278,50 @@ def bar_chart(series, value_key, title, note, *, width=470, height=150,
 CSS = """
 @page { size: __PAGE__; margin: __MARGIN__; }
 * { box-sizing: border-box; }
+html { background: #fff; }
 body { font-family: -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
-       color: #16181d; margin: 0; font-size: 9.2px; line-height: 1.35;
+       color: #16181d; background: #fff; color-scheme: light; margin: 0;
+       font-size: 12.5px; line-height: 1.45;
        -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-h1 { font-size: 15px; font-weight: 620; margin: 0; letter-spacing: -0.15px; }
-h2 { font-size: 10.5px; font-weight: 620; margin: 13px 0 5px;
-     padding-bottom: 3px; border-bottom: 1px solid #d9dde3; }
-h3 { font-size: 9.4px; font-weight: 620; margin: 0 0 1px; }
-.sub { color: #6b7280; font-size: 8.6px; margin: 2px 0 0; }
-.note { color: #6b7280; font-size: 7.9px; margin: 0 0 3px; }
-.cards { display: flex; gap: 7px; margin: 10px 0 4px; }
-.card { flex: 1; border: 1px solid #dfe3e9; border-radius: 5px; padding: 6px 8px; }
-.card .k { font-size: 7.6px; text-transform: uppercase; letter-spacing: .35px;
+h1 { font-size: 21px; font-weight: 650; margin: 0; letter-spacing: -0.2px; }
+h2 { font-size: 14px; font-weight: 650; margin: 17px 0 7px;
+     padding-bottom: 4px; border-bottom: 1.5px solid #d9dde3; }
+h3 { font-size: 12px; font-weight: 650; margin: 0 0 2px; }
+.sub { color: #6b7280; font-size: 11px; margin: 3px 0 0; }
+.note { color: #6b7280; font-size: 10px; margin: 0 0 5px; }
+.cards { display: flex; gap: 9px; margin: 14px 0 6px; }
+.card { flex: 1; border: 1px solid #dfe3e9; border-radius: 7px; padding: 9px 11px; }
+.card .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: .4px;
            color: #6b7280; }
-.card .v { font-size: 19px; font-weight: 640; letter-spacing: -0.5px;
-           margin: 1px 0 0; }
-.card .d { font-size: 7.8px; color: #6b7280; }
-.charts { display: flex; gap: 12px; margin-top: 8px; }
+.card .v { font-size: 27px; font-weight: 660; letter-spacing: -0.6px;
+           margin: 2px 0 0; }
+.card .d { font-size: 10px; color: #6b7280; }
+.charts { display: flex; gap: 16px; margin-top: 12px; }
 .chartbox { flex: 1; min-width: 0; }
 .chart { width: 100%; height: auto; display: block; }
 .bar { fill: #2f6f4f; }
 .bar.zero { fill: #d8dce2; }
 .grid { stroke: #e8ebef; stroke-width: .6; }
-.vlab { font-size: 6.6px; fill: #5b6472; text-anchor: middle; font-weight: 600; }
-.xlab { font-size: 6.2px; fill: #6b7280; text-anchor: middle; }
+.vlab { font-size: 13.5px; fill: #414a58; text-anchor: middle; font-weight: 650; }
+.xlab { font-size: 12.5px; fill: #6b7280; text-anchor: middle; }
 table { border-collapse: collapse; width: 100%; }
-th { font-size: 7.4px; text-transform: uppercase; letter-spacing: .35px;
-     color: #6b7280; font-weight: 600; text-align: left;
-     border-bottom: 1px solid #d9dde3; padding: 2px 4px; }
-td { padding: 1.7px 4px; border-bottom: 1px solid #f1f3f5; vertical-align: top; }
+th { font-size: 9.6px; text-transform: uppercase; letter-spacing: .4px;
+     color: #6b7280; font-weight: 650; text-align: left;
+     border-bottom: 1.5px solid #d9dde3; padding: 4px 7px; }
+td { padding: 4.5px 7px; border-bottom: 1px solid #eef0f3; vertical-align: top; }
 td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:nth-child(even) { background: #f8f9fb; }
 tr.muted td { color: #98a0ac; }
-.cols { display: flex; gap: 12px; align-items: flex-start; }
+.cols { display: flex; gap: 16px; align-items: flex-start; }
 .cols > * { flex: 1; min-width: 0; }
-.idx table { max-width: 300px; }
-.foot { margin-top: 9px; font-size: 7.6px; color: #6b7280; line-height: 1.5; }
-.foot b { color: #374151; font-weight: 600; }
+.foot { margin-top: 13px; font-size: 9.6px; color: #6b7280; line-height: 1.65; }
+.foot b { color: #374151; font-weight: 650; }
 a { color: inherit; text-decoration: none; }
-.pill { font-size: 7.2px; padding: 0 3px; border-radius: 3px; background: #eef1f4;
+.pill { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: #eef1f4;
         color: #4b5563; }
-.dhead { margin-top: 11px; page-break-after: avoid; break-after: avoid; }
-.dhead .nm { font-weight: 640; font-size: 10px; }
-.dhead .mt { color: #6b7280; font-size: 8.2px; }
+.dhead { margin-top: 16px; page-break-after: avoid; break-after: avoid; }
+.dhead .nm { font-weight: 660; font-size: 13.5px; }
+.dhead .mt { color: #6b7280; font-size: 10.5px; }
 section { page-break-inside: auto; }
 tr { page-break-inside: avoid; }
 """
@@ -390,7 +397,7 @@ def stats_html(agg, meta):
         srows.append(
             f'<tr{cls}><td>{html.escape(str(u["unit"]))}</td>'
             f'<td class="n">{u["drivers"]}</td><td>{last}</td></tr>')
-    chunk = max((len(srows) + 2) // 3, 12)
+    chunk = max((len(srows) + 1) // 2, 14)
     silent_cols = "".join(
         '<div><table><thead><tr><th>Unit</th><th class="n">Drv</th>'
         '<th>Last PTI</th></tr></thead><tbody>'
@@ -406,7 +413,7 @@ def stats_html(agg, meta):
         f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
         f'<td class="n">{r["avg"]}%</td></tr>' for r in top
     ]
-    chunk = max((len(trows) + 2) // 3, 8)
+    chunk = max((len(trows) + 1) // 2, 10)
     top_cols = "".join(
         '<div><table><thead><tr><th>Driver</th><th>Unit</th><th class="n">Real</th>'
         '<th class="n">Pass</th><th class="n">Avg</th></tr></thead><tbody>'
@@ -462,17 +469,17 @@ def driver_html(agg, meta):
             f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
             f'<td class="n">{str(r["avg"]) + "%" if r["submissions"] else "—"}'
             f'</td></tr>')
-    per_col = 48
+    per_col = 40
     head = ('<thead><tr><th class="n">#</th><th>Driver</th><th>Unit</th>'
             '<th class="n">Real</th><th class="n">Pass</th>'
             '<th class="n">Avg</th></tr></thead>')
     blocks, i = [], 0
     while i < len(idx):
-        trio = [idx[i + k * per_col:i + (k + 1) * per_col] for k in range(3)]
+        duo = [idx[i + k * per_col:i + (k + 1) * per_col] for k in range(2)]
         blocks.append('<div class="cols idx">' + "".join(
             f'<div><table>{head}<tbody>{"".join(c)}</tbody></table></div>'
-            for c in trio if c) + "</div>")
-        i += per_col * 3
+            for c in duo if c) + "</div>")
+        i += per_col * 2
 
     sections = []
     for r in rows:

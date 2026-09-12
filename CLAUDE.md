@@ -586,13 +586,13 @@ It needs `DATABASE_URL` (or `--database-url`) and nothing else. Rendering is
 headless Chromium (`--print-to-pdf`) over generated HTML, so there is no PDF
 library to keep current. Every statement it runs is a SELECT.
 
-**The web panel's Tools tab generates the same two PDFs on demand** — pick a
-window (last completed week, a rolling 7 days, or any custom date range) and
-download either one. A custom range's end date is inclusive in the UI, same
-as picking a day on a calendar; the API adds the one day back on to keep the
-rest of the pipeline working with the half-open `[since, until)` range
-`fleet_report.py` already expects, so the chosen end day is never dropped
-from the count. `webapp/server.py`'s `/api/reports/{which}.pdf` calls `fetch`/`build`/
+**The web panel's Tools tab generates the same two PDFs on demand** — pick any
+date range (two date pickers, no preset shortcuts to maintain alongside them)
+and download either one. The end date is inclusive in the UI, same as picking
+a day on a calendar; the API adds the one day back on to keep the rest of the
+pipeline working with the half-open `[since, until)` range `fleet_report.py`
+already expects, so the chosen end day is never dropped from the count.
+`webapp/server.py`'s `/api/reports/{which}.pdf` calls `fetch`/`build`/
 `stats_html`/`driver_html`/`to_pdf` directly rather than shelling out (the
 web panel already holds every credential the CLI avoids needing), running
 `to_pdf`'s blocking Chromium subprocess in a thread so it doesn't stall the
