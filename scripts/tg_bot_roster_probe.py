@@ -54,6 +54,7 @@ import argparse
 import asyncio
 import os
 import re
+import sys
 
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
@@ -66,6 +67,22 @@ from telethon.tl.types import (
 )
 
 SAMPLE = 5
+
+
+def _use_utf8_stdout() -> None:
+    """Windows consoles default to cp1252, and driver names carry emoji.
+
+    A member displayed as a globe emoji killed a run mid-group on 2026-09-12:
+    the roster had already arrived complete (30 of 30), but printing the sample
+    raised UnicodeEncodeError, the per-chat handler caught it, and a group that
+    worked was reported FAILED. What the console can encode must never decide a
+    verdict about what Telegram returned.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 -- an odd stream keeps its default
+            pass
 
 
 def _env(name: str) -> str:
@@ -156,7 +173,12 @@ async def _attempt(client, shape, peer) -> bool:
             (p.first_name or p.username or str(p.id))
             + (" [bot]" if getattr(p, "bot", False) else "")
             for p in parts[:SAMPLE])
-        print(f"  sample        : {shown}{' …' if len(parts) > SAMPLE else ''}")
+        # Belt and braces behind _use_utf8_stdout: if a console still refuses
+        # a character, the sample is the one line worth losing, never the run.
+        try:
+            print(f"  sample        : {shown}{' …' if len(parts) > SAMPLE else ''}")
+        except UnicodeEncodeError:
+            print(f"  sample        : ({len(parts)} names, console cannot print them)")
 
     # The About text is never echoed here: it carries the drivers' phone
     # numbers, and this output gets pasted around. Its length and how many
@@ -217,6 +239,7 @@ async def run(chats: list[str]) -> None:
 
 
 def main() -> None:
+    _use_utf8_stdout()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("chats", nargs="+",
                     help="group ids as stored in the groups table (-100…), or @usernames")
