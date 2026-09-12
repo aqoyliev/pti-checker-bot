@@ -18,6 +18,24 @@ so `/whois` keeps needing a user account either way.
 This script answers only "does it work, and is the list complete" -- it writes
 nothing, anywhere, and is not wired into the bot. Decide from its output.
 
+Measured 2026-09-12, six groups across two fleets, **none of them with the bot
+as an administrator**, every one fully listed:
+
+    fleet      type         members  result
+    Cross USA  supergroup         3  OK
+    DMW        basic group       36  OK
+    DMW        supergroup        33  OK
+    DMW        supergroup        30  OK
+    DMW        basic group       36  OK
+    DMW        basic group       40  OK
+
+So admin rights are not required, and both chat shapes answer. The one thing
+this does not prove is behaviour on a group far larger than the fleet's:
+channels.getParticipants pages in 200s and is capped server-side for
+non-admins, which a 30-40 member group never reaches. That is why the
+listed-vs-total check stays in -- it is what would catch the cap if a group
+ever grew into it.
+
 Two deliberate choices, both load-bearing:
 
 - **receive_updates=False.** Telethon otherwise opens an update loop, and this
