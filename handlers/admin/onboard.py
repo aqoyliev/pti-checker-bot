@@ -273,8 +273,16 @@ async def _apply_auto_config(group_id: int, plan) -> str:
     return "\n".join(lines)
 
 
-async def start_onboarding(group_id: int, title: str) -> bool:
+async def start_onboarding(group_id: int, title: str, manual: bool = False) -> bool:
     """Called when the bot joins a group. Never messages the group itself.
+
+    `manual` marks a deliberate admin request (/onboard <group_id>) rather than
+    the passive join/nag trigger. It changes exactly one thing: an auto-config
+    notice gets an Edit button. On the passive path a clean auto-config is news,
+    not a question, and a button on every one invites a tap on the ones that
+    were right -- but an admin who explicitly asked to review this group is
+    already looking for something to fix, and had no way to act on that short
+    of manual /adddriver commands in the group.
 
     Returns True if at least one admin actually received the prompt. A bot
     cannot open a DM with someone who has never started it, so "no admin
@@ -293,11 +301,13 @@ async def start_onboarding(group_id: int, title: str) -> bool:
     plan, auto_note = await _try_auto_config(group_id, unit, description, roster)
     if plan is not None:
         notice = await _apply_auto_config(group_id, plan)
-        delivered = False
+        extra = {}
+        if manual:
+            extra["reply_markup"] = InlineKeyboardMarkup().add(InlineKeyboardButton(
+                "✏️ Change the picks", callback_data=f"ob:e:{group_id}:0"))
         for admin_id in _ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, notice, parse_mode="HTML")
-                delivered = True
+                await bot.send_message(admin_id, notice, parse_mode="HTML", **extra)
             except Exception:
                 logging.exception("could not tell admin %s about the auto-config "
                                   "of %s", admin_id, group_id)
@@ -606,5 +616,5 @@ async def cmd_onboard(message: types.Message):
         await message.answer(f"Registering <code>{group_id}</code> — it had no "
                              f"record yet.", parse_mode="HTML")
 
-    if not await start_onboarding(group_id, chat.title or str(group_id)):
+    if not await start_onboarding(group_id, chat.title or str(group_id), manual=True):
         await message.answer("Couldn't send you the prompt — check the logs.")

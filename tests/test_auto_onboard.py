@@ -196,6 +196,24 @@ def test_a_clean_group_configures_itself_and_only_reports(monkeypatch):
     assert "/onboard -100123" in text
 
 
+def test_manual_onboard_of_a_clean_group_still_offers_an_edit_button(monkeypatch):
+    """/onboard <group_id> is a deliberate admin request, unlike the passive
+    join/nag trigger -- a clean auto-config still gets an Edit button, since an
+    admin who explicitly asked to review this group has nothing to fall back
+    on besides manual /adddriver commands otherwise.
+    """
+    resolved = {"+17864882619": Match("+17864882619", 8063167928, "M Mgn", None, False),
+                "+15616747866": Match("+15616747866", 6066541941, "Noor Dubat",
+                                      "noor", False)}
+    _, sent = _wire(monkeypatch, lookup=AsyncMock(return_value=resolved))
+
+    assert asyncio.run(
+        onboard.start_onboarding(-100123, "UNIT 1216 SMITH", manual=True)) is True
+
+    kwargs = sent.await_args.kwargs
+    assert kwargs["reply_markup"] is not None
+
+
 def test_a_driver_past_the_button_limit_is_still_a_member(monkeypatch):
     """The keyboard holds MEMBER_BUTTONS members; the chat holds far more.
 

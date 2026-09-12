@@ -161,12 +161,19 @@ The fleet writes both drivers' phone numbers into the group's About text (144 of
 `user_id` through `utils/phone_lookup.py`. `utils/auto_onboard.plan_auto_config`
 decides whether that is enough to skip the admin, and the admin is *told* rather
 than asked: a DM naming the unit, both drivers and the number each came from,
-and **no button** — a setup that went right is news, not a question, and an
-Edit button on every one of them invites a tap on the ones that were correct.
+and **no button** on the passive path (the bot joining, or the setup nag) — a
+setup that went right is news, not a question, and an Edit button on every one
+of them invites a tap on the ones that were correct.
+
 Changing an automatic setup is `/onboard <group_id>`, named in the notice
 itself, which re-reads the roster and the About text instead of reopening a
-picker built from a stale snapshot. The `ob:e:` callback still works (notices
-already sitting in a DM carry the old button) but nothing offers it any more.
+picker built from a stale snapshot -- and unlike the passive path, it *does*
+add the Edit button (`ob:e:`), because running the command is itself the
+question: an admin who typed it is already looking for something to fix, and
+had no way to act on that short of manual `/adddriver` commands in the group.
+`start_onboarding`'s `manual` flag is the only difference between the two call
+sites; a notice from before this distinction existed still carries the old
+button either way.
 
 The decision is pure — the caller does the roster read, the lookup and the
 writes — because it is the part that must not go wrong quietly. **Every one of
