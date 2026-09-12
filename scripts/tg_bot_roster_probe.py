@@ -38,7 +38,13 @@ import os
 
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
-from telethon.tl.types import Channel, Chat, InputPeerChannel, User
+from telethon.tl.types import (
+    Channel,
+    Chat,
+    InputPeerChannel,
+    InputPeerChat,
+    User,
+)
 
 SAMPLE = 5
 
@@ -58,20 +64,25 @@ def _target(raw: str):
         return raw
 
 
-async def _resolve(client, target):
-    """get_entity, with the fallback that only bots have.
+def _candidates(target):
+    """The peers worth trying for one id, most likely first.
 
-    A bot has no dialog list to learn access hashes from, so get_entity on a
-    bare supergroup id can fail where the group is perfectly reachable. Bots
-    are allowed to address a channel with access_hash=0, so that is the second
-    try -- and if *that* fails the group really is out of reach.
+    A bot has no dialog list to learn access hashes from, so each shape is
+    built directly instead of looked up -- bots may address a channel with
+    access_hash=0. The two shapes are not interchangeable and fail in
+    different ways: -100<n> is a supergroup, a bare -<n> a basic group, and
+    handing a supergroup to the basic-group call returns ChatIdInvalidError.
+    A dropped -100 prefix is an easy transcription slip, so a bare negative id
+    is tried both ways before the chat is called unreachable.
     """
-    try:
-        return await client.get_entity(target)
-    except (ValueError, TypeError) as e:
-        if isinstance(target, int) and target <= -1000000000000:
-            return InputPeerChannel(channel_id=-target - 1000000000000, access_hash=0)
-        raise SystemExit(f"could not resolve {target}: {e}") from e
+    if not isinstance(target, int):
+        return [("as given", target)]
+    if target <= -1000000000000:
+        return [("supergroup", InputPeerChannel(-target - 1000000000000, 0))]
+    if target < 0:
+        return [("basic group", InputPeerChat(-target)),
+                ("supergroup", InputPeerChannel(-target, 0))]
+    return [("as given", target)]
 
 
 def _kind(entity) -> str:
@@ -79,18 +90,18 @@ def _kind(entity) -> str:
         return "supergroup" if entity.megagroup else "channel"
     if isinstance(entity, Chat):
         return "basic group"
-    if isinstance(entity, InputPeerChannel):
-        return "supergroup (by id, unresolved)"
     return type(entity).__name__
 
 
-async def probe(client, raw: str) -> bool:
-    print(f"\n{raw}")
-    entity = await _resolve(client, _target(raw))
-    title = getattr(entity, "title", None)
-    if title:
-        print(f"  title         : {title}")
-    print(f"  type          : {_kind(entity)}")
+async def _attempt(client, shape, peer) -> bool:
+    """Read one chat through one id shape. True only when fully listed."""
+    try:
+        entity = await client.get_entity(peer)
+        print(f"  title         : {getattr(entity, 'title', '(none)')}")
+        print(f"  type          : {_kind(entity)}")
+    except Exception:  # noqa: BLE001 -- the input peer is enough for a bot
+        entity = peer
+        print(f"  type          : {shape} (assumed; get_entity declined)")
 
     try:
         perms = await client.get_permissions(entity, await client.get_me())
@@ -98,29 +109,38 @@ async def probe(client, raw: str) -> bool:
     except Exception as e:  # noqa: BLE001 -- a probe reports, never raises
         print(f"  bot is admin  : unknown ({type(e).__name__}: {e})")
 
-    try:
-        parts = await client.get_participants(entity)
-    except Exception as e:  # noqa: BLE001
-        print(f"  VERDICT       : FAILED — {type(e).__name__}: {e}")
-        return False
-
+    parts = await client.get_participants(entity)
     total = getattr(parts, "total", len(parts))
     humans = [p for p in parts if isinstance(p, User) and not p.bot]
     print(f"  participants  : {len(parts)} listed of {total} total "
           f"({len(humans)} non-bot)")
     if parts:
         shown = ", ".join(
-            (p.first_name or p.username or str(p.id)) + (" [bot]" if getattr(p, "bot", False) else "")
+            (p.first_name or p.username or str(p.id))
+            + (" [bot]" if getattr(p, "bot", False) else "")
             for p in parts[:SAMPLE])
         print(f"  sample        : {shown}{' …' if len(parts) > SAMPLE else ''}")
 
-    # A short list against a large total is the failure that looks like success:
-    # it would silently drop the drivers onboarding is trying to find.
+    # A short list against a large total is the failure that looks like
+    # success: onboarding would show a picker with the drivers missing from it.
     if len(parts) < total:
         print(f"  VERDICT       : PARTIAL — {total - len(parts)} member(s) not returned")
         return False
     print("  VERDICT       : OK — the bot can list this group's roster")
     return True
+
+
+async def probe(client, raw: str) -> bool:
+    """Try each id shape. One chat's failure never stops the run."""
+    print(f"\n{raw}")
+    for shape, peer in _candidates(_target(raw)):
+        try:
+            return await _attempt(client, shape, peer)
+        except Exception as e:  # noqa: BLE001
+            print(f"  as {shape:<11}: {type(e).__name__}: {e}")
+    print("  VERDICT       : FAILED — unreadable as any known id shape "
+          "(wrong fleet's token, or the bot is not in this chat)")
+    return False
 
 
 async def run(chats: list[str]) -> None:
