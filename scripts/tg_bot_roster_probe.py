@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
@@ -111,6 +112,24 @@ def _kind(entity) -> str:
     return type(entity).__name__
 
 
+async def _about(client, peer, entity) -> str | None:
+    """The group's About text -- the *other* thing utils/userbot.py is used for.
+
+    parse_driver_names and the whole auto-config path read it, so moving the
+    roster to the bot token only retires TELEGRAM_SESSION if this moves too.
+    """
+    from telethon.tl.functions.channels import GetFullChannelRequest
+    from telethon.tl.functions.messages import GetFullChatRequest
+    try:
+        if isinstance(peer, InputPeerChat):
+            full = await client(GetFullChatRequest(peer.chat_id))
+        else:
+            full = await client(GetFullChannelRequest(entity))
+        return (full.full_chat.about or "").strip()
+    except Exception:  # noqa: BLE001 -- a probe reports, never raises
+        return None
+
+
 async def _attempt(client, shape, peer) -> bool:
     """Read one chat through one id shape. True only when fully listed."""
     try:
@@ -138,6 +157,19 @@ async def _attempt(client, shape, peer) -> bool:
             + (" [bot]" if getattr(p, "bot", False) else "")
             for p in parts[:SAMPLE])
         print(f"  sample        : {shown}{' …' if len(parts) > SAMPLE else ''}")
+
+    # The About text is never echoed here: it carries the drivers' phone
+    # numbers, and this output gets pasted around. Its length and how many
+    # long digit-runs it holds say whether the right text arrived.
+    about = await _about(client, peer, entity)
+    if about is None:
+        print("  about text    : FAILED — /fixnames and auto-config still need "
+              "the user session")
+    else:
+        # Space but not newline: \s would swallow the line break between two
+        # numbers and count the pair as one.
+        phones = len(re.findall(r"\d[\d\-() .]{8,}\d", about))
+        print(f"  about text    : {len(about)} chars, {phones} phone-shaped run(s)")
 
     # A short list against a large total is the failure that looks like
     # success: onboarding would show a picker with the drivers missing from it.
