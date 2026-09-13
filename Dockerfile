@@ -10,10 +10,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# fonts-dejavu-core is not decoration: this is a slim image, and Debian's
+# chromium only *recommends* a font package, which --no-install-recommends
+# then skips -- leaving the report renderer with no system face to fall back
+# on. scripts/fleet_report.py embeds its own typeface so the PDFs do not
+# depend on this, but a driver name carrying a glyph that typeface's subsets
+# do not cover (a Cyrillic Telegram profile name, say) still needs somewhere
+# to land other than a row of empty boxes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     ffmpeg \
     chromium \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=tgapi /telegram-bot-api /usr/local/bin/telegram-bot-api

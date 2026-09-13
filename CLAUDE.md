@@ -59,10 +59,12 @@ The other `process_*` functions in `pti_processor.py` are legacy/unused.
 ## Runtime requirements
 
 - `ffmpeg` (+ `ffprobe`) on PATH — used to extract video frames.
-- `chromium` on PATH (or one of `CHROME_CANDIDATES` in `scripts/fleet_report.py`)
-  — headless-renders the web panel's report PDFs. The Dockerfile installs it;
-  without it the Tools tab's report buttons fail with a clear error instead of
-  a crash.
+- `chromium` on PATH (or one of `CHROME_CANDIDATES` in `scripts/fleet_report.py`,
+  which also lists the usual Windows Chrome paths so the CLI runs on a dev box)
+  — headless-renders the web panel's report PDFs. The Dockerfile installs it,
+  plus `fonts-dejavu-core`, since a slim image otherwise has no font at all;
+  without Chromium the Tools tab's report buttons fail with a clear error
+  instead of a crash.
 - PostgreSQL via `DATABASE_URL`.
 - `GEMINI_API_KEY`.
 - Optional local [Bot API server](https://github.com/tdlib/telegram-bot-api) via
@@ -629,11 +631,57 @@ explanation.
 - **A driver who submitted nothing still appears**, greyed, with `—` for an
   average rather than 0% — a missing inspection is the report's subject, and 0%
   reads as a bad walkaround instead of no walkaround.
-- Inactive groups are excluded everywhere; an unreadable `result_json` scores 0
-  with every area counted missing, because a submission the pipeline could not
-  read is not evidence of a walkaround.
+- **Inactive groups are excluded everywhere, the window count included.** The
+  silent list and the driver list always skipped them; the window count did
+  not, so "units that submitted" was measured over the whole history while
+  "active units" was measured over the running fleet — one fraction, two
+  fleets, and a coverage headline that can read over 100%. `build` now drops a
+  retired group's submissions outright and counts `drivers_total` over active
+  groups only. A window row whose `groups` row is missing entirely is *kept*:
+  unknown is not the same as retired, and dropping it loses a real inspection.
+  `tests/test_fleet_report_build.py` pins all of that.
+- An unreadable `result_json` scores 0 with every area counted missing, because
+  a submission the pipeline could not read is not evidence of a walkaround.
 
 CSVs of the same numbers land beside the PDFs, unrounded.
+
+### How the two sheets are laid out
+
+Neither is a web page: both are fixed-size paper, so columns are sized in px
+against the printable box (letter at 96dpi leaves 965×733 landscape, 725 wide
+portrait) and the charts are emitted at exactly the width they occupy —
+`viewBox`, `width` and `height` all agreeing. An SVG stretched to fit a
+flexible column rescales its own labels, which is how chart text ends up
+smaller than everything around it.
+
+- **The document carries its own typeface.** `scripts/report_fonts/` holds
+  Inter (SIL OFL, licence beside the files) and `font_css()` base64s it into
+  the page. Rendering happens on whatever Chromium the host has, and this is a
+  *slim* image where Debian's chromium only **recommends** a font package —
+  which `--no-install-recommends` skips — so there was no guarantee any face
+  existed to render with. `fonts-dejavu-core` is in the Dockerfile as the
+  fallback for glyphs Inter's latin/latin-ext subsets miss (a Cyrillic
+  Telegram profile name, say), not as the report's typeface. A test asserts
+  the generated HTML contains no `http://` or `https://` at all: the renderer
+  has no reason to have outbound access, and a report that needs it fails
+  silently and invisibly.
+- **The statistics sheet is one page, and that is a budget, not a preference.**
+  Masthead, headline row, charts, the two tables and the legend add up to
+  exactly the printable height; `STATS_ROWS` is what is left for the two
+  bottom tables once everything above them is paid for. Raise the chart, the
+  type scale or the legend and rows have to come off the bottom to match, or
+  the legend silently lands alone on a second page.
+- **The driver report paginates itself.** Each index block is sized *under* a
+  page and forced to break after it, because how many rows fit depends on how
+  many names wrap to a second line — a block sized to the page exactly spills
+  two rows onto the next one, which then carries a stranded stub above the
+  block that belongs there. Each index page names the slice of the ranking it
+  carries, since Chromium cannot number printed pages from CSS. A driver's
+  card is `break-inside: avoid`: a table header alone at the top of a page
+  belongs to nobody.
+- **Nothing depends on colour alone.** Every plotted bar prints its value and
+  every score bar sits beside its own number, so the sheets survive greyscale
+  and a phone screen.
 
 ## Behavior under high load
 

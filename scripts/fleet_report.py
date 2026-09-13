@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import csv
 import html
 import importlib.util
@@ -30,6 +31,7 @@ import sys
 import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -52,6 +54,8 @@ CHROME_CANDIDATES = (
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
     "/usr/bin/google-chrome",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 )
 
 
@@ -118,9 +122,17 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
 
     inspections = []
     for row in data["window"]:
-        s = score_inspection(row["result_json"])
         gid = row["group_id"]
         g = groups.get(gid, {})
+        # Inactive groups are excluded everywhere else here -- the silent list
+        # and the driver list both skip them -- so a retired truck's
+        # submission cannot count either, or the coverage headline becomes a
+        # fraction whose two halves were measured over different fleets and
+        # can read over 100%. A window row with no `groups` row at all is
+        # kept: unknown is not the same as retired.
+        if not g.get("is_active", True):
+            continue
+        s = score_inspection(row["result_json"])
         inspections.append({
             "day": local_day(row["submitted_at"]),
             "group_id": gid,
@@ -218,7 +230,9 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
             "real": sum(1 for i in inspections if i["score"].is_real),
             "passed": sum(1 for i in inspections if i["passed"]),
             "avg": round(sum(scores) / len(scores)) if scores else 0,
-            "drivers_total": len(driver_name),
+            "drivers_total": sum(
+                1 for gid, _ in driver_name
+                if groups.get(gid, {}).get("is_active", True)),
             "drivers_sent": len({(i["group_id"], i["user_id"]) for i in inspections}),
             "units_total": len(groups),
             "units_active": len(active_groups),
@@ -229,110 +243,247 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
     }
 
 
-# ---------------------------------------------------------------- charting
+# ------------------------------------------------------------------ typeface
 
-def bar_chart(series, value_key, title, note, *, width=470, height=185,
-              label_every=1):
-    """A labelled bar chart. Every plotted value is printed, so nothing here
-    depends on colour alone -- the reports are read in greyscale on phones.
-
-    Font sizes here are viewBox user-units, not screen pixels -- with three
-    charts side by side the SVG is scaled down to roughly two-thirds of its
-    viewBox width, so text needs to run noticeably larger in-markup than the
-    plain HTML around it to still read as a normal size once rendered."""
-    vals = [s[value_key] for s in series] or [0]
-    top = max(max(vals), 1)
-    n = len(series)
-    pad_l, pad_b, pad_t = 4, 26, 26
-    plot_h = height - pad_b - pad_t
-    slot = (width - pad_l) / max(n, 1)
-    bw = max(2.0, min(slot * 0.68, 26))
-
-    parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" '
-             f'role="img" aria-label="{html.escape(title)}">']
-    for gl in (0, 0.5, 1.0):
-        y = pad_t + plot_h - plot_h * gl
-        parts.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{width}" y2="{y:.1f}" '
-                     f'class="grid"/>')
-    for idx, s in enumerate(series):
-        v = s[value_key]
-        h = plot_h * v / top
-        x = pad_l + slot * idx + (slot - bw) / 2
-        y = pad_t + plot_h - h
-        cls = "bar zero" if v == 0 else "bar"
-        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" '
-                     f'height="{max(h, 0.6):.1f}" class="{cls}"/>')
-        if v:
-            parts.append(f'<text x="{x + bw / 2:.1f}" y="{y - 6:.1f}" '
-                         f'class="vlab">{v}</text>')
-        if idx % label_every == 0 or idx == n - 1:
-            parts.append(f'<text x="{x + bw / 2:.1f}" y="{height - 8}" '
-                         f'class="xlab">{html.escape(s["label"])}</text>')
-    parts.append("</svg>")
-    return (f'<div class="chartbox"><h3>{html.escape(title)}</h3>'
-            f'<p class="note">{html.escape(note)}</p>{"".join(parts)}</div>')
+# The typeface travels inside the document. Rendering happens on whatever
+# Chromium the host has, and a slim container image ships no fonts at all --
+# fontconfig then falls back to a last-resort face, which is how a page of
+# numbers turns into a page nobody can read. Embedding it means the PDF is the
+# same document on a laptop, on Railway and on the next fleet's deployment.
+# Inter is SIL OFL 1.1; the licence ships beside the files.
+_FONT_DIR = Path(__file__).resolve().parent / "report_fonts"
+_SUBSETS = {
+    "latin":
+        "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,"
+        "U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,"
+        "U+2212,U+2215,U+FEFF,U+FFFD",
+    "latin-ext":
+        "U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,"
+        "U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,"
+        "U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF",
+}
 
 
-# --------------------------------------------------------------- rendering
+@lru_cache(maxsize=1)
+def font_css() -> str:
+    """Inter, base64'd into the page. A missing file degrades to the stack."""
+    faces = []
+    for weight in (400, 600, 700):
+        for subset, ranges in _SUBSETS.items():
+            f = _FONT_DIR / f"Inter-{weight}-{subset}.woff2"
+            if not f.exists():
+                continue
+            b64 = base64.b64encode(f.read_bytes()).decode("ascii")
+            faces.append(
+                "@font-face{font-family:Inter;font-style:normal;"
+                "font-display:block;"
+                f"font-weight:{weight};unicode-range:{ranges};"
+                f"src:url(data:font/woff2;base64,{b64}) format('woff2')}}"
+            )
+    return "".join(faces)
+
+
+# ---------------------------------------------------------------- the look
+
+# Both sheets are fixed-size paper, not a responsive page, so every column is
+# sized in px against the printable box and the charts are emitted at exactly
+# the width they occupy. Letter at 96dpi is 1056x816 landscape / 816x1056
+# portrait; the margins below leave 965x733 and 725x952 of printable box.
+#
+# The statistics sheet is *one page*, and that is a budget, not a preference:
+# masthead 54 + headline row 107 + charts 184 + tables 302 + legend 50, plus
+# the gaps, comes to 733. STATS_ROWS is what is left over for the two bottom
+# tables once everything above it has been paid for -- raise the chart, the
+# type scale or the legend and rows have to come off the bottom to match.
+DAY_CHART_W = 576      # the 602px chart panel, less its padding and border
+DAY_CHART_H = 138
+STATS_ROWS = 10        # rows per column in the sheet's two bottom tables
 
 CSS = """
 @page { size: __PAGE__; margin: __MARGIN__; }
-* { box-sizing: border-box; }
-html { background: #fff; }
-body { font-family: -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
-       color: #16181d; background: #fff; color-scheme: light; margin: 0;
-       font-size: 12.5px; line-height: 1.45;
-       -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-h1 { font-size: 21px; font-weight: 650; margin: 0; letter-spacing: -0.2px; }
-h2 { font-size: 14px; font-weight: 650; margin: 17px 0 7px;
-     padding-bottom: 4px; border-bottom: 1.5px solid #d9dde3; }
-h3 { font-size: 12px; font-weight: 650; margin: 0 0 2px; }
-.sub { color: #6b7280; font-size: 11px; margin: 3px 0 0; }
-.note { color: #6b7280; font-size: 10px; margin: 0 0 5px; }
-.cards { display: flex; gap: 9px; margin: 14px 0 6px; }
-.card { flex: 1; border: 1px solid #dfe3e9; border-radius: 7px; padding: 9px 11px; }
-.card .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: .4px;
-           color: #6b7280; }
-.card .v { font-size: 27px; font-weight: 660; letter-spacing: -0.6px;
-           margin: 2px 0 0; }
-.card .d { font-size: 10px; color: #6b7280; }
-.charts { display: flex; gap: 16px; margin-top: 12px; }
-.chartbox { flex: 1; min-width: 0; }
-.chart { width: 100%; height: auto; display: block; }
-.bar { fill: #2f6f4f; }
-.bar.zero { fill: #d8dce2; }
-.grid { stroke: #e8ebef; stroke-width: .6; }
-.vlab { font-size: 13.5px; fill: #414a58; text-anchor: middle; font-weight: 650; }
-.xlab { font-size: 12.5px; fill: #6b7280; text-anchor: middle; }
-table { border-collapse: collapse; width: 100%; }
-th { font-size: 9.6px; text-transform: uppercase; letter-spacing: .4px;
-     color: #6b7280; font-weight: 650; text-align: left;
-     border-bottom: 1.5px solid #d9dde3; padding: 4px 7px; }
-td { padding: 4.5px 7px; border-bottom: 1px solid #eef0f3; vertical-align: top; }
-td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
-tbody tr:nth-child(even) { background: #f8f9fb; }
-tr.muted td { color: #98a0ac; }
-.cols { display: flex; gap: 16px; align-items: flex-start; }
-.cols > * { flex: 1; min-width: 0; }
-.foot { margin-top: 13px; font-size: 9.6px; color: #6b7280; line-height: 1.65; }
-.foot b { color: #374151; font-weight: 650; }
-a { color: inherit; text-decoration: none; }
-.pill { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: #eef1f4;
-        color: #4b5563; }
-.dhead { margin-top: 16px; page-break-after: avoid; break-after: avoid; }
-.dhead .nm { font-weight: 660; font-size: 13.5px; }
-.dhead .mt { color: #6b7280; font-size: 10.5px; }
-section { page-break-inside: auto; }
-tr { page-break-inside: avoid; }
+
+:root{
+  --ink:#0f1318; --body:#39424e; --mute:#767f8d; --faint:#9aa3b1;
+  --rule:#e5e9ef; --rule-2:#ccd4de; --panel:#f7f9fb;
+  --brand:#15304e; --brand-ink:#ffffff; --brand-sub:#9fb7d0;
+  --g:#12684a; --o:#4f9a6f; --w:#b3800f; --r:#a8434a;
+  --bar:#1c6b4c; --bar-2:#a8ccb8; --bar-0:#e2e7ec;
+}
+*{box-sizing:border-box;}
+html,body{background:#fff;}
+body{
+  font-family:Inter,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,
+    "DejaVu Sans",sans-serif;
+  color:var(--body); background:#fff; color-scheme:light; margin:0;
+  font-size:10.4px; line-height:1.45;
+  font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;
+  -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  -webkit-font-smoothing:antialiased;
+}
+b,strong{font-weight:600;color:var(--ink);}
+a{color:inherit;text-decoration:none;}
+.g{color:var(--g);} .o{color:var(--o);} .w{color:var(--w);} .r{color:var(--r);}
+
+/* ---------- masthead ---------- */
+.mast{display:flex;align-items:center;gap:16px;background:var(--brand);
+  color:var(--brand-ink);border-radius:9px;padding:11px 17px;}
+.mast .mark{font-size:15.5px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;padding-right:16px;white-space:nowrap;
+  border-right:1px solid rgba(255,255,255,.24);}
+.mast .mid{flex:1;min-width:0;}
+.mast .ttl{font-size:14.5px;font-weight:600;letter-spacing:-.012em;}
+.mast .when{text-align:right;white-space:nowrap;}
+.mast .when .ttl{font-size:12.5px;}
+.mast .sub{font-size:9.3px;color:var(--brand-sub);margin-top:2px;
+  letter-spacing:.015em;font-weight:400;}
+
+/* ---------- headline numbers ---------- */
+.kpis{display:flex;gap:12px;margin-top:12px;align-items:stretch;}
+.hero{flex:none;width:262px;background:var(--panel);border:1px solid var(--rule);
+  border-radius:8px;padding:9px 12px 10px;}
+.card{flex:1;min-width:0;border:1px solid var(--rule);border-radius:8px;
+  padding:9px 12px 10px;}
+.k{font-size:8.4px;font-weight:600;letter-spacing:.085em;text-transform:uppercase;
+  color:var(--mute);}
+.card .v{font-size:23px;font-weight:700;color:var(--ink);letter-spacing:-.03em;
+  line-height:1.08;margin-top:4px;}
+.card .d{font-size:9.2px;color:var(--mute);margin-top:4px;line-height:1.4;}
+.hero .v{font-size:29px;font-weight:700;color:var(--ink);letter-spacing:-.035em;
+  line-height:1.05;margin-top:2px;}
+.hero .d{font-size:9.2px;color:var(--mute);margin-top:4px;line-height:1.45;}
+.track{height:7px;border-radius:4px;background:#dfe4ea;margin-top:6px;
+  overflow:hidden;}
+.track i{display:block;height:100%;border-radius:4px;background:var(--g);}
+.track.o i{background:var(--o);} .track.w i{background:var(--w);}
+.track.r i{background:var(--r);}
+
+/* ---------- panels ---------- */
+/* Fixed paper, so the columns are sized to the printable box rather than left
+   to flex: the day chart has to know its own width to the pixel. */
+.row{display:flex;gap:18px;margin-top:12px;align-items:stretch;}
+.panel{border:1px solid var(--rule);border-radius:8px;padding:9px 12px 10px;
+  min-width:0;}
+.p-day{flex:none;width:602px;} .p-mix{flex:1;min-width:0;}
+.p-silent{flex:none;width:446px;} .p-drv{flex:1;min-width:0;}
+.d{font-size:9.2px;color:var(--mute);margin:0;}
+.ph{display:flex;align-items:baseline;gap:10px;margin-bottom:7px;}
+.ph h2{font-size:9.6px;font-weight:600;letter-spacing:.085em;text-transform:uppercase;
+  color:var(--ink);margin:0;white-space:nowrap;}
+.ph .pn{font-size:8.8px;color:var(--mute);margin:0;flex:1;min-width:0;
+  text-align:right;}
+.ph .pn .sw{margin-left:9px;}
+
+/* ---------- tables ---------- */
+/* table-layout:fixed with an explicit colgroup, so the same columns land on
+   the same x in every block -- per-driver tables sized by their own content
+   wander a few px each and the eye cannot run down the page. */
+table{border-collapse:collapse;width:100%;table-layout:fixed;}
+th{font-size:8.2px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--mute);text-align:left;padding:0 6px 4px;white-space:nowrap;
+  border-bottom:1px solid var(--rule-2);}
+td{font-size:9.9px;padding:3.1px 6px;border-bottom:1px solid var(--rule);
+  vertical-align:baseline;}
+tbody tr:last-child td{border-bottom:none;}
+td.n,th.n{text-align:right;}
+td.n{white-space:nowrap;}
+/* A header over a number-plus-bar column lines up with the number, not with
+   the far end of the bar. */
+th.b{text-align:right;padding-right:50px;}
+td.u{color:var(--ink);font-weight:600;}
+td.nw{white-space:nowrap;}
+tr.dim td{color:var(--faint);}
+tr.dim td.u{color:var(--faint);font-weight:400;}
+.cols{display:flex;gap:12px;align-items:flex-start;}
+.cols>*{flex:1;min-width:0;}
+.pg{break-after:page;}
+
+/* ---------- score bar ---------- */
+.pct{display:inline-block;min-width:29px;text-align:right;}
+.sb{display:inline-block;width:38px;height:4px;border-radius:2px;
+  background:#e4e8ee;vertical-align:middle;margin-left:6px;overflow:hidden;}
+.sb i{display:block;height:100%;background:var(--g);}
+.sb.o i{background:var(--o);} .sb.w i{background:var(--w);}
+.sb.r i{background:var(--r);}
+
+/* ---------- quality mix ---------- */
+.qbar{display:flex;height:22px;border-radius:5px;overflow:hidden;
+  background:var(--bar-0);margin-bottom:9px;}
+.qbar i{display:block;height:100%;}
+.q1{background:var(--g);} .q2{background:var(--o);}
+.q3{background:var(--w);} .q4{background:var(--r);}
+.qrow{display:flex;align-items:baseline;gap:7px;font-size:9.4px;
+  padding:3.1px 0;border-bottom:1px solid var(--rule);}
+.qrow:last-child{border-bottom:none;}
+.sw{display:inline-block;width:8px;height:8px;border-radius:2px;flex:none;}
+.qn{font-weight:600;color:var(--ink);white-space:nowrap;}
+.qd{flex:1;min-width:0;color:var(--mute);font-size:8.8px;}
+.qv{font-weight:600;color:var(--ink);}
+.qp{color:var(--mute);width:26px;text-align:right;}
+
+/* ---------- charts ---------- */
+.chart{display:block;}
+.wknd{fill:#f4f6f9;}
+.grid{stroke:#edf1f5;stroke-width:1;}
+.axis{stroke:#ccd4de;stroke-width:1;}
+.b-sub{fill:var(--bar);} .b-unit{fill:var(--bar-2);}
+.b-sub.zero,.b-unit.zero{fill:var(--bar-0);}
+.vlab{font-size:9px;font-weight:600;fill:#4b5563;text-anchor:middle;}
+.vlab.q{fill:#9aa3b1;}
+.xlab{font-size:9.4px;font-weight:600;fill:#3a434f;text-anchor:middle;}
+.xlab2{font-size:7.8px;font-weight:600;fill:#9aa3b1;text-anchor:middle;
+  letter-spacing:.06em;}
+
+/* ---------- legend ---------- */
+.legend{display:flex;gap:18px;margin-top:11px;}
+.legend>div{flex:1;min-width:0;font-size:8.6px;color:var(--mute);
+  line-height:1.45;}
+.legend .lt{font-size:8.2px;font-weight:600;letter-spacing:.085em;
+  text-transform:uppercase;color:var(--ink);display:block;margin-bottom:2px;}
+
+/* ---------- driver report ---------- */
+.intro{display:flex;gap:16px;margin-top:13px;}
+.intro>div{flex:1;min-width:0;border:1px solid var(--rule);border-radius:8px;
+  padding:9px 12px 10px;font-size:9.1px;color:var(--mute);line-height:1.5;}
+.intro .lt{font-size:8.4px;font-weight:600;letter-spacing:.085em;
+  text-transform:uppercase;color:var(--ink);display:block;margin-bottom:3px;}
+h2.sec{font-size:9.8px;font-weight:600;letter-spacing:.085em;
+  text-transform:uppercase;color:var(--ink);margin:17px 0 7px;
+  padding-bottom:5px;border-bottom:1px solid var(--rule-2);}
+/* A driver's card stays whole: a table header alone at the top of a page
+   belongs to nobody. Nine-odd rows always fit, and "avoid" is a hint, so a
+   freak 30-inspection driver still breaks rather than overflowing. */
+.drv{margin-top:11px;break-inside:avoid;}
+.dh{display:flex;align-items:baseline;gap:9px;padding:5px 9px;
+  background:var(--panel);border:1px solid var(--rule);border-radius:6px 6px 0 0;
+  border-bottom:none;break-after:avoid;}
+.dh .dn{font-size:11.6px;font-weight:700;color:var(--ink);letter-spacing:-.01em;}
+.dh .du{font-size:9px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--mute);flex:1;min-width:0;}
+.dh .st{font-size:9.2px;color:var(--mute);white-space:nowrap;}
+.dh .st em{font-style:normal;font-weight:700;color:var(--ink);}
+.dh .st span{margin-left:10px;}
+.drv table{border:1px solid var(--rule);border-radius:0 0 6px 6px;}
+.drv th{padding:4px 8px;background:#fcfdfe;}
+.drv td{font-size:10.1px;padding:4.4px 8px;}
+.badge{display:inline-block;font-size:8.3px;font-weight:700;letter-spacing:.06em;
+  padding:1.2px 5px;border-radius:3px;}
+.badge.p{background:#e3f1ea;color:#0e5c40;}
+.badge.f{background:#fae9ea;color:#8f1f28;}
+.chip{display:inline-block;font-size:8.6px;padding:.8px 4.5px;border-radius:3px;
+  background:#f0f2f5;color:#4d5663;margin:0 3px 2px 0;white-space:nowrap;}
+.chip.hot{background:#fbecec;color:#8f2630;}
+.nv{font-size:8.6px;color:var(--faint);}
+.ok{color:var(--faint);}
+tr{break-inside:avoid;}
 """
 
 
 def _page_head(title, page, margin):
     # str.replace, not %-formatting: the stylesheet is full of literal "%".
     css = CSS.replace("__PAGE__", page).replace("__MARGIN__", margin)
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<title>{html.escape(title)}</title>'
-            f'<style>{css}</style></head><body>')
+            f'<style>{font_css()}{css}</style></head><body>')
 
 
 def fmt_day(d: date) -> str:
@@ -348,109 +499,285 @@ def display_name(fleet: str) -> str:
     return fleet
 
 
+def band(pct: float) -> str:
+    """Health letter for a percentage. Never the only signal -- the number is
+    printed beside every bar it colours, so the sheet survives greyscale."""
+    if pct >= 90:
+        return "g"
+    if pct >= 75:
+        return "o"
+    if pct >= 50:
+        return "w"
+    return "r"
+
+
+def sbar(pct: int) -> str:
+    w = max(0, min(100, pct))
+    return f'<span class="sb {band(pct)}"><i style="width:{w}%"></i></span>'
+
+
+def pct_cell(pct: int) -> str:
+    """A percentage and its bar. The number sits in a fixed box so that a
+    column of them lines up on the digits rather than on the bar's end."""
+    return f'<span class="pct">{pct}%</span>{sbar(pct)}'
+
+
+def colgroup(*widths) -> str:
+    """Explicit column widths in px; None means "take what is left"."""
+    cols = "".join("<col>" if w is None else f'<col style="width:{w}px">'
+                   for w in widths)
+    return f"<colgroup>{cols}</colgroup>"
+
+
+def pctf(a: int, b: int) -> str:
+    return f"{round(100 * a / b)}%" if b else "—"
+
+
+def masthead(meta, title) -> str:
+    last = meta["until"] - timedelta(days=1)
+    n_days = (meta["until"] - meta["since"]).days
+    span = (f'{fmt_day(meta["since"])} – {fmt_day(last)} {last.year}'
+            if meta["since"].year == last.year else
+            f'{fmt_day(meta["since"])} {meta["since"].year} – '
+            f'{fmt_day(last)} {last.year}')
+    return (
+        '<header class="mast">'
+        f'<div class="mark">{html.escape(meta["fleet"])}</div>'
+        f'<div class="mid"><div class="ttl">{html.escape(title)}</div>'
+        f'<div class="sub">{html.escape(meta["scope"])}</div></div>'
+        f'<div class="when"><div class="ttl">{span}</div>'
+        f'<div class="sub">{n_days} day window · {html.escape(meta["tz"])} · '
+        f'pulled {fmt_day(meta["pulled"])}</div></div></header>'
+    )
+
+
+def panel(title, note, body, cls="") -> str:
+    return (f'<section class="panel {cls}"><div class="ph">'
+            f'<h2>{html.escape(title)}</h2><p class="pn">{note}</p></div>'
+            f'{body}</section>')
+
+
+# ---------------------------------------------------------------- charting
+
+def day_chart(daily, *, width=DAY_CHART_W, height=170) -> str:
+    """Two bars a day: every submission, and the distinct trucks behind them.
+
+    The SVG is emitted at exactly the size it occupies -- viewBox, width and
+    height all agree -- so a font-size in here is the font-size on the page.
+    An SVG stretched to fit a flexible column silently rescales its own labels,
+    which is how chart text ends up smaller than everything around it.
+    """
+    n = max(len(daily), 1)
+    pad_t, pad_b, pad_x = 18, 30, 2
+    plot_h = height - pad_t - pad_b
+    slot = (width - 2 * pad_x) / n
+    top = max([d["n"] for d in daily] or [0]) or 1
+    base = pad_t + plot_h
+
+    gap = 2.4 if slot >= 26 else 1.0
+    bw = max(1.6, min((slot * 0.7 - gap) / 2, 19))
+    show_vals = slot >= 27
+    every = 1 if slot >= 24 else max(1, round(26 / max(slot, 1)))
+    weekdays = slot >= 22
+
+    p = [f'<svg class="chart" width="{width}" height="{height}" '
+         f'viewBox="0 0 {width} {height}" role="img" aria-label="'
+         f'Submissions and distinct units per day">']
+
+    for i, d in enumerate(daily):                       # weekends, behind all
+        if d["day"].weekday() >= 5:
+            p.append(f'<rect x="{pad_x + slot * i:.1f}" y="{pad_t - 5:.1f}" '
+                     f'width="{slot:.1f}" height="{plot_h + 5:.1f}" class="wknd"/>')
+    for gl in (1.0, 0.5):
+        y = base - plot_h * gl
+        p.append(f'<line x1="{pad_x}" y1="{y:.1f}" x2="{width - pad_x}" '
+                 f'y2="{y:.1f}" class="grid"/>')
+    p.append(f'<line x1="{pad_x}" y1="{base:.1f}" x2="{width - pad_x}" '
+             f'y2="{base:.1f}" class="axis"/>')
+
+    for i, d in enumerate(daily):
+        cx = pad_x + slot * (i + 0.5)
+        for off, key, cls in ((-bw - gap / 2, "n", "b-sub"),
+                              (gap / 2, "units", "b-unit")):
+            v, x = d[key], cx + off
+            h = plot_h * v / top
+            y = base - h if v else base - 1.4
+            zero = "" if v else " zero"
+            p.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                     f'height="{max(h, 1.4):.1f}" rx="1.5" class="{cls}{zero}"/>')
+            if show_vals and v:
+                p.append(f'<text x="{x + bw / 2:.1f}" y="{y - 3.6:.1f}" '
+                         f'class="vlab">{v}</text>')
+        if show_vals and not d["n"]:
+            p.append(f'<text x="{cx:.1f}" y="{base - 5:.1f}" class="vlab q">0</text>')
+        if i % every == 0 or i == n - 1:
+            p.append(f'<text x="{cx:.1f}" y="{height - (14 if weekdays else 9):.1f}" '
+                     f'class="xlab">{d["day"].day:02d}</text>')
+            if weekdays:
+                dow = f'{d["day"]:%a}'.upper()
+                p.append(f'<text x="{cx:.1f}" y="{height - 4:.1f}" '
+                         f'class="xlab2">{dow}</text>')
+    p.append("</svg>")
+    return "".join(p)
+
+
+QUALITY = (
+    ("Complete", "q1", "every required area filmed"),
+    ("Real", "q2", "1–2 areas unfilmed"),
+    ("Partial", "q3", "3–5 areas unfilmed"),
+    ("Not a PTI", "q4", "6 or more unfilmed"),
+)
+
+
+def quality_block(mix, total) -> str:
+    segs, rows = [], []
+    for name, cls, desc in QUALITY:
+        v = mix.get(name, 0)
+        share = 100 * v / total if total else 0
+        if v:
+            segs.append(f'<i class="{cls}" style="width:{share:.4f}%"></i>')
+        rows.append(
+            f'<div class="qrow"><span class="sw {cls}"></span>'
+            f'<span class="qn">{html.escape(name)}</span>'
+            f'<span class="qd">{html.escape(desc)}</span>'
+            f'<span class="qv">{v}</span>'
+            f'<span class="qp">{round(share)}%</span></div>')
+    bar = "".join(segs) or '<i style="width:100%"></i>'
+    return f'<div class="qbar">{bar}</div>{"".join(rows)}'
+
+
+# --------------------------------------------------------------- rendering
+
 def stats_html(agg, meta):
     t = agg["totals"]
-    daily = agg["daily"]
-    n_days = len(daily)
-    label_every = 1 if n_days <= 10 else max(1, n_days // 10)
-    for d in daily:
-        d["label"] = fmt_day(d["day"])
+    cov = round(100 * t["units_sent"] / t["units_active"]) if t["units_active"] else 0
 
-    pct = lambda a, b: f"{round(100 * a / b)}%" if b else "0%"  # noqa: E731
+    hero = (
+        '<div class="hero"><div class="k">Fleet coverage</div>'
+        f'<div class="v">{cov}%</div>'
+        f'<div class="track {band(cov)}"><i style="width:{cov}%"></i></div>'
+        f'<div class="d"><b>{t["units_sent"]} of {t["units_active"]}</b> '
+        f'active units inspected<br><b>{t["silent"]}</b> silent · '
+        f'{t["never_ever"]} never inspected at all</div></div>'
+    )
 
+    # Only the two 0-100 measures get a track; a count has no scale to sit on.
+    avg_track = (f'<div class="track {band(t["avg"])}">'
+                 f'<i style="width:{t["avg"]}%"></i></div>')
+    # With nothing submitted the share of a share is not "0%", it is nothing at
+    # all -- so the card keeps its definition and drops the percentage.
+    n = t["inspections"]
+    real_d = "at most two areas unfilmed"
+    pass_d = "every required area filmed"
+    if n:
+        real_d = f'{pctf(t["real"], n)} of submissions — {real_d}'
+        pass_d = f'{pctf(t["passed"], n)} — {pass_d}'
     cards = [
-        ("Inspections", t["inspections"],
-         f"{t['real']} real walkarounds ({pct(t['real'], t['inspections'])})"),
-        ("Passed", t["passed"], f"{pct(t['passed'], t['inspections'])} of submissions"),
-        ("Units that submitted", t["units_sent"],
-         f"of {t['units_active']} active · {t['silent']} sent nothing"),
-        ("Drivers who submitted", t["drivers_sent"],
-         f"of {t['drivers_total']} on the roster"),
-        ("Average completeness", f"{t['avg']}%",
-         "85 areas · 5 extinguisher · 10 detail"),
+        ("Inspections", str(n), "",
+         f'{t["drivers_sent"]} of {t["drivers_total"]} registered drivers'),
+        ("Real walkarounds", str(t["real"]), "", real_d),
+        ("Passed", str(t["passed"]), "", pass_d),
+        ("Avg completeness", f'{t["avg"]}%', avg_track,
+         "85 pts areas · 5 extinguisher · 10 detail"),
     ]
     card_html = "".join(
         f'<div class="card"><div class="k">{html.escape(k)}</div>'
-        f'<div class="v">{v}</div><div class="d">{html.escape(d)}</div></div>'
-        for k, v, d in cards
+        f'<div class="v">{v}</div>{extra}'
+        f'<div class="d">{html.escape(d)}</div></div>'
+        for k, v, extra, d in cards
     )
 
-    charts = [
-        bar_chart(daily, "n", "Submissions per day",
-                  f"Every day in the window. {sum(d['n'] for d in daily)} in total.",
-                  label_every=label_every),
-        bar_chart(daily, "units", "Units submitting each day",
-                  "Distinct trucks with at least one inspection that day.",
-                  label_every=label_every),
-    ]
-    mix_order = ["Complete", "Real", "Partial", "Not a PTI"]
-    mix = [{"label": k, "n": agg["klass_mix"].get(k, 0)} for k in mix_order]
-    charts.append(bar_chart(
-        mix, "n", "How complete the inspections were",
-        "Complete = every required area filmed. Real = 1–2 unfilmed."))
+    chart_note = ('<span class="sw" style="background:var(--bar)"></span> '
+                  'submissions <span class="sw" style="background:var(--bar-2)">'
+                  '</span> distinct units')
+    chart_panel = panel("Inspections per day", chart_note,
+                        day_chart(agg["daily"], height=DAY_CHART_H), "p-day")
 
-    # --- silent units
+    mix_note = f'{t["inspections"]} submissions scored'
+    mix_panel = panel("How complete they were", html.escape(mix_note),
+                      quality_block(agg["klass_mix"], t["inspections"]), "p-mix")
+
+    # --- active units that sent nothing: the action list
+    shown = agg["silent"][:STATS_ROWS * 3]
     srows = []
-    for u in agg["silent"][:44]:
-        cls = "" if u["setup"] else ' class="muted"'
+    for u in shown:
+        dim = "" if u["setup"] else ' class="dim"'
         last = fmt_day(u["last"]) if u["last"] else "never"
-        srows.append(
-            f'<tr{cls}><td>{html.escape(str(u["unit"]))}</td>'
-            f'<td class="n">{u["drivers"]}</td><td>{last}</td></tr>')
-    chunk = max((len(srows) + 1) // 2, 14)
-    silent_cols = "".join(
-        '<div><table><thead><tr><th>Unit</th><th class="n">Drv</th>'
-        '<th>Last PTI</th></tr></thead><tbody>'
-        + "".join(srows[i:i + chunk]) + "</tbody></table></div>"
-        for i in range(0, len(srows), chunk)
-    ) or '<div class="note">Every active unit submitted at least once.</div>'
+        srows.append(f'<tr{dim}><td class="u nw">{html.escape(str(u["unit"]))}</td>'
+                     f'<td class="n">{u["drivers"]}</td>'
+                     f'<td class="n">{last}</td></tr>')
+    # Columns fill before they multiply, so a short list narrows instead of
+    # spreading three rows across three columns -- but the three slots are
+    # always laid out, or one column of units would stretch across the panel.
+    n_cols = min(3, max(1, -(-len(srows) // STATS_ROWS)))
+    per = max(-(-len(srows) // n_cols), 1)
+    head_s = (colgroup(None, 26, 44)
+              + '<thead><tr><th>Unit</th><th class="n">Drv</th>'
+                '<th class="n">Last PTI</th></tr></thead>')
+    chunks = [srows[i:i + per] for i in range(0, len(srows), per)]
+    silent_body = "".join(
+        f'<div><table>{head_s}<tbody>{"".join(c)}</tbody></table></div>'
+        for c in chunks
+    ) + "<div></div>" * (3 - len(chunks))
+    if not srows:
+        silent_body = '<p class="d">Every active unit submitted at least once.</p>'
+    more = len(agg["silent"]) - len(shown)
+    silent_note = (f'{t["never_ever"]} never inspected'
+                   + (f' · {more} more in the CSV' if more > 0 else ''))
+    silent_panel = panel(f'Silent units — {t["silent"]} of {t["units_active"]}',
+                         html.escape(silent_note),
+                         f'<div class="cols">{silent_body}</div>', "p-silent")
 
-    # --- top drivers
-    top = [r for r in agg["driver_rows"] if r["submissions"]][:24]
-    trows = [
-        f'<tr><td>{html.escape(r["name"][:22])}</td>'
-        f'<td>{html.escape(str(r["unit"]))}</td>'
+    # --- who did submit
+    submitters = [r for r in agg["driver_rows"] if r["submissions"]]
+    top = submitters[:STATS_ROWS]
+    trows = "".join(
+        f'<tr><td class="u">{html.escape(r["name"][:28])}</td>'
+        f'<td class="nw">{html.escape(str(r["unit"]))}</td>'
+        f'<td class="n">{r["submissions"]}</td>'
         f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
-        f'<td class="n">{r["avg"]}%</td></tr>' for r in top
-    ]
-    chunk = max((len(trows) + 1) // 2, 10)
-    top_cols = "".join(
-        '<div><table><thead><tr><th>Driver</th><th>Unit</th><th class="n">Real</th>'
-        '<th class="n">Pass</th><th class="n">Avg</th></tr></thead><tbody>'
-        + "".join(trows[i:i + chunk]) + "</tbody></table></div>"
-        for i in range(0, len(trows), chunk)
-    ) or '<div class="note">No inspections in this window.</div>'
+        f'<td class="n">{pct_cell(r["avg"])}</td></tr>'
+        for r in top
+    )
+    rest = len(submitters) - len(top)
+    drv_note = (f'top {len(top)} of {len(submitters)} · the rest in the driver report'
+                if rest > 0 else 'full detail in the driver report')
+    drv_body = (
+        '<table>' + colgroup(None, 66, 30, 34, 36, 76)
+        + '<thead><tr><th>Driver</th><th>Unit</th><th class="n">Sub</th>'
+          '<th class="n">Real</th><th class="n">Pass</th>'
+          '<th class="b">Avg</th></tr></thead>'
+        f'<tbody>{trows}</tbody></table>'
+    ) if top else '<p class="d">Nobody submitted an inspection in this window.</p>'
+    drv_panel = panel("Drivers who submitted", html.escape(drv_note), drv_body,
+                      "p-drv")
 
-    foot = (
-        f'<b>Real PTIs</b> — from the per-submission area coverage Gemini recorded '
-        f'(missing_areas): 0 = complete, 1–2 = real walkaround, 3–5 = partial, '
-        f'6+ = not a PTI. Coverage cannot be faked with an unrelated clip.  ·  '
-        f'<b>Pass</b> is the stricter bar: every required area filmed. The fire '
-        f'extinguisher never fails an inspection.  ·  <b>Why units, not drivers</b> — '
-        f'two drivers share a truck and often only one uses the app, so a silent '
-        f'unit is the real gap, not a silent driver.  ·  '
-        f'<b>{t["never_ever"]} of the {t["silent"]} silent units have never sent a '
-        f'PTI at all</b>, in any window.  ·  Days are '
-        f'{html.escape(meta["tz"])}; the window is half-open, so '
-        f'{fmt_day(meta["until"] - timedelta(days=1))} is the last day counted.  ·  '
-        f'Every plotted value is labelled, so nothing depends on colour alone.'
+    last_day = fmt_day(meta["until"] - timedelta(days=1))
+    legend = (
+        '<div class="legend">'
+        '<div><span class="lt">Real PTI</span>Read off the area coverage the '
+        'inspection recorded, not its verdict — coverage is the one thing an '
+        'unrelated clip cannot fake.</div>'
+        '<div><span class="lt">Pass is stricter</span>Every required area filmed. '
+        'The extinguisher is scored but never fails one, so filming all else '
+        'scores 95% and passes.</div>'
+        '<div><span class="lt">Units, not drivers</span>Two drivers share a truck '
+        'and often only one uses the app, so a silent <em>unit</em> is the real '
+        'gap. Greyed units have unfinished setup.</div>'
+        f'<div><span class="lt">The window</span>Days are '
+        f'{html.escape(meta["tz"])}; the range is half-open, so {last_day} is the '
+        f'last day counted. Unrounded numbers are in the CSVs.</div>'
+        '</div>'
     )
 
     return (
         _page_head(meta["title"], "letter landscape", "11mm 12mm")
-        + f'<h1>{html.escape(meta["fleet"])} pti fleet inspection statistics</h1>'
-        + f'<p class="sub">{html.escape(meta["scope"])} · '
-          f'{fmt_day(meta["since"])} – {fmt_day(meta["until"] - timedelta(days=1))} '
-          f'{meta["until"].year} · pulled {fmt_day(meta["pulled"])}</p>'
-        + f'<div class="cards">{card_html}</div>'
-        + f'<div class="charts">{"".join(charts)}</div>'
-        + f'<h2>Active units that sent no PTI — {t["silent"]} of {t["units_active"]}</h2>'
-        + '<p class="note">Greyed rows are unfinished setup. "Last PTI" is the most '
-          'recent inspection ever recorded for that truck, in any window.</p>'
-        + f'<div class="cols">{silent_cols}</div>'
-        + '<h2>Drivers who submitted — ranked by real PTIs</h2>'
-        + f'<div class="cols">{top_cols}</div>'
-        + f'<div class="foot">{foot}</div></body></html>'
+        + masthead(meta, "Fleet inspection statistics")
+        + f'<div class="kpis">{hero}{card_html}</div>'
+        + f'<div class="row">{chart_panel}{mix_panel}</div>'
+        + f'<div class="row">{silent_panel}{drv_panel}</div>'
+        + legend
+        + '</body></html>'
     )
 
 
@@ -461,25 +788,53 @@ def driver_html(agg, meta):
     idx = []
     for i, r in enumerate(rows, 1):
         anchor = f'd{r["key"][0]}_{r["key"][1]}'
-        cls = "" if r["submissions"] else ' class="muted"'
+        dim = "" if r["submissions"] else ' class="dim"'
+        avg = pct_cell(r["avg"]) if r["submissions"] else "—"
         idx.append(
-            f'<tr{cls}><td class="n">{i}</td>'
-            f'<td><a href="#{anchor}">{html.escape(r["name"][:20])}</a></td>'
-            f'<td>{html.escape(str(r["unit"]))}</td>'
+            f'<tr{dim}><td class="n">{i}</td>'
+            f'<td class="u"><a href="#{anchor}">{html.escape(r["name"][:26])}</a></td>'
+            f'<td class="nw">{html.escape(str(r["unit"]))}</td>'
             f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
-            f'<td class="n">{str(r["avg"]) + "%" if r["submissions"] else "—"}'
-            f'</td></tr>')
-    per_col = 40
-    head = ('<thead><tr><th class="n">#</th><th>Driver</th><th>Unit</th>'
-            '<th class="n">Real</th><th class="n">Pass</th>'
-            '<th class="n">Avg</th></tr></thead>')
-    blocks, i = [], 0
+            f'<td class="n">{avg}</td></tr>')
+    head = (colgroup(26, None, 52, 30, 32, 72)
+            + '<thead><tr><th class="n">#</th><th>Driver</th><th>Unit</th>'
+              '<th class="n">Real</th><th class="n">Pass</th>'
+              '<th class="b">Avg</th></tr></thead>')
+    # One block per page, forced. How many rows actually fit depends on how
+    # many names wrap to a second line, so a block sized to the page exactly
+    # would sometimes spill two rows onto the next one -- which then carries a
+    # stranded stub above the block that belongs there. Undersized blocks plus
+    # a hard break leave clean white space at the foot of a page instead. Page
+    # one is the short block: it also carries the masthead and the primer.
+    first_rows, page_rows = 28, 38
+    chunks, i = [], 0
     while i < len(idx):
-        duo = [idx[i + k * per_col:i + (k + 1) * per_col] for k in range(2)]
-        blocks.append('<div class="cols idx">' + "".join(
-            f'<div><table>{head}<tbody>{"".join(c)}</tbody></table></div>'
-            for c in duo if c) + "</div>")
+        per_col = first_rows if not chunks else page_rows
+        chunks.append(idx[i:i + per_col * 2])
         i += per_col * 2
+    # Chromium cannot number printed pages from CSS, so each index page names
+    # the slice of the ranking it carries instead -- which is the thing a
+    # reader actually wants from a page number here.
+    blocks, lo = [], 1
+    for k, take in enumerate(chunks):
+        per_col = -(-len(take) // 2)
+        duo = [take[:per_col], take[per_col:]]
+        if len(chunks) == 1:
+            title = (f'All drivers — ranked by real PTIs · {t["drivers_sent"]} '
+                     f'of {t["drivers_total"]} submitted')
+        elif k == 0:
+            title = (f'All drivers — ranked by real PTIs · 1–{len(take)} of '
+                     f'{len(idx)}')
+        else:
+            title = (f'All drivers, continued · {lo}–{lo + len(take) - 1} of '
+                     f'{len(idx)}')
+        pg = "" if k == len(chunks) - 1 else " pg"
+        blocks.append(
+            f'<h2 class="sec">{html.escape(title)}</h2>'
+            f'<div class="cols{pg}">' + "".join(
+                f'<div><table>{head}<tbody>{"".join(c)}</tbody></table></div>'
+                for c in duo if c) + '</div>')
+        lo += len(take)
 
     sections = []
     for r in rows:
@@ -489,51 +844,69 @@ def driver_html(agg, meta):
         lines = []
         for it in r["items"]:
             s = it["score"]
+            chips = "".join(f'<span class="chip hot">{html.escape(a)}</span>'
+                            for a in s.missing)
             notes = []
             if not s.fire_extinguisher:
-                notes.append("fire extinguisher not shown")
-            notes += s.not_visible
+                notes.append("extinguisher not shown")
+            notes += [f"{n} not visible" for n in s.not_visible]
+            note = (f'<span class="nv">{html.escape(" · ".join(notes))}</span>'
+                    if notes else "")
+            if not chips and not note:
+                chips = '<span class="ok">nothing missing</span>'
+            verdict = ('<span class="badge p">PASS</span>' if it["passed"]
+                       else '<span class="badge f">FAIL</span>')
             lines.append(
-                f'<tr><td>{fmt_day(it["day"])}</td>'
-                f'<td class="n">{s.score}%</td><td>{s.klass}</td>'
+                f'<tr><td class="nw">{fmt_day(it["day"])}</td>'
+                f'<td class="n">{pct_cell(s.score)}</td>'
+                f'<td>{s.klass}</td>'
                 f'<td class="n">{s.filmed}/{s.required}</td>'
-                f'<td>{"PASS" if it["passed"] else "FAIL"}</td>'
-                f'<td>{html.escape(", ".join(s.missing) or "—")}'
-                f'{" · " + html.escape("; ".join(notes)) if notes else ""}</td></tr>')
+                f'<td>{verdict}</td>'
+                f'<td>{chips}{" " if chips and note else ""}{note}</td></tr>')
+        stats = (f'<em>{r["submissions"]}</em> subs<span><em>{r["real"]}</em> real'
+                 f'</span><span><em>{r["passed"]}</em> passed</span>'
+                 f'<span><em>{r["avg"]}%</em> avg{sbar(r["avg"])}</span>'
+                 f'<span><em>{r["best"]}%</em> best</span>')
         sections.append(
-            f'<section id="{anchor}"><div class="dhead">'
-            f'<span class="nm">{html.escape(r["name"])}</span> '
-            f'<span class="mt">unit {html.escape(str(r["unit"]))} · '
-            f'{r["real"]} real PTIs of {r["submissions"]} submissions · '
-            f'{r["passed"]} passed · average completeness {r["avg"]}% · '
-            f'best {r["best"]}%</span></div>'
-            f'<table><thead><tr><th>Date</th><th class="n">Score</th><th>Class</th>'
-            f'<th class="n">Areas</th><th>Verdict</th><th>Areas not filmed</th>'
-            f'</tr></thead><tbody>{"".join(lines)}</tbody></table></section>')
+            f'<section class="drv" id="{anchor}"><div class="dh">'
+            f'<span class="dn">{html.escape(r["name"])}</span>'
+            f'<span class="du">unit {html.escape(str(r["unit"]))}</span>'
+            f'<span class="st">{stats}</span></div>'
+            '<table>' + colgroup(56, 84, 66, 44, 56, None)
+            + '<thead><tr><th>Date</th><th class="b">Score</th><th>Class</th>'
+              '<th class="n">Areas</th><th>Verdict</th>'
+              '<th>Areas not filmed</th></tr></thead>'
+            f'<tbody>{"".join(lines)}</tbody></table></section>')
+
+    silent_drivers = sum(1 for r in rows if not r["submissions"])
+    last_day = fmt_day(meta["until"] - timedelta(days=1))
+    intro = (
+        '<div class="intro">'
+        '<div><span class="lt">The completeness score</span>85 pts for the required '
+        'areas actually filmed (8, or 9 once the under-hood check appears in the '
+        'footage), 5 pts for showing the fire extinguisher, and 10 pts when no '
+        'sub-item was flagged "not visible" — 2 off for each that was.</div>'
+        '<div><span class="lt">The score is not the verdict</span>PASS/FAIL is '
+        'decided only by whether every required area was filmed. The extinguisher '
+        'never fails an inspection, so filming everything but the extinguisher '
+        'scores 95% and still passes.</div>'
+        f'<div><span class="lt">Reading the list</span>Class is by areas unfilmed: '
+        f'Complete 0, Real 1–2, Partial 3–5, Not a PTI 6+. The '
+        f'{silent_drivers} greyed drivers submitted nothing in this window and show '
+        f'"—" rather than 0%. Days are {html.escape(meta["tz"])}; {last_day} is the '
+        f'last day counted.</div>'
+        '</div>'
+    )
 
     return (
         _page_head(meta["title_d"], "letter portrait", "12mm")
-        + f'<h1>{html.escape(meta["fleet"])} pti — driver inspection report</h1>'
-        + f'<p class="sub">{html.escape(meta["scope"])} · '
-          f'{fmt_day(meta["since"])} – {fmt_day(meta["until"] - timedelta(days=1))} '
-          f'{meta["until"].year} · {t["inspections"]} inspections by '
-          f'{t["drivers_sent"]} drivers · pulled {fmt_day(meta["pulled"])}</p>'
-        + '<p class="note"><b>Completeness score</b> — 85 pts for required areas '
-          'actually filmed (8, or 9 when the under-hood check applies), 5 pts if the '
-          'fire extinguisher was shown, 10 pts if no specific sub-item was flagged '
-          '"not visible" (−2 each). So a driver who filmed every area but never '
-          'showed the extinguisher scores 95%, and the verdict is still whatever the '
-          'areas gave.</p>'
-        + '<p class="note"><b>Important</b> — the bot\'s PASS/FAIL is decided only by '
-          'whether every required area was filmed; the fire extinguisher never fails '
-          'an inspection. <b>Class</b> — Complete = 0 areas unfilmed, Real = 1–2, '
-          'Partial = 3–5, Not a PTI = 6+. Greyed drivers submitted nothing in this '
-          'window.</p>'
-        + '<h2>All drivers — ranked by real PTIs</h2>'
+        + masthead(meta, "Driver inspection report")
+        + intro
         + "".join(blocks)
-        + '<h2>Inspections by driver</h2>'
+        + f'<h2 class="sec">Inspections by driver · {t["inspections"]} in the '
+          f'window</h2>'
         + "".join(sections)
-        + "</body></html>"
+        + '</body></html>'
     )
 
 
