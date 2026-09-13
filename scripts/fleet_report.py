@@ -334,8 +334,12 @@ a{color:inherit;text-decoration:none;}
   border-right:1px solid rgba(255,255,255,.24);max-width:282px;
   line-height:1.16;display:-webkit-box;-webkit-line-clamp:2;
   -webkit-box-orient:vertical;overflow:hidden;}
+/* Only the shortest step may refuse to wrap: at its ceiling it cannot reach
+   the cap, so nowrap there can never clip. The wider steps wrap instead --
+   a clipped company name is a wrong name, and it fails silently. Two lines
+   at either of those sizes still fits inside the band's floor height. */
 .mast .mark.m1{font-size:15.5px;letter-spacing:.1em;white-space:nowrap;}
-.mast .mark.m2{font-size:12.8px;letter-spacing:.08em;white-space:nowrap;}
+.mast .mark.m2{font-size:12.8px;letter-spacing:.08em;}
 .mast .mark.m3{font-size:10.8px;letter-spacing:.06em;}
 .mast .mid{flex:1;min-width:0;}
 .mast .ttl{font-size:14.5px;font-weight:600;letter-spacing:-.012em;
@@ -546,7 +550,7 @@ def wordmark(name: str) -> str:
     names step down and are allowed a second line; past that the name is cut,
     because a wordmark that keeps growing takes the layout with it."""
     name = (name or "Fleet").strip()[:60]
-    size = "m1" if len(name) <= 18 else "m2" if len(name) <= 26 else "m3"
+    size = "m1" if len(name) <= 18 else "m2" if len(name) <= 30 else "m3"
     return f'<div class="mark {size}">{html.escape(name)}</div>'
 
 
