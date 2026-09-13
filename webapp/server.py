@@ -27,6 +27,9 @@ from loader import bot
 from scripts import fleet_report as _report
 from utils import userbot
 from utils.admins import resolve_admin
+from utils.driver_names import match_names_to_drivers, parse_driver_contacts
+from utils.group_health import note_send_failure, note_send_ok
+from utils.phones import find_phones
 from utils.db import (
     add_admin,
     add_driver,
@@ -86,24 +89,33 @@ def _err(status: int, message: str) -> web.Response:
     return _json({"error": message}, status=status)
 
 
-# ---------- chat-title cache ----------
+# ---------- chat cache ----------
 # Titles live in groups.title (kept fresh by the group_title middleware), so
 # listing groups normally needs no Telegram calls. get_chat only fills gaps —
 # groups with no stored title yet — and its result is persisted; the short
 # in-memory cache just absorbs rapid re-fetches (including failures for dead
 # group ids).
+#
+# The same call answers for the About text, which is where the drivers' phone
+# numbers live, so both are cached from one response rather than fetched twice.
+# The About text is deliberately NOT stored in the database: it is the fleet's
+# own record of who to call, and a stale copy of a phone number is worse than
+# no copy.
 
 _TITLE_TTL = 600.0
-_title_cache: dict[int, tuple[float, str]] = {}
+_chat_cache: dict[int, tuple[float, str, str]] = {}   # gid -> (at, title, about)
 
 
-async def _chat_title(group_id: int, stored: str | None = None) -> str:
-    hit = _title_cache.get(group_id)
+async def _chat_info(group_id: int, stored: str | None = None) -> tuple[str, str]:
+    """(title, About text). Both degrade to the stored title / "" on failure."""
+    hit = _chat_cache.get(group_id)
     if hit and time.monotonic() - hit[0] < _TITLE_TTL:
-        return hit[1]
+        return hit[1], hit[2]
+    about = ""
     try:
         chat = await bot.get_chat(group_id)
         title = chat.title or str(group_id)
+        about = getattr(chat, "description", None) or ""
         if title != stored:
             try:
                 await set_group_title(group_id, title)
@@ -111,8 +123,12 @@ async def _chat_title(group_id: int, stored: str | None = None) -> str:
                 logging.exception("web panel: failed to store title for %s", group_id)
     except Exception:
         title = stored or str(group_id)
-    _title_cache[group_id] = (time.monotonic(), title)
-    return title
+    _chat_cache[group_id] = (time.monotonic(), title, about)
+    return title, about
+
+
+async def _chat_title(group_id: int, stored: str | None = None) -> str:
+    return (await _chat_info(group_id, stored))[0]
 
 
 async def _chat_titles(group_ids: list[int]) -> dict[int, str]:
@@ -123,6 +139,26 @@ async def _chat_titles(group_ids: list[int]) -> dict[int, str]:
             return gid, await _chat_title(gid)
 
     return dict(await asyncio.gather(*(one(g) for g in group_ids)))
+
+
+def _driver_phones(about: str, drivers: list[dict]) -> tuple[dict[int, str], list[str]]:
+    """({user_id: phone as written}, numbers that belong to nobody in particular).
+
+    The About text pairs a name with a number; `group_drivers` pairs a name with
+    a `user_id`. Both pairings have to hold for a number to land on a driver
+    row, and `match_names_to_drivers` is the half that refuses to guess — two
+    drivers sharing a surname pair to neither. Whatever is left over is shown
+    as the group's numbers instead, because an admin looking up who to call
+    would rather see two numbers than none.
+    """
+    contacts = parse_driver_contacts(about)
+    by_name = {name: phone for name, phone in contacts if phone}
+    placed, _ = match_names_to_drivers([n for n, _ in contacts], drivers)
+
+    phones = {uid: by_name[name] for uid, name in placed.items() if name in by_name}
+    taken = set(phones.values())
+    spare = [p for p in find_phones(about) if p not in taken]
+    return phones, spare
 
 
 # ---------- user-profile cache ----------
@@ -248,8 +284,11 @@ async def api_groups(request: web.Request) -> web.Response:
     for g in groups:
         gid = g["group_id"]
         last = last_ptis.get(gid)
-        # Non-compliant driver count, so the list can sort/badge "due" groups.
-        # Same eligibility rule as api_stats: only active, configured groups.
+        # Non-compliant driver count, so the list can sort, badge and filter
+        # "due" groups. Only active, configured groups are eligible: a group
+        # with no unit files no PTIs and no reminder covers it, so counting it
+        # as overdue would put every un-onboarded group in the same list as the
+        # drivers who actually skipped a walkaround.
         due = 0
         if g.get("is_active", True) and g.get("setup_complete"):
             for d in drivers.get(gid, []):
@@ -269,6 +308,7 @@ async def api_groups(request: web.Request) -> web.Response:
             "is_active": g.get("is_active", True),
             "setup_complete": bool(g.get("setup_complete")),
             "notifications_disabled": bool(g.get("notifications_disabled")),
+            "post_blocked": bool(g.get("post_blocked")),
             "drivers": drivers.get(gid, []),
             "drivers_due": due,
             "last_pti": last and {"passed": last["passed"], "submitted_at": last["submitted_at"]},
@@ -282,14 +322,19 @@ async def api_group(request: web.Request) -> web.Response:
     if not g:
         return _err(404, "Group not found.")
 
+    title, about = await _chat_info(gid, g.get("title"))
+    registered = await get_drivers(gid)
+    phones, spare_phones = _driver_phones(about, registered)
+
     drivers = []
-    for d in await get_drivers(gid):
+    for d in registered:
         count = await get_pti_count_this_week(gid, d["user_id"])
         last = await get_last_pti(gid, d["user_id"])
         ok, reason = compliance_verdict(count, last["submitted_at"] if last else None)
         drivers.append({
             "user_id": d["user_id"],
             "name": d["name"],
+            "phone": phones.get(d["user_id"]),
             "ptis_this_week": count,
             "compliant": ok,
             "reason": None if ok else reason,
@@ -297,7 +342,8 @@ async def api_group(request: web.Request) -> web.Response:
 
     return _json({
         "group_id": gid,
-        "title": await _chat_title(gid, g.get("title")),
+        "title": title,
+        "spare_phones": spare_phones,
         "unit_number": g.get("unit_number"),
         "truck_plate": g.get("truck_plate"),
         "trailer_unit": g.get("trailer_unit"),
@@ -305,6 +351,7 @@ async def api_group(request: web.Request) -> web.Response:
         "is_active": g.get("is_active", True),
         "setup_complete": bool(g.get("setup_complete")),
         "notifications_disabled": bool(g.get("notifications_disabled")),
+        "post_blocked": bool(g.get("post_blocked")),
         "drivers": drivers,
     })
 
@@ -482,45 +529,6 @@ async def api_replace_driver(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
-async def api_stats(request: web.Request) -> web.Response:
-    groups = await get_all_groups()
-    drivers_by_group = await get_all_drivers_by_group()
-    weekly = await get_weekly_pti_stats()
-    active = [g for g in groups if g.get("is_active", True)]
-    setup_done = [g for g in active if g.get("setup_complete")]
-
-    total_drivers = compliant = 0
-    non_compliant = []
-    for g in setup_done:
-        gid = g["group_id"]
-        for d in drivers_by_group.get(gid, []):
-            total_drivers += 1
-            s = weekly.get((gid, d["user_id"]))
-            ok, reason = compliance_verdict(
-                s["week_count"] if s else 0, s["last_at"] if s else None
-            )
-            if ok:
-                compliant += 1
-            else:
-                non_compliant.append({
-                    "group_id": gid,
-                    "unit": g.get("unit_number") or str(gid),
-                    "name": d["name"],
-                    "reason": reason,
-                })
-
-    return _json({
-        "groups_total": len(groups),
-        "groups_active": len(active),
-        "groups_configured": len(setup_done),
-        "groups_inactive": len(groups) - len(active),
-        "drivers_total": total_drivers,
-        "drivers_compliant": compliant,
-        "required_per_week": REQUIRED_PER_WEEK,
-        "non_compliant": non_compliant,
-    })
-
-
 async def api_model(request: web.Request) -> web.Response:
     return _json({
         "active": get_active_model(),
@@ -585,8 +593,12 @@ async def api_broadcast(request: web.Request) -> web.Response:
         try:
             await bot.send_message(gid, escape(text))  # sent as plain text
             sent += 1
-        except Exception:
+            await note_send_ok(gid)
+        except Exception as e:
             failed += 1
+            # A broadcast touches every group at once, so it is the cheapest
+            # sweep there is for "which of these can the bot still post in".
+            await note_send_failure(gid, e)
             logging.exception("web panel: broadcast to %s failed", gid)
     logging.info("web panel: admin %s broadcast to %s groups (%s failed)",
                  request["admin"]["user_id"], sent, failed)
@@ -702,7 +714,6 @@ def build_app() -> web.Application:
     app.router.add_post("/api/groups/{gid}/drivers/{uid}/name", api_rename_driver)
     app.router.add_post("/api/groups/{gid}/drivers/{uid}/replace", api_replace_driver)
     app.router.add_delete("/api/groups/{gid}/drivers/{uid}", api_remove_driver)
-    app.router.add_get("/api/stats", api_stats)
     app.router.add_get("/api/model", api_model)
     app.router.add_post("/api/model", api_model_set)
     app.router.add_get("/api/admins", api_admins)

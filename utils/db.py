@@ -70,6 +70,13 @@ async def init_db():
             -- since. Only a sustained streak deactivates. See mark_unreachable.
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS unreachable_strikes INT DEFAULT 0;
 
+            -- "The bot is in this group but is not allowed to post in it."
+            -- Stored rather than recomputed so the admins are told once, when
+            -- it starts, and once more when it is fixed -- an hourly loop over
+            -- 150 groups would otherwise repeat the same alert all week. See
+            -- utils/group_health.py.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS post_blocked BOOLEAN DEFAULT FALSE;
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key        TEXT PRIMARY KEY,
                 value      TEXT NOT NULL,
@@ -426,6 +433,31 @@ async def clear_unreachable(group_id: int):
     )
 
 
+async def set_post_blocked(group_id: int, blocked: bool) -> bool:
+    """Record whether the bot may post in this group. True if that just changed.
+
+    The return value is the whole point: it is what stops the alert repeating.
+    The UPDATE only matches a row whose stored answer disagrees, so the caller
+    tells the admins exactly on the transitions -- started, and fixed.
+    """
+    row = await _pool_check().fetchval(
+        """UPDATE groups SET post_blocked = $1
+            WHERE group_id = $2 AND COALESCE(post_blocked, FALSE) IS DISTINCT FROM $1
+        RETURNING group_id""",
+        blocked, group_id,
+    )
+    return row is not None
+
+
+async def get_post_blocked_groups() -> list[dict]:
+    rows = await _pool_check().fetch(
+        "SELECT group_id, unit_number, title FROM groups"
+        " WHERE COALESCE(post_blocked, FALSE) AND COALESCE(is_active, TRUE)"
+        " ORDER BY unit_number",
+    )
+    return [dict(r) for r in rows]
+
+
 async def set_group_title(group_id: int, title: str) -> None:
     """Cache the chat title. Written opportunistically (message middleware, web
     panel fetches); the IS DISTINCT FROM guard makes unchanged-title calls free."""
@@ -499,20 +531,6 @@ async def set_trailer(group_id: int, unit: str | None, plate: str | None):
     elif plate is not None:
         await _pool_check().execute(
             "UPDATE groups SET trailer_plate = $1 WHERE group_id = $2", plate, group_id,
-        )
-
-
-async def set_truck_unit(group_id: int, unit: str, plate: str | None):
-    """Replace truck unit (and optionally plate) without flipping setup_complete."""
-    unit = normalize_unit(unit)
-    if plate is not None:
-        await _pool_check().execute(
-            "UPDATE groups SET unit_number = $1, truck_plate = $2 WHERE group_id = $3",
-            unit, plate, group_id,
-        )
-    else:
-        await _pool_check().execute(
-            "UPDATE groups SET unit_number = $1 WHERE group_id = $2", unit, group_id,
         )
 
 

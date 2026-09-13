@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import re
 
+from utils.phones import find_phones
+
 # A separator (`Name:` / `Name#`) is required, for the same reason descriptions
 # are parsed more strictly than titles: About text is free prose, and a bare
 # "name" would match a sentence about one.
@@ -67,6 +69,94 @@ def parse_driver_names(text: str) -> list[str]:
             if name and name not in out:
                 out.append(name)
     return out
+
+
+# A leading `Driver 1 -` / `Name:` / `Numbers` label, and the punctuation left
+# behind once a number is struck out of the line. The list covers what the
+# *number* half of a line is called too, because "Phone# 718-864-1154" with the
+# number cut out is the word "Phone" — which is a perfectly good name unless
+# something says otherwise.
+_LABEL = re.compile(
+    r"^[^\S\n]*(?:driver|name|phone|number|cell|mobile|tel|contact)s?"
+    r"[^\S\n]*\d*[^\S\n]*[-:#–—]*", re.I)
+_EDGE_PUNCT = "-–—:#/.,;· \t"
+
+
+def _name_chunks(line: str) -> list[str]:
+    """The names a single line holds, `/`-separated, label stripped.
+
+    Empty when any chunk isn't a name, so a line is all names or none of them.
+    "718-864-1154 / 561-667-4276" cleans to nothing and "Home in Baltimore
+    AUGUST18-20" carries digits, which `_clean_name` already refuses.
+    """
+    parts = [p for p in _LABEL.sub("", line, count=1).split("/")]
+    names = [_clean_name(p.strip(_EDGE_PUNCT)) for p in parts if p.strip(_EDGE_PUNCT)]
+    return names if names and all(names) else []
+
+
+def parse_driver_contacts(text: str) -> list[tuple[str, str | None]]:
+    """(name, phone-as-written) pairs from the About text, best evidence first.
+
+    Three layouts, tried in order of how much guessing the pairing costs. The
+    number is returned **as the fleet typed it** — that is the form an admin
+    recognises and dials; the normalized form is what a lookup wants, and
+    `utils/phones` has both.
+
+    1. **Name and number on the same line** — ``Driver 1 - ZAMA, EMILE -
+       718-864-1154``. The fleet wrote them together, so the pairing is the
+       fleet's and not a reconstruction: it survives a line being added,
+       reordered or left blank. Needs exactly one number on the line.
+    2. **A names line directly above a numbers line**, both `/`-separated, with
+       the same count on each. This is the layout with no label at all
+       (``MATTHEWS, CHRISTOPHER / MCLAUGHLIN, ARTESIA`` then the two numbers),
+       which `parse_driver_names` refuses on its own — a bare line of prose is
+       not a name list. Sitting immediately above a matching count of phone
+       numbers is the evidence it otherwise lacks.
+    3. **Whole-document positional** — labelled ``Name:`` and number lines,
+       paired by position, which is what `utils/auto_onboard` already does for
+       the same text. Only when the counts match.
+
+    Falling through all three leaves the numbers unattributed and the caller
+    shows them as the *group's* numbers rather than guessing whose they are.
+    Putting the wrong number on a driver reads as authoritative, exactly like a
+    wrong name does, and here it would have someone call the wrong person.
+
+    A name with no number still comes back, paired with None: the name is the
+    useful half, and half an answer beats none.
+    """
+    lines = (text or "").splitlines()
+
+    # Layout 1.
+    inline: list[tuple[str, str | None]] = []
+    for line in lines:
+        found = find_phones(line)
+        if len(found) != 1:
+            continue
+        names = _name_chunks(line.replace(found[0], " "))
+        if len(names) == 1:
+            inline.append((names[0], found[0]))
+    if inline:
+        return inline
+
+    # Layout 2.
+    previous = ""
+    for line in lines:
+        found = find_phones(line)
+        if not found:
+            if line.strip():
+                previous = line
+            continue
+        names = _name_chunks(previous)
+        if len(names) == len(found):
+            return list(zip(names, found))
+        previous = ""
+
+    # Layout 3.
+    names = parse_driver_names(text)
+    phones = find_phones(text)
+    if names and len(names) == len(phones):
+        return list(zip(names, phones))
+    return [(n, None) for n in names]
 
 
 def _words(name: str) -> set[str]:

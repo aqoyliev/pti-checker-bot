@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass
 
 from data.config import (
@@ -46,17 +45,21 @@ from data.config import (
     TELEGRAM_LOOKUP_SESSION,
     TELEGRAM_LOOKUP_SESSION_FILE,
 )
+# Reading a number out of free text needs no session, no API id and no
+# rate-limit budget, so it lives in a module that costs nothing to import
+# (utils/phones). Re-exported here because this is where callers look for it.
+from utils.phones import (  # noqa: F401
+    DEFAULT_COUNTRY_CODE,
+    extract_phones,
+    find_phones,
+    normalize_phone,
+)
 
 _client = None
 _connect_lock = asyncio.Lock()
 # One lookup at a time: two concurrent imports would interleave their contact
 # cleanup, and contact import is rate-limited anyway.
 _lookup_lock = asyncio.Lock()
-
-# The fleet is US-only, so a bare 10-digit number is a US number. Numbers are
-# typed by hand ("786-488-2619"), and Telegram silently resolves nothing for a
-# number without a country code — indistinguishable from "not on Telegram".
-DEFAULT_COUNTRY_CODE = "1"
 
 _MAX_ATTEMPTS = 3
 _RETRY_PAUSE = 5.0
@@ -77,48 +80,6 @@ class Match:
     @property
     def label(self) -> str:
         return self.name or (f"@{self.username}" if self.username else str(self.user_id))
-
-
-def normalize_phone(raw: str, default_country: str = DEFAULT_COUNTRY_CODE) -> str | None:
-    """'786-488-2619' -> '+17864882619'. None when it cannot be a phone number.
-
-    An explicit '+' is trusted as already-international; a bare 10-digit number
-    gets the default country code.
-    """
-    raw = (raw or "").strip()
-    digits = re.sub(r"\D", "", raw)
-    if not 7 <= len(digits) <= 15:
-        return None
-    if raw.startswith("+"):
-        return f"+{digits}"
-    if len(digits) == 10:
-        return f"+{default_country}{digits}"
-    return f"+{digits}"
-
-
-# A run of 10-15 digits with the usual separators. Deliberately stricter than
-# normalize_phone: a group's About text is free prose full of numbers -- unit
-# numbers, trailer numbers, years, dollar amounts -- and the same "descriptions
-# are parsed more strictly than titles" reasoning that governs unit parsing
-# applies here. Ten digits is the shortest thing that is unambiguously a phone.
-_PHONE_RE = re.compile(r"\+?\d[\d\s().\-]{8,18}\d")
-
-
-def extract_phones(text: str) -> list[str]:
-    """Phone numbers found in free text, normalized and de-duplicated.
-
-    Driver phone numbers live in the group's About text, which is where this
-    feature gets its input: description -> number -> account -> user_id.
-    """
-    out: list[str] = []
-    for chunk in _PHONE_RE.findall(text or ""):
-        digits = re.sub(r"\D", "", chunk)
-        if not 10 <= len(digits) <= 15:
-            continue
-        norm = normalize_phone(chunk)
-        if norm and norm not in out:
-            out.append(norm)
-    return out
 
 
 def is_configured() -> bool:

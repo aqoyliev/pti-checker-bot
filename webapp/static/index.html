@@ -80,9 +80,7 @@
   .item { padding: 11px 0; border-bottom: 1px solid rgba(128,128,128,.15); cursor: pointer; }
   .item:last-child { border-bottom: 0; }
 
-  .statgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .stat { background: var(--bg2); border-radius: var(--radius); padding: 12px; }
-  .stat .num { font-size: 22px; font-weight: 700; }
+  .tel { color: var(--btn); text-decoration: none; font-size: 13px; }
 
   .kv { display: flex; gap: 8px; margin: 3px 0; }
   .kv .k { color: var(--hint); min-width: 92px; }
@@ -130,7 +128,6 @@
 <main id="view"><div class="center">Loading…</div></main>
 <nav id="tabs" style="display:none">
   <button data-tab="groups"><span class="ico">📋</span>Groups</button>
-  <button data-tab="stats"><span class="ico">📊</span>Stats</button>
   <button data-tab="tools"><span class="ico">🧰</span>Tools</button>
   <button data-tab="admins" id="adminsTab" style="display:none"><span class="ico">🛡</span>Admins</button>
 </nav>
@@ -240,7 +237,6 @@ async function render() {
   if (current.gid != null) return renderGroup(current.gid);
   titleEl.textContent = "🛠 PTI Admin";
   if (current.tab === "groups") return renderGroups();
-  if (current.tab === "stats")  return renderStats();
   if (current.tab === "tools")  return renderTools();
   if (current.tab === "admins") return renderAdmins();
 }
@@ -263,18 +259,30 @@ async function renderGroups() {
   // 144 of 147 groups -- so exactly one is the anomaly worth surfacing: either a
   // team that lost a driver, or an onboarding that only half landed.
   const solo = gs.filter(g => g.is_active && g.drivers.length === 1).length;
+  const drivers = gs.reduce((n, g) => n + (g.is_active ? g.drivers.length : 0), 0);
+  const due = gs.reduce((n, g) => n + (g.is_active ? (g.drivers_due || 0) : 0), 0);
+  const muted = gs.filter(g => g.is_active && g.post_blocked).length;
 
   // Filters, not sorts: an un-onboarded group has no unit and no last PTI, so
   // it sorts to the bottom of every ordering here and is effectively invisible
   // in a fleet of 150. Being able to ask for just those is the only way to
   // work through them.
-  const filters = [["setup", "⚙️ Needs setup"], ["nodrv", "👤 No drivers"],
+  // "Due" is the one filter that answers a question about people rather than
+  // about configuration, and it is why there is no separate stats screen: the
+  // fleet-wide counts it used to show are the line above, and its list of
+  // overdue drivers is this chip plus the names already on every row.
+  const filters = [["due", "⚠️ Due"], ["muted", "🔇 Can't post"],
+                   ["setup", "⚙️ Needs setup"], ["nodrv", "👤 No drivers"],
                    ["solo", "🧍 Solo driver"], ["inactive", "💤 Inactive"]];
 
   view.innerHTML =
     '<div class="card"><div class="row">' +
       '<div class="grow"><b>' + gs.length + '</b> groups <span class="hint">· ' +
-      active + ' active · ' + configured + ' configured</span>' +
+      active + ' active · ' + configured + ' configured · ' + drivers + ' drivers</span>' +
+      (muted ? '<div class="hint" style="margin-top:2px">🔇 ' + muted +
+        ' active group(s) won\'t let the bot post.</div>' : "") +
+      (due ? '<div class="hint" style="margin-top:2px">⚠️ ' + due +
+        ' driver(s) owe a PTI — tap <b>Due</b> below.</div>' : "") +
       (needSetup ? '<div class="hint" style="margin-top:2px">⚙️ ' + needSetup +
         ' active group(s) still need setting up.</div>' : "") +
       (solo ? '<div class="hint" style="margin-top:2px">🧍 ' + solo +
@@ -304,6 +312,8 @@ async function renderGroups() {
   };
 
   const matchesFilter = g => {
+    if (groupFilter === "due")      return g.is_active && g.drivers_due > 0;
+    if (groupFilter === "muted")    return g.is_active && g.post_blocked;
     if (groupFilter === "setup")    return g.is_active && !g.setup_complete;
     if (groupFilter === "nodrv")    return g.is_active && !g.drivers.length;
     if (groupFilter === "solo")     return g.is_active && g.drivers.length === 1;
@@ -329,13 +339,16 @@ async function renderGroups() {
           (g.last_pti.passed ? "PASS" : "FAIL") + ' ' + fmtDate(g.last_pti.submitted_at).slice(5) + '</span>'
         : '<span class="chip mut">no PTIs</span>';
       const bell = g.notifications_disabled ? " 🔕" : "";
+      // A chip, not a marker after the title: the title is what the ellipsis
+      // cuts, so a marker there disappears on exactly the long-titled groups.
+      const muted = g.post_blocked ? '<span class="chip bad">🔇</span>' : '';
       return '<div class="item" data-gid="' + g.group_id + '"><div class="row">' +
         '<div class="grow">' +
           '<div class="ellip">' + groupIcon(g) + ' <b>' + esc(g.unit_number || "(no unit)") + '</b>' +
           ' <span class="hint">· ' + esc(g.title) + '</span>' + bell + '</div>' +
           '<div class="hint ellip">' +
             (g.drivers.length ? g.drivers.map(d => esc(d.name)).join(", ") : "no drivers") +
-          '</div></div>' + due + last + '</div></div>';
+          '</div></div>' + muted + due + last + '</div></div>';
     }).join("") || '<div class="hint" style="padding:8px 0">No matching groups.</div>';
     list.querySelectorAll(".item").forEach(el =>
       el.onclick = () => { current.gid = Number(el.dataset.gid); render(); });
@@ -382,6 +395,16 @@ async function renderGroup(gid) {
       'least one driver below. Until it has a unit, nothing here is inspected ' +
       'or reminded.</div></div>';
 
+  // Nothing in the panel can fix this one — it is a permission inside the
+  // group — so the banner says who can and what they change.
+  const mutedBanner = !g.post_blocked ? "" :
+    '<div class="card" style="border:1px solid var(--bad)">' +
+      '<b>🔇 The bot can\'t post in this group</b>' +
+      '<div class="hint" style="margin-top:4px">It is still a member, but its ' +
+      '<b>Send Messages</b> permission was removed, so inspection results and ' +
+      'reminders never reach the drivers. A group admin has to allow it again ' +
+      'in the group\'s permissions.</div></div>';
+
   view.innerHTML =
     '<div class="card">' +
       '<div style="font-weight:700;margin-bottom:6px">' + esc(g.title) + '</div>' +
@@ -393,6 +416,7 @@ async function renderGroup(gid) {
       '<div class="kv"><div class="k">Reminders</div><div>' + (g.notifications_disabled ? "🔕 disabled" : "🔔 on") + '</div></div>' +
     '</div>' +
 
+    mutedBanner +
     setupBanner +
 
     '<div class="card"><b>🔧 Unit number</b><div class="hint" style="margin:4px 0 8px">' +
@@ -488,8 +512,15 @@ function drawDrivers(g) {
         '<button class="btn inline" id="nameSave">Save</button></div>' +
         '<button class="btn secondary" id="nameCancel">Cancel</button></div>';
     }
+    // The number comes from the group's own About text, where the fleet keeps
+    // it. It is a tel: link because the reason to look at it is to call them.
+    const phone = d.phone
+      ? '<div><a class="tel" href="tel:' + esc(String(d.phone).replace(/[^\d+]/g, "")) +
+        '">📞 ' + esc(d.phone) + '</a></div>'
+      : "";
     return '<div class="item" style="cursor:default"><div class="row">' +
       '<div class="grow"><b>' + esc(d.name) + '</b> <span class="hint">' + d.user_id + '</span>' +
+      phone +
       '<div class="hint">' + d.ptis_this_week + '/' + me.required_per_week + ' this week' +
       (d.compliant ? "" : " · " + esc(d.reason || "non-compliant")) + '</div></div>' +
       '<span class="chip ' + (d.compliant ? "ok" : "warn") + '">' + (d.compliant ? "OK" : "due") + '</span>' +
@@ -500,10 +531,22 @@ function drawDrivers(g) {
       '</div></div>';
   }).join("") || '<div class="hint" style="padding:6px 0">No drivers registered.</div>';
 
+  // Numbers the About text carries but no driver could be matched to — either
+  // the group has nobody registered yet, or the names don't pair (two drivers
+  // sharing a surname pair to neither). Showing them unattributed is the whole
+  // point: the admin still gets a number to call, and no driver row claims one
+  // that may not be theirs.
+  const spare = (g.spare_phones || []).length
+    ? '<div class="hint" style="margin-top:8px">📇 Also in the group\'s About text: ' +
+      g.spare_phones.map(p => '<a class="tel" href="tel:' +
+        esc(String(p).replace(/[^\d+]/g, "")) + '">' + esc(p) + '</a>').join(" · ") +
+      '</div>'
+    : "";
+
   card.innerHTML =
     '<b>👤 Drivers</b>' +
     '<div class="hint" style="margin:4px 0 2px">Changes here apply immediately.</div>' +
-    rows +
+    rows + spare +
     '<div id="pickBox"></div>' +
     (drvUI.pick ? "" : '<button class="btn secondary" id="addDrv">➕ Add driver</button>');
 
@@ -660,37 +703,6 @@ async function pickMember(g, m) {
     }
     afterDriverChange(gid);
   } catch (e) { toast(e.message); }
-}
-
-// ---------- stats ----------
-
-async function renderStats() {
-  view.innerHTML = '<div class="center">Computing fleet stats…</div>';
-  let s;
-  try { s = await api("/api/stats"); }
-  catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
-
-  const pct = s.drivers_total ? Math.round(100 * s.drivers_compliant / s.drivers_total) : 100;
-  view.innerHTML =
-    '<div class="statgrid">' +
-      '<div class="stat"><div class="num">' + s.groups_active + '</div><div class="hint">active groups (' + s.groups_total + ' total)</div></div>' +
-      '<div class="stat"><div class="num">' + s.groups_configured + '</div><div class="hint">configured</div></div>' +
-      '<div class="stat"><div class="num">' + s.drivers_total + '</div><div class="hint">drivers</div></div>' +
-      '<div class="stat"><div class="num" style="color:' + (pct >= 100 ? "var(--ok)" : "var(--warn)") + '">' +
-        s.drivers_compliant + '/' + s.drivers_total + '</div><div class="hint">compliant (quota ' +
-        s.required_per_week + '/week)</div></div>' +
-    '</div>' +
-    '<div class="card" style="margin-top:10px"><b>Non-compliant drivers</b>' +
-      (s.non_compliant.length
-        ? s.non_compliant.map(n =>
-            '<div class="item" data-gid="' + n.group_id + '"><div class="row"><div class="grow">' +
-            '<b>' + esc(n.name) + '</b> <span class="hint">· unit ' + esc(n.unit) + '</span>' +
-            '<div class="hint">' + esc(n.reason) + '</div></div><span class="chip warn">due</span></div></div>'
-          ).join("")
-        : '<div class="hint" style="padding-top:6px">✅ All registered drivers are compliant.</div>') +
-    '</div>';
-  view.querySelectorAll(".item[data-gid]").forEach(el =>
-    el.onclick = () => { current = { tab: "groups", gid: Number(el.dataset.gid) }; render(); });
 }
 
 // ---------- tools (model + broadcast + reports) ----------

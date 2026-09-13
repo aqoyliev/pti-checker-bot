@@ -10,10 +10,11 @@ from aiogram.types import ContentType
 
 from data.config import PTI_AUTOCHECK_ENABLED, PTI_TEST_GROUP_IDS
 from loader import bot_id, dp
+from utils.admins import notify_super_admins
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
-    log_pti, get_cached_check, get_recent_ptis,
-    set_truck_plate, set_trailer, set_truck_unit,
+    log_pti, get_cached_check, get_recent_ptis, normalize_unit,
+    set_truck_plate, set_trailer,
     reset_group_reminders,
 )
 from utils.pti_processor import deliver_result, process_mixed_media
@@ -21,9 +22,9 @@ from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
-# Vehicle changes are never put to a vote. A detected truck or trailer change is
-# applied straight from the PTI, guarded by the plate rather than by people —
-# see _reconcile_vehicles for the rule.
+# Vehicle changes are never put to a vote. The trailer a PTI films is stored
+# straight away; a truck number that disagrees with the registered one is
+# reported to the admins instead of overwriting it — see _reconcile_vehicles.
 
 # Test groups (PTI_TEST_GROUP_IDS, env): the bot auto-inspects EVERYONE's video
 # there (registered or not, forwarded or not) and skips the recycled-video
@@ -184,38 +185,51 @@ def truck_verdict(
     return "none", None, None
 
 
-async def _notify_vehicle_change(
+async def _report_truck_change(
     message: types.Message,
     old_truck_unit: str | None,
     new_truck_unit: str,
     new_truck_plate: str | None,
-    trailer_unit: str | None,
-    trailer_plate: str | None,
 ):
-    """Post a short notice that the PTI is for a different truck than the
-    registered one, including the new truck and trailer unit/plate numbers.
+    """Tell the admins a PTI was filmed on a different truck than the registered one.
+
+    A DM, not a message in the group. The driver's inspection is unaffected and
+    there is nothing for them to do about it, so telling the whole group is
+    noise; and it is an admin who decides what the unit really is, either by
+    editing it in the panel or by fixing the group's title, which the daily
+    sweep then re-files from.
     """
     old = html.escape(old_truck_unit) if old_truck_unit else "—"
-    truck_line = f"🚚 Truck: <b>{old} → {html.escape(new_truck_unit)}</b>"
-    if new_truck_plate:
-        truck_line += f" (plate {html.escape(new_truck_plate)})"
-
-    lines = ["🔁 <b>Vehicle change detected</b>", truck_line]
-    if trailer_unit or trailer_plate:
-        trailer_line = "🚛 Trailer:"
-        if trailer_unit:
-            trailer_line += f" unit <b>{html.escape(trailer_unit)}</b>"
-        if trailer_plate:
-            trailer_line += f" plate {html.escape(trailer_plate)}"
-        lines.append(trailer_line)
-
-    try:
-        await message.answer("\n".join(lines), parse_mode="HTML")
-    except Exception:
-        logging.exception("Failed to send vehicle-change notice")
+    plate = f" (plate {html.escape(new_truck_plate)})" if new_truck_plate else ""
+    title = html.escape(message.chat.title or str(message.chat.id))
+    await notify_super_admins(
+        "🔁 <b>Truck number doesn't match</b>\n"
+        f"{title}\n"
+        f"Registered: <b>{old}</b> · filmed: <b>{html.escape(new_truck_unit)}</b>{plate}\n\n"
+        "<i>Nothing was changed. If the truck really was swapped, set the unit "
+        "in the panel or rename the group — the daily title sweep re-files it "
+        "from there.</i>"
+    )
 
 
 async def _reconcile_vehicles(message: types.Message, data: dict):
+    """Store what the PTI saw of the vehicles, and flag what it can't decide.
+
+    The two halves are deliberately asymmetric, because the two numbers have
+    different owners:
+
+    * **The trailer is written.** Nothing else in the fleet records which
+      trailer a truck is pulling — it is not in the group's title, no sweep
+      maintains it, and it changes weekly. The video is the only source there
+      is, so what it reads is stored.
+    * **The truck unit is not.** It comes from the group's title and the daily
+      title sweep re-files it from there, so a PTI that overwrote it would be
+      undone within a day and spend the time in between filing inspections
+      under a unit no other part of the system agrees with. The mismatch is
+      worth an admin's attention, not a silent rewrite, so it goes out as a DM
+      (see _report_truck_change). Its *plate* is still stored: no unit is
+      decided from a plate, and it is what makes the misread rule work at all.
+    """
     vehicles = _extract_vehicles(data)
     if not vehicles:
         return
@@ -230,26 +244,26 @@ async def _reconcile_vehicles(message: types.Message, data: dict):
     def _norm(v: dict | None) -> tuple[str | None, str | None]:
         if not v:
             return None, None
-        u = (v.get("unit_number") or "").strip() or None
+        u = normalize_unit(v.get("unit_number") or "") or None
         p = (v.get("plate") or "").strip() or None
         return u, p
 
     truck_unit, truck_plate = _norm(truck)
     trailer_unit, trailer_plate = _norm(trailer)
 
-    stored_truck_unit = group.get("unit_number")
-    stored_truck_plate = group.get("truck_plate")
-    stored_trailer_unit = group.get("trailer_unit")
-    stored_trailer_plate = group.get("trailer_plate")
+    stored_truck_unit = normalize_unit(group.get("unit_number") or "") or None
+    stored_truck_plate = (group.get("truck_plate") or "").strip() or None
+    stored_trailer_unit = normalize_unit(group.get("trailer_unit") or "") or None
+    stored_trailer_plate = (group.get("trailer_plate") or "").strip() or None
 
-    # A TRAILER change is applied immediately, whether or not the truck changed.
-    if trailer:
-        if trailer_unit and trailer_unit != stored_trailer_unit:
-            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        elif not stored_trailer_unit and trailer_unit:
-            await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        elif trailer_plate and trailer_plate != stored_trailer_plate:
-            await set_trailer(message.chat.id, None, trailer_plate)
+    # Both sides are normalized before comparing, so an unchanged trailer read
+    # back as " 53821 " doesn't rewrite the same value on every inspection.
+    if trailer_unit and trailer_unit != stored_trailer_unit:
+        await set_trailer(message.chat.id, trailer_unit, trailer_plate)
+        logging.info("group %s: trailer %s -> %s (from PTI)",
+                     message.chat.id, stored_trailer_unit, trailer_unit)
+    elif trailer_plate and trailer_plate != stored_trailer_plate:
+        await set_trailer(message.chat.id, None, trailer_plate)
 
     if not truck:
         return
@@ -259,17 +273,13 @@ async def _reconcile_vehicles(message: types.Message, data: dict):
     )
 
     if action == "change":
-        await set_truck_unit(message.chat.id, new_unit, new_plate)
-        await _notify_vehicle_change(
-            message, stored_truck_unit, new_unit, new_plate,
-            trailer_unit, trailer_plate,
-        )
+        await _report_truck_change(message, stored_truck_unit, new_unit, new_plate)
     elif action == "plate":
         await set_truck_plate(message.chat.id, new_plate)
     elif action == "misread":
         # Same plate, different unit — the unit number just wasn't legible.
-        # Deliberately silent in the group: telling drivers the bot ignored a
-        # misreading is noise, and nothing about their inspection changed.
+        # Deliberately silent everywhere: nothing changed, and an admin told
+        # about every badly-lit stencil stops reading the ones that matter.
         logging.info(
             "group %s: PTI read truck unit %s but plate %s matches registered "
             "unit %s — treating the unit as a misread, not a change",

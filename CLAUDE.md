@@ -38,7 +38,10 @@ issues) is posted back into the group.
   a web_app button and sets the chat menu button, both pointing at
   `WEBAPP_URL` (public HTTPS URL). The panel is also where a group gets
   **configured by hand** — unit, plus drivers picked by searching the roster
-  (below). Timestamps in its JSON are already converted to `FLEET_TZ`.
+  (below). Timestamps in its JSON are already converted to `FLEET_TZ`. There
+  is no separate stats screen: the fleet-wide counts it carried are the line
+  above the groups list, and its list of overdue drivers is the **Due**
+  filter plus the names already on every row.
 - **`handlers/groups/setup_nag.py`** — the "nag" loop for still-unconfigured
   groups (it re-sends the onboarding prompt to admins in DM; it does not
   message the group).
@@ -46,8 +49,15 @@ issues) is posted back into the group.
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
 - **`utils/driver_names.py`** — the fleet's driver name: parsing it out of a
-  group's About text, and pairing it to a registered `user_id` (`/fixnames`,
-  `handlers/admin/names.py`).
+  group's About text, pairing it to a registered `user_id` (`/fixnames`,
+  `handlers/admin/names.py`) and, via `parse_driver_contacts`, to the phone
+  number written beside it (below).
+- **`utils/phones.py`** — finding and normalizing a phone number in free
+  text. Split out of `phone_lookup` so *reading* a number costs no session,
+  no API id and no rate-limit budget; `phone_lookup` re-exports it.
+- **`utils/group_health.py`** — "the bot is muted in this group" vs. "the
+  bot was removed", and the DM to the admins when the first one starts or
+  stops (below).
 - **`utils/userbot.py`** — read-only Telethon client, logged in as the bot
   itself over MTProto. It exists for the one thing the Bot API cannot do: list
   a group's members (plus the About text). No separate account needed — see
@@ -278,7 +288,9 @@ Everything about *membership* still reads the full roster.
 
 **Titles are swept once a day.** `run_title_sweep` (keyed on the UTC date, from
 `title_sweep_loop`) re-checks every active group's title and reports only when
-something changed:
+something changed. The posting-permission sweep rides the same daily gate for
+the same reason — one throttled pass over every active group, once — but is
+guarded separately so a failure there can't undo a title sweep that already ran:
 
 | The title now names | Result |
 | --- | --- |
@@ -406,6 +418,40 @@ Degrading works as it does for onboarding: no session, or an account that is not
 in the group, yields `available: false` plus the reason, and the panel falls back
 to a typed user id.
 
+### Each driver's phone number, on their own row
+
+The number an admin wants when a driver stops filing PTIs is already written in
+the group's About text, and the panel fetches that text anyway — `getChat`
+returns `description` alongside the title, so `_chat_info` caches both from the
+one response and there is no extra call. It is deliberately **not** stored in
+the database: it is the fleet's own record of who to call, and a stale copy of a
+phone number is worse than no copy.
+
+Landing it on the right row needs two pairings to hold at once, and both can
+refuse:
+
+1. **name ↔ number**, from the About text (`parse_driver_contacts`). Three
+   layouts, tried in order of how much guessing they cost: name and number on
+   the *same line* (`Driver 1 - ZAMA, EMILE - 718-864-1154` — the fleet wrote
+   the pairing, so it survives a line being added or reordered); a names line
+   *directly above* a numbers line with a matching `/`-separated count (the
+   layout with no label at all, which `parse_driver_names` refuses on its own
+   and should — sitting above a matching count of numbers is the evidence it
+   otherwise lacks); and whole-document positional, which is what
+   `utils/auto_onboard` already does. Any mismatched count pairs nothing.
+   Measured across 60 live groups on 2026-09-13: all 60 paired.
+2. **name ↔ `user_id`**, by `match_names_to_drivers` — the same proven-only
+   pairing `/fixnames` uses, so two drivers sharing a surname pair to neither.
+
+Numbers left over are shown under the driver list as the **group's** numbers
+rather than guessed at. An admin would rather see two unattributed numbers than
+none, and a wrong number on a driver row reads as authoritative in exactly the
+way a wrong name does — except this one has someone call the wrong person.
+
+The number is displayed **as the fleet typed it** (`find_phones`), not
+normalized: that is the form they recognise and dial. `extract_phones` still
+returns `+1…` for the lookup, and both agree on what counts as a phone number.
+
 ## Phone number → account: the lookup userbot
 
 `utils/phone_lookup.py` answers "whose Telegram account owns this number?",
@@ -414,6 +460,10 @@ lists arrive as names and phone numbers while everything here is keyed on
 `user_id`, so this is the bridge between the two; a resolved id is also checked
 against `group_drivers` (`get_driver_memberships`) to answer "are they already
 registered somewhere?".
+
+*Reading* a number out of free text is not this and lives in `utils/phones.py`,
+which has no config, no session and no rate limit to spend — the panel and
+`utils/driver_names` want only that half.
 
 It is a **separate module on a separate account** (`TELEGRAM_LOOKUP_SESSION`),
 and both halves of that matter:
@@ -487,6 +537,45 @@ retirement decision anywhere else either. Two rules:
   three days is exactly the one the overdue reminder is for, and a silent truck
   is a missing inspection — so quiet groups stay in the compliance denominator.
 
+## Muted vs. removed: when the bot can't post in a group
+
+A group admin who takes away the bot's **Send Messages** permission breaks it
+*silently*. The bot still receives everything, so nothing looks wrong from the
+inside: `/check` runs the whole inspection, the result just never lands, and the
+overdue reminder fails the same way. The drivers see a bot that stopped
+answering and the fleet sees a unit that stopped inspecting.
+`utils/group_health.py` turns that into a DM to the super-admins.
+
+**Being kicked is deliberately not this.** It is a different situation with a
+different answer — the bot has to be re-added — and `mark_unreachable` already
+handles it, slowly on purpose (three consecutive failures, because the local Bot
+API server forgets every chat when it restarts). `is_post_denied` is the whole
+distinction and it is pure: an `Unauthorized` (which covers BotKicked and
+BotBlocked) is never a mute, and neither is `ChatNotFound`. A mute arrives as a
+bare `BadRequest` — aiogram has no class for it — so it is matched on the
+wording, loosely, because the Bot API has phrased it more than one way.
+
+Two detectors feed one recorder:
+
+- **Reactive** — free and immediate, but only fires when there was something to
+  send: `reminders._send`, the PTI result delivery (`deliver_result` — the worst
+  case, since the frames were already uploaded and paid for) and the panel's
+  broadcast.
+- **Proactive** — one `getChatMember` per active group, once a day, riding the
+  same daily budget as the title sweep. ~150 calls catches a restriction the day
+  it happens instead of whenever a reminder next comes due. It reads the bot's
+  own membership rather than trying a message, so nothing is posted into a
+  driver's group to find out; a plain member holds the group's *default*
+  permissions, so those are what decide for it. A group that can't be read is
+  skipped, same as in the title sweep: "couldn't ask" is never an answer.
+
+Both go through `record_post_access`, which writes `groups.post_blocked` and
+alerts **only when that value changes** — started, and fixed. An hourly loop over
+150 groups would otherwise repeat the same alert all week, and an alert repeated
+hourly is an alert nobody reads. The panel shows the same state: a 🔇 chip on the
+row, a "Can't post" filter, and a banner on the group saying who can fix it,
+since nothing in the panel itself can.
+
 ## What triggers an inspection
 
 Three ways, in `handlers/groups/pti.py`:
@@ -514,38 +603,58 @@ groups where every member's video auto-checks and the recycled-video dedup is
 skipped. It used to be a hardcoded pair in `pti.py` belonging to one fleet;
 this repo serves several, so nothing fleet-specific may be hardcoded.
 
-## Vehicle changes: decided by the plate, not by a vote
+## Vehicle changes: the trailer is stored, the truck is reported
 
-A truck or trailer swap is applied straight from the PTI — there is no
-confirmation vote. Trailers were always applied immediately; trucks now are too,
-guarded by `truck_verdict` in `handlers/groups/pti.py`:
+A PTI reads the unit number and plate off whatever it filmed
+(`_extract_vehicles`), and the two vehicles are treated differently on purpose,
+because they have different owners:
+
+- **The trailer is written** (`set_trailer`). Nothing else in the fleet records
+  which trailer a truck is pulling — it is not in the group's title, no sweep
+  maintains it, and it changes weekly. The video is the only source there is.
+- **The truck unit is not.** It comes from the group's *title*, and the daily
+  title sweep re-files it from there, so a PTI that overwrote it would be undone
+  within a day and spend the hours in between filing inspections under a unit
+  nothing else agrees with. A mismatch is DMed to the admins instead
+  (`_report_truck_change`), naming both numbers and saying nothing was changed.
+  Its **plate** is still stored: no unit is decided from a plate, and the plate
+  is what makes the misread rule below work at all.
+
+`truck_verdict` (pure, in `handlers/groups/pti.py`) still decides what a reading
+*means*:
 
 | Registered vs. filmed | Result |
 | --- | --- |
-| unit differs, **plate identical** | **misread — store nothing** |
-| unit differs, plate differs *or* no plate filmed | real change — store unit + plate |
-| unit same, plate differs | store the plate |
+| unit differs, **plate identical** | **misread — silent, nobody is told** |
+| unit differs, plate differs *or* no plate filmed | tell the admins; store nothing |
+| unit same, plate differs | store the plate, silently |
 
 The misread rule is the point of the whole thing. A plate is a far more legible
 marking than a stencilled unit number, so a matching plate outweighs a differing
-unit: that is one truck filmed badly, and adopting the unit would silently
-misattribute every later inspection in the group. It stays silent in the chat —
-nothing about the driver's inspection changed — and logs instead.
+unit: that is one truck filmed badly. It is silent everywhere — an admin told
+about every badly-lit stencil stops reading the ones that matter.
 
-A differing unit with *no* plate to compare is treated as a real change on
-purpose: genuine swaps are often filmed without a clear plate shot, and
-demanding plate evidence would strand those groups on the old truck.
-
-Because the change resolves from the video, the driver's result is never held
-back. Don't reintroduce the vote: the 3-vote proposal flow (`pv:` callbacks,
-vote reminders, the `pending_proposals`/`proposal_votes` tables) was deleted
-on 2026-09-13 — the tables are left in place on the live databases but
-nothing creates or reads them.
-
+Nothing about a vehicle change reaches the **group**. The driver's inspection is
+unaffected and there is nothing for them to do about it. Don't reintroduce the
+vote either: the 3-vote proposal flow (`pv:` callbacks, vote reminders, the
+`pending_proposals`/`proposal_votes` tables) was deleted on 2026-09-13 — the
+tables are left in place on the live databases but nothing creates or reads them.
 The panel used to describe its edits as "skips the 3-vote flow", which read as
-though a vote were still waiting somewhere. Nothing says that any more — an
-admin edit is simply immediate. Don't reintroduce the phrase in user-facing
-copy either.
+though a vote were still waiting somewhere; don't reintroduce that phrase in
+user-facing copy either.
+
+> **None of this had ever run.** `merge_frame_passes` rebuilds the result dict
+> from a fixed list of keys and `vehicles` was not one of them, so every split
+> inspection — which is every inspection wherever there is more than one API
+> key, i.e. all of production — threw the readings away before
+> `_reconcile_vehicles` saw them. Measured 2026-09-13: 299 of dmworld's last 300
+> stored results carry no `vehicles` key, and not one of its 108 active groups
+> has ever had a trailer recorded. **Any key that merge forgets is a feature
+> that silently stops existing**, so add to it whenever the result schema grows.
+> Readings are merged by `merge_vehicles`, which **votes**: frames are strided,
+> so several chunks read the same stencil and two agreeing chunks must outrank
+> one misread that happened to land first. Unit and plate are voted separately,
+> so a chunk that caught only the plate still gets a say.
 
 ## The tire pass: it observes in one call and decides in another
 

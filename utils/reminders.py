@@ -25,6 +25,7 @@ from aiogram.utils.exceptions import (
 
 from loader import bot
 from utils.email_alerts import send_overdue_alert
+from utils.group_health import note_send_failure, note_send_ok
 from utils.db import (
     get_drivers,
     get_groups_for_reminders,
@@ -109,6 +110,7 @@ async def _send(group_id: int, text: str) -> bool:
     try:
         await bot.send_message(group_id, text, parse_mode="HTML")
         await clear_unreachable(group_id)
+        await note_send_ok(group_id)
         return True
     except MigrateToChat as e:
         # The group was upgraded to a supergroup and the service message that
@@ -147,7 +149,11 @@ async def _send(group_id: int, text: str) -> bool:
                 group_id, type(e).__name__, strikes, UNREACHABLE_LIMIT,
             )
         return False
-    except Exception:
+    except Exception as e:
+        # A "no rights to send" here is the bot being muted by a group admin:
+        # it is still a member, so it is not an unreachable strike, but the
+        # reminder is not getting through and nobody would otherwise notice.
+        await note_send_failure(group_id, e)
         logging.exception("Failed to send reminder to group %s", group_id)
         return True  # transient; keep the group active and retry next pass
 

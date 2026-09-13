@@ -13,6 +13,8 @@ do everything else the panel offers.
 """
 from __future__ import annotations
 
+import logging
+
 from data.config import ADMINS
 from utils.db import get_admin
 
@@ -34,3 +36,29 @@ async def is_admin(user_id: int) -> bool:
 async def is_super_admin(user_id: int) -> bool:
     row = await resolve_admin(user_id)
     return bool(row and row.get("is_super_admin"))
+
+
+async def notify_super_admins(text: str, **kwargs) -> int:
+    """DM every env-configured super-admin. Returns how many were reached.
+
+    The one way the bot tells its operator something -- the compliance summary,
+    the daily title sweep, a group it can no longer post in. It goes to the
+    ``ADMINS`` ids rather than the whole ``admins`` table on purpose: those are
+    the people who stood the deployment up, and a fleet manager added from the
+    panel to fix driver rows has no use for "the bot lost posting rights in
+    unit 2570".
+
+    Never raises: an admin who has not started a DM with the bot cannot be
+    reached, and that must not sink the caller's pass.
+    """
+    from loader import bot  # local: keeps this module importable without aiogram
+
+    kwargs.setdefault("parse_mode", "HTML")
+    sent = 0
+    for admin_id in SUPER_ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text, **kwargs)
+            sent += 1
+        except Exception:
+            logging.warning("could not reach admin %s", admin_id, exc_info=True)
+    return sent

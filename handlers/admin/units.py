@@ -59,6 +59,7 @@ from utils.db import (
     set_setting,
 )
 from utils.group_activity import GROUP_QUIET_DAYS, has_full_window, quiet_groups
+from utils.group_health import run_post_access_sweep
 from utils.unit_parse import looks_retired, parse_unit, title_names_unit
 
 _ADMIN_IDS = [int(a) for a in ADMINS if str(a).strip().isdigit()]
@@ -690,6 +691,14 @@ async def run_title_sweep_if_due(now: datetime | None = None) -> bool:
         return False
     await set_setting(_TITLE_SWEEP_KEY, now.date().isoformat())
     await run_title_sweep()
+    # Same once-a-day budget, same "ask Telegram about every active group"
+    # shape, and it answers the other question worth asking daily: is the bot
+    # still allowed to speak in them. Guarded separately so a failure here
+    # can't undo a sweep that already ran.
+    try:
+        await run_post_access_sweep()
+    except Exception:
+        logging.exception("post-access sweep failed")
     return True
 
 
