@@ -107,6 +107,14 @@ def test_bad_date_format_is_a_clean_400(stubbed):
     assert resp.status == 400
 
 
+def test_the_filename_survives_a_company_name_with_spaces_or_a_quote():
+    """FLEET_NAME is free text. A quote in it would close the filename early
+    inside the Content-Disposition header."""
+    assert server._slug("DM World Logistics, LLC") == "dm-world-logistics-llc"
+    assert '"' not in server._slug('Acme "Trucking"')
+    assert server._slug("   ") == "fleet"
+
+
 def test_missing_chromium_is_reported_not_raised(monkeypatch):
     monkeypatch.setattr(server._report, "fetch", AsyncMock(return_value=EMPTY_DATA))
 

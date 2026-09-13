@@ -598,8 +598,17 @@ already expects, so the chosen end day is never dropped from the count.
 `stats_html`/`driver_html`/`to_pdf` directly rather than shelling out (the
 web panel already holds every credential the CLI avoids needing), running
 `to_pdf`'s blocking Chromium subprocess in a thread so it doesn't stall the
-event loop. The PDF's headline uses `FLEET_NAME` (cosmetic only, default
-`"Fleet"`) — not `--fleet`, since one deployment already serves one fleet.
+event loop. **`FLEET_NAME` is the company's name and is printed as the
+wordmark at the top of both sheets** — not `--fleet`, since one deployment
+already serves one fleet. It defaults to `"Fleet"`, which is a placeholder,
+not a name: an unset `FLEET_NAME` puts "FLEET" on every page the company
+sends out, so setting it is part of standing up a deployment. It is free text
+an operator typed, so nothing downstream may assume it is short or clean —
+`wordmark()` steps the type down and ultimately cuts it (a long name
+otherwise squeezes the title, grows the masthead and pushes the one-page
+sheet onto a second page), and the download filename is slugified, since a
+quote in the name would close the filename early inside the
+`Content-Disposition` header.
 This is *why the Dockerfile installs `chromium`* now: before this, a missing
 Chromium binary only broke a script nobody ran unattended; now it breaks a
 button in production, so `to_pdf`'s `SystemExit` is caught and turned into a

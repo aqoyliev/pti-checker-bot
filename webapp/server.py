@@ -589,6 +589,16 @@ async def api_broadcast(request: web.Request) -> web.Response:
 # days" shortcut. Those covered a fraction of what an arbitrary range does and
 # just added a second control to read, so the panel keeps one: two dates.
 
+def _slug(name: str) -> str:
+    """A company name safe to put in a download filename. FLEET_NAME is free
+    text an operator typed, so it can hold spaces -- or a quote, which would
+    end the filename early inside the Content-Disposition header."""
+    out = "".join(c if c.isalnum() else "-" for c in (name or "").strip().lower())
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-") or "fleet"
+
+
 async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, str]:
     tz = ZoneInfo(FLEET_TZ)
     since = date.fromisoformat(since_s)
@@ -606,8 +616,11 @@ async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, st
     data = await _report.fetch(DATABASE_URL, since_utc, until_utc)
     agg = _report.build(data, tz, since, until)
     meta = {
+        # FLEET_NAME is the company, and it is printed as the wordmark at the
+        # top of both sheets -- so `scope` says what the document is instead
+        # of repeating the name back on the line underneath it.
         "fleet": _report.display_name(FLEET_NAME),
-        "scope": f"{FLEET_NAME} / production",
+        "scope": "Pre-trip inspection compliance",
         "since": since, "until": until,
         "pulled": datetime.now(tz).date(),
         "tz": FLEET_TZ,
@@ -623,7 +636,7 @@ async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, st
         await asyncio.to_thread(_report.to_pdf, html_text, out)
         pdf_bytes = out.read_bytes()
 
-    tag = f"{FLEET_NAME}-{until - timedelta(days=1):%Y%m%d}"
+    tag = f"{_slug(FLEET_NAME)}-{until - timedelta(days=1):%Y%m%d}"
     fname = f"{tag}.pdf" if which == "stats" else f"{tag}-driver-report.pdf"
     return pdf_bytes, fname
 

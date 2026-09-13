@@ -326,12 +326,20 @@ a{color:inherit;text-decoration:none;}
 
 /* ---------- masthead ---------- */
 .mast{display:flex;align-items:center;gap:16px;background:var(--brand);
-  color:var(--brand-ink);border-radius:9px;padding:11px 17px;}
-.mast .mark{font-size:15.5px;font-weight:700;letter-spacing:.1em;
-  text-transform:uppercase;padding-right:16px;white-space:nowrap;
-  border-right:1px solid rgba(255,255,255,.24);}
+  color:var(--brand-ink);border-radius:9px;padding:11px 17px;min-height:53px;}
+/* The company name is whatever the fleet calls itself, so the wordmark is
+   sized to it and hard-capped: left to run, a long name squeezes the title,
+   grows the band and pushes the one-page sheet onto a second page. */
+.mast .mark{font-weight:700;text-transform:uppercase;padding-right:16px;
+  border-right:1px solid rgba(255,255,255,.24);max-width:282px;
+  line-height:1.16;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;}
+.mast .mark.m1{font-size:15.5px;letter-spacing:.1em;white-space:nowrap;}
+.mast .mark.m2{font-size:12.8px;letter-spacing:.08em;white-space:nowrap;}
+.mast .mark.m3{font-size:10.8px;letter-spacing:.06em;}
 .mast .mid{flex:1;min-width:0;}
-.mast .ttl{font-size:14.5px;font-weight:600;letter-spacing:-.012em;}
+.mast .ttl{font-size:14.5px;font-weight:600;letter-spacing:-.012em;
+  white-space:nowrap;}
 .mast .when{text-align:right;white-space:nowrap;}
 .mast .when .ttl{font-size:12.5px;}
 .mast .sub{font-size:9.3px;color:var(--brand-sub);margin-top:2px;
@@ -533,6 +541,15 @@ def pctf(a: int, b: int) -> str:
     return f"{round(100 * a / b)}%" if b else "—"
 
 
+def wordmark(name: str) -> str:
+    """The company's name, set to fit. Three steps, picked on length: long
+    names step down and are allowed a second line; past that the name is cut,
+    because a wordmark that keeps growing takes the layout with it."""
+    name = (name or "Fleet").strip()[:60]
+    size = "m1" if len(name) <= 18 else "m2" if len(name) <= 26 else "m3"
+    return f'<div class="mark {size}">{html.escape(name)}</div>'
+
+
 def masthead(meta, title) -> str:
     last = meta["until"] - timedelta(days=1)
     n_days = (meta["until"] - meta["since"]).days
@@ -540,14 +557,18 @@ def masthead(meta, title) -> str:
             if meta["since"].year == last.year else
             f'{fmt_day(meta["since"])} {meta["since"].year} – '
             f'{fmt_day(last)} {last.year}')
+    # The wordmark already carries the company name; a scope that only repeats
+    # it is noise on a page that has none to spare.
+    scope = (meta.get("scope") or "").strip()
+    sub = ("" if scope.casefold() == (meta["fleet"] or "").strip().casefold()
+           else f'<div class="sub">{html.escape(scope)}</div>')
     return (
         '<header class="mast">'
-        f'<div class="mark">{html.escape(meta["fleet"])}</div>'
-        f'<div class="mid"><div class="ttl">{html.escape(title)}</div>'
-        f'<div class="sub">{html.escape(meta["scope"])}</div></div>'
-        f'<div class="when"><div class="ttl">{span}</div>'
-        f'<div class="sub">{n_days} day window · {html.escape(meta["tz"])} · '
-        f'pulled {fmt_day(meta["pulled"])}</div></div></header>'
+        + wordmark(meta["fleet"])
+        + f'<div class="mid"><div class="ttl">{html.escape(title)}</div>{sub}</div>'
+        + f'<div class="when"><div class="ttl">{span}</div>'
+          f'<div class="sub">{n_days} day window · {html.escape(meta["tz"])} · '
+          f'pulled {fmt_day(meta["pulled"])}</div></div></header>'
     )
 
 

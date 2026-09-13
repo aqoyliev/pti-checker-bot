@@ -52,7 +52,7 @@ Per-fleet decisions — every one has a default, so set only what differs:
 | `ENFORCEMENT_ENABLED` | `false` | Whether the hourly loop nags overdue drivers in the group and summarises to admins. Start `false`; turn it on once the roster is actually right, or the first thing a new company sees is the bot chasing drivers it has mis-registered. |
 | `PTI_AUTOCHECK_ENABLED` | `true` | `false` in production on the existing fleets. With it off, an inspection needs `/check` or a video replying to the bot — a stray dashcam clip does not start one. |
 | `FLEET_TZ` | `America/New_York` | The zone the weekly PTI quota resets in (midnight Monday). |
-| `FLEET_NAME` | `Fleet` | Cosmetic — the name printed on the web panel's report PDFs (Tools tab). |
+| `FLEET_NAME` | `Fleet` | **The company's name**, printed as the wordmark at the top of both report PDFs (Tools tab). The default is a placeholder — leave it unset and every report the company sends out is headed "FLEET". |
 | `PTI_MAX_CONCURRENCY` | `3` | Raise only if the container has CPU/memory headroom; each inspection is ffmpeg plus a worker thread. |
 | `PTI_TIRE_PASS` | `true` | The second, tire-only Gemini pass. Leave on. |
 | `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` | unset | Email on the overdue escalation. A silent no-op until all three are set. `SMTP_PASSWORD` must be a Gmail *App Password*. |

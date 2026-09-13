@@ -139,6 +139,23 @@ def meta():
             "title_d": "acme driver report"}
 
 
+def test_a_long_company_name_cannot_take_the_layout_with_it():
+    """FLEET_NAME is free text an operator typed. Set at full size it squeezes
+    the title, grows the masthead and pushes the one-page sheet onto a second
+    page, so the wordmark steps down and is ultimately cut."""
+    assert 'class="mark m1"' in fleet_report.wordmark("DM World Logistics")
+    assert 'class="mark m2"' in fleet_report.wordmark("DM World Logistics LLC")
+    assert 'class="mark m3"' in fleet_report.wordmark("Trans-Atlantic Freight " * 3)
+    assert len(fleet_report.wordmark("x" * 400)) < 200
+    assert 'class="mark m1"' in fleet_report.wordmark("")
+
+
+def test_the_masthead_does_not_print_the_company_name_twice(meta):
+    meta = {**meta, "scope": meta["fleet"]}
+    head = fleet_report.masthead(meta, "Fleet inspection statistics")
+    assert head.count("acme") == 1
+
+
 @pytest.mark.parametrize("render", ["stats_html", "driver_html"])
 def test_the_report_html_pulls_nothing_off_the_network(render, meta):
     """Rendering is a headless browser on a container with no fonts and no
