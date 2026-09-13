@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import asyncpg
 from data.config import DATABASE_URL, FLEET_TZ
 
@@ -45,26 +43,13 @@ async def init_db():
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS media_signature TEXT;
 
-            CREATE TABLE IF NOT EXISTS pending_proposals (
-                id            BIGSERIAL PRIMARY KEY,
-                group_id      BIGINT NOT NULL,
-                proposal_type TEXT NOT NULL,
-                payload       JSONB NOT NULL,
-                proposer_id   BIGINT,
-                message_id    BIGINT,
-                status        TEXT NOT NULL DEFAULT 'open',
-                created_at    TIMESTAMP DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS proposal_votes (
-                proposal_id BIGINT NOT NULL REFERENCES pending_proposals(id) ON DELETE CASCADE,
-                user_id     BIGINT NOT NULL,
-                vote        TEXT NOT NULL,
-                voted_at    TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (proposal_id, user_id)
-            );
-
-            ALTER TABLE pending_proposals ADD COLUMN IF NOT EXISTS reminder_count INT DEFAULT 0;
+            -- Tables this code no longer reads or writes, left in place on the
+            -- live databases rather than dropped (a deploy should not delete
+            -- fleet history on its own): active_units (the pasted unit list,
+            -- removed 2026-08-31), pending_proposals + proposal_votes (the
+            -- 3-vote vehicle-change flow), driver_verify (a one-off
+            -- verification queue), pti_retry_queue (the failed-inspection
+            -- retry, removed 2026-09-13). None is created on a fresh database.
 
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS setup_nag_count INT DEFAULT 0;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_setup_nag_at TIMESTAMP;
@@ -118,20 +103,6 @@ async def init_db():
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_escalation_at TIMESTAMP;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP;
 
-            -- Driver-verification queue (handlers/admin/verify.py). Seeded from a
-            -- userbot member snapshot: one row per group, walked in `ord` order.
-            -- `members` is the group's member list [{user_id, name, username}];
-            -- `status` is pending | done | skipped.
-            CREATE TABLE IF NOT EXISTS driver_verify (
-                group_id    BIGINT PRIMARY KEY,
-                ord         BIGSERIAL,
-                unit        TEXT,
-                title       TEXT,
-                members     JSONB NOT NULL DEFAULT '[]'::jsonb,
-                status      TEXT NOT NULL DEFAULT 'pending',
-                verified_at TIMESTAMP
-            );
-
             -- People confirmed *not* to be drivers, fleet-wide: dispatchers,
             -- safety staff, owners. They sit in many driver groups, so once an
             -- admin has passed over someone during onboarding there is no point
@@ -164,42 +135,6 @@ async def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_gmd_day ON group_message_days (day);
 
-            -- Inspections that failed for a reason that was NOT the driver's
-            -- fault -- Gemini out of credit, a retired model, an overload, a
-            -- network blip. Before this table those submissions vanished: the
-            -- handler returned without writing a pti_log row, so nothing in the
-            -- bot knew a PTI had ever been attempted, and on 2026-08-20 two days
-            -- of them had to be reconstructed by hand from Telegram history.
-            -- Rows are re-analysed by utils/pti_retry.py once the service works
-            -- again. file_id is what makes that possible: it stays valid long
-            -- after the update is gone, so the bot can re-download the media
-            -- itself instead of needing the chat history it cannot read.
-            CREATE TABLE IF NOT EXISTS pti_retry_queue (
-                id               BIGSERIAL PRIMARY KEY,
-                group_id         BIGINT NOT NULL,
-                user_id          BIGINT NOT NULL,
-                driver_name      TEXT,
-                reply_message_id BIGINT NOT NULL,
-                items_json       TEXT   NOT NULL,
-                media_signature  TEXT,
-                content_signature TEXT,
-                attempts         INT    NOT NULL DEFAULT 0,
-                last_error       TEXT,
-                created_at       TIMESTAMP DEFAULT NOW(),
-                next_attempt_at  TIMESTAMP DEFAULT NOW(),
-                resolved_at      TIMESTAMP,
-                outcome          TEXT
-            );
-            -- The worker only ever asks for unresolved rows that are due.
-            CREATE INDEX IF NOT EXISTS idx_pti_retry_due
-                ON pti_retry_queue (next_attempt_at)
-                WHERE resolved_at IS NULL;
-            -- One pending retry per submission, so a driver spamming /check on a
-            -- broken bot doesn't queue the same video five times over.
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_pti_retry_pending_once
-                ON pti_retry_queue (group_id, reply_message_id)
-                WHERE resolved_at IS NULL;
-
             -- pti_log is queried three ways on every hot path: recent-per-group
             -- (results/reminders), per-driver weekly counts (compliance), and
             -- signature lookups (recycled-video dedup on every submission).
@@ -225,10 +160,6 @@ async def init_db():
                SET trailer_unit = NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '')
              WHERE trailer_unit IS DISTINCT FROM
                    NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '');
-            UPDATE driver_verify
-               SET unit = NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '')
-             WHERE unit IS DISTINCT FROM
-                   NULLIF(BTRIM(TRANSLATE(unit, '<>', '')), '');
         """)
 
 
@@ -438,21 +369,11 @@ async def migrate_group_id(old_id: int, new_id: int) -> bool:
                 return False
             # Children first: both FKs point at groups(group_id), and the old
             # parent row can only go once nothing references it any more.
-            for table in ("group_drivers", "pti_log", "pending_proposals",
-                          "pti_retry_queue"):
+            for table in ("group_drivers", "pti_log"):
                 await conn.execute(
                     f"UPDATE {table} SET group_id = $2 WHERE group_id = $1",
                     old_id, new_id,
                 )
-            # driver_verify is keyed on group_id alone, so it moves only into a
-            # free slot; an onboarding prompt already open on the new id wins.
-            await conn.execute(
-                """UPDATE driver_verify SET group_id = $2
-                    WHERE group_id = $1
-                      AND NOT EXISTS (SELECT 1 FROM driver_verify WHERE group_id = $2)""",
-                old_id, new_id,
-            )
-            await conn.execute("DELETE FROM driver_verify WHERE group_id = $1", old_id)
             # Activity counts are per (group, day) and the middleware has been
             # counting under the new id since the moment of the upgrade, so the
             # two sides are summed rather than one overwriting the other.
@@ -524,11 +445,7 @@ async def get_groups_needing_setup_nag() -> list[dict]:
              -- stack of identical prompts, all but the newest already dead
              -- (the pending state is per-process). A group that never got one
              -- is reachable with /onboard <group_id>.
-             AND COALESCE(g.setup_nag_count, 0) < 1
-             AND NOT EXISTS (
-               SELECT 1 FROM pending_proposals p
-               WHERE p.group_id = g.group_id AND p.status = 'open'
-             )"""
+             AND COALESCE(g.setup_nag_count, 0) < 1"""
     )
     return [dict(r) for r in rows]
 
@@ -597,31 +514,6 @@ async def set_truck_unit(group_id: int, unit: str, plate: str | None):
         await _pool_check().execute(
             "UPDATE groups SET unit_number = $1 WHERE group_id = $2", unit, group_id,
         )
-
-
-async def find_open_vehicle_change(group_id: int, kind: str) -> dict | None:
-    row = await _pool_check().fetchrow(
-        """SELECT * FROM pending_proposals
-           WHERE group_id = $1
-             AND proposal_type = 'vehicle_change'
-             AND status = 'open'
-             AND payload->>'kind' = $2
-           ORDER BY created_at DESC LIMIT 1""",
-        group_id, kind,
-    )
-    if not row:
-        return None
-    d = dict(row)
-    payload = d["payload"]
-    if isinstance(payload, str):
-        d["payload"] = json.loads(payload)
-    return d
-
-
-async def mark_pti_failed(pti_log_id: int):
-    await _pool_check().execute(
-        "UPDATE pti_log SET passed = FALSE WHERE id = $1", pti_log_id,
-    )
 
 
 async def set_group_unit(group_id: int, unit_number: str):
@@ -761,39 +653,6 @@ async def set_driver_names(updates: list[tuple[int, int, str]]) -> int:
                 )
                 changed += len(rows)
     return changed
-
-
-# ---------- driver verification queue ----------
-
-async def get_verify_progress() -> tuple[int, int]:
-    """(handled, total) where handled = done + skipped."""
-    row = await _pool_check().fetchrow(
-        "SELECT COUNT(*) FILTER (WHERE status <> 'pending') AS handled, COUNT(*) AS total "
-        "FROM driver_verify"
-    )
-    return (row["handled"], row["total"]) if row else (0, 0)
-
-
-async def get_next_verify() -> dict | None:
-    """Next pending group to verify, in `ord` order. `members` comes back as a
-    Python list (asyncpg returns JSONB as a str, so decode it here)."""
-    row = await _pool_check().fetchrow(
-        "SELECT group_id, unit, title, members FROM driver_verify "
-        "WHERE status = 'pending' ORDER BY ord ASC LIMIT 1"
-    )
-    if not row:
-        return None
-    d = dict(row)
-    if isinstance(d.get("members"), str):
-        d["members"] = json.loads(d["members"])
-    return d
-
-
-async def set_verify_status(group_id: int, status: str) -> None:
-    await _pool_check().execute(
-        "UPDATE driver_verify SET status = $2, verified_at = NOW() WHERE group_id = $1",
-        group_id, status,
-    )
 
 
 # ---------- pti log ----------
@@ -937,82 +796,6 @@ async def get_weekly_pti_stats() -> dict[tuple[int, int], dict]:
         (r["group_id"], r["user_id"]): {"week_count": r["week_count"], "last_at": r["last_at"]}
         for r in rows
     }
-
-
-# ---------- failed-inspection retry queue ----------
-#
-# Only infrastructure failures belong here (see utils/pti_retry.py). A video that
-# is genuinely unusable -- too long, no media, a response the model refused --
-# will fail identically forever, and re-posting that verdict days later is noise.
-
-async def enqueue_pti_retry(
-    group_id: int,
-    user_id: int,
-    reply_message_id: int,
-    items_json: str,
-    driver_name: str | None = None,
-    media_signature: str | None = None,
-    content_signature: str | None = None,
-    error: str | None = None,
-) -> int | None:
-    """Remember a submission whose inspection failed on us. Returns the row id.
-
-    Returns ``None`` when this submission is already queued: the partial unique
-    index means a driver re-sending /check against a broken bot updates the
-    existing row instead of stacking duplicates that would each post a result.
-    """
-    row = await _pool_check().fetchrow(
-        """INSERT INTO pti_retry_queue
-           (group_id, user_id, driver_name, reply_message_id, items_json,
-            media_signature, content_signature, last_error)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (group_id, reply_message_id) WHERE resolved_at IS NULL
-           DO UPDATE SET last_error = EXCLUDED.last_error
-           RETURNING id""",
-        group_id, user_id, driver_name, reply_message_id, items_json,
-        media_signature, content_signature, (error or "")[:500],
-    )
-    return row["id"] if row else None
-
-
-async def due_pti_retries(limit: int = 20) -> list[dict]:
-    """Unresolved retries whose backoff has elapsed, oldest submission first."""
-    rows = await _pool_check().fetch(
-        """SELECT * FROM pti_retry_queue
-            WHERE resolved_at IS NULL AND next_attempt_at <= NOW()
-         ORDER BY created_at
-            LIMIT $1""",
-        limit,
-    )
-    return [dict(r) for r in rows]
-
-
-async def count_pending_pti_retries() -> int:
-    return await _pool_check().fetchval(
-        "SELECT COUNT(*) FROM pti_retry_queue WHERE resolved_at IS NULL")
-
-
-async def resolve_pti_retry(retry_id: int, outcome: str) -> None:
-    """Close a retry for good: 'done', 'gave_up', 'superseded' or 'stale'."""
-    await _pool_check().execute(
-        """UPDATE pti_retry_queue
-              SET resolved_at = NOW(), outcome = $2, attempts = attempts + 1
-            WHERE id = $1""",
-        retry_id, outcome,
-    )
-
-
-async def defer_pti_retry(retry_id: int, delay_seconds: int, error: str) -> int:
-    """Push a retry back by `delay_seconds`. Returns the new attempt count."""
-    return await _pool_check().fetchval(
-        """UPDATE pti_retry_queue
-              SET attempts = attempts + 1,
-                  last_error = $3,
-                  next_attempt_at = NOW() + ($2 || ' seconds')::interval
-            WHERE id = $1
-        RETURNING attempts""",
-        retry_id, str(int(delay_seconds)), (error or "")[:500],
-    )
 
 
 async def get_all_registered_groups() -> list[dict]:
@@ -1196,101 +979,3 @@ async def reset_group_reminders(group_id: int) -> None:
            WHERE group_id = $1""",
         group_id,
     )
-
-
-# ---------- proposals ----------
-
-async def create_proposal(
-    group_id: int,
-    proposal_type: str,
-    payload: dict,
-    proposer_id: int | None,
-) -> int:
-    row = await _pool_check().fetchrow(
-        """INSERT INTO pending_proposals (group_id, proposal_type, payload, proposer_id)
-           VALUES ($1, $2, $3::jsonb, $4)
-           RETURNING id""",
-        group_id, proposal_type, json.dumps(payload), proposer_id,
-    )
-    return row["id"]
-
-
-async def attach_proposal_message(proposal_id: int, message_id: int):
-    await _pool_check().execute(
-        "UPDATE pending_proposals SET message_id = $1 WHERE id = $2",
-        message_id, proposal_id,
-    )
-
-
-async def get_proposal(proposal_id: int) -> dict | None:
-    row = await _pool_check().fetchrow(
-        "SELECT * FROM pending_proposals WHERE id = $1", proposal_id
-    )
-    if not row:
-        return None
-    d = dict(row)
-    payload = d["payload"]
-    if isinstance(payload, str):
-        d["payload"] = json.loads(payload)
-    return d
-
-
-async def set_proposal_status(proposal_id: int, status: str):
-    await _pool_check().execute(
-        "UPDATE pending_proposals SET status = $1 WHERE id = $2",
-        status, proposal_id,
-    )
-
-
-async def cast_vote(proposal_id: int, user_id: int, vote: str):
-    """Insert or update the user's vote on this proposal."""
-    await _pool_check().execute(
-        """INSERT INTO proposal_votes (proposal_id, user_id, vote)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (proposal_id, user_id)
-           DO UPDATE SET vote = EXCLUDED.vote, voted_at = NOW()""",
-        proposal_id, user_id, vote,
-    )
-
-
-async def count_votes(proposal_id: int) -> tuple[int, int]:
-    """Return (confirms, rejects) for this proposal."""
-    rows = await _pool_check().fetch(
-        "SELECT vote, COUNT(*) AS c FROM proposal_votes WHERE proposal_id = $1 GROUP BY vote",
-        proposal_id,
-    )
-    confirms = 0
-    rejects = 0
-    for r in rows:
-        if r["vote"] == "confirm":
-            confirms = r["c"]
-        elif r["vote"] == "reject":
-            rejects = r["c"]
-    return confirms, rejects
-
-
-async def bump_proposal_reminder(proposal_id: int) -> int:
-    row = await _pool_check().fetchrow(
-        """UPDATE pending_proposals
-           SET reminder_count = reminder_count + 1
-           WHERE id = $1
-           RETURNING reminder_count""",
-        proposal_id,
-    )
-    return row["reminder_count"] if row else 0
-
-
-async def get_open_proposals() -> list[dict]:
-    rows = await _pool_check().fetch(
-        "SELECT * FROM pending_proposals WHERE status = 'open' ORDER BY id"
-    )
-    out: list[dict] = []
-    for row in rows:
-        d = dict(row)
-        payload = d["payload"]
-        if isinstance(payload, str):
-            d["payload"] = json.loads(payload)
-        out.append(d)
-    return out
-
-

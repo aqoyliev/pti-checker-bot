@@ -23,19 +23,25 @@ issues) is posted back into the group.
   `call_gemini`, `call_gemini_photos`, `parse_result`), the model registry and the
   API-key failover, plus a CLI for manually checking a single video:
   `python -m utils.gemini <video.mp4>` (needs a Gemini key).
-- **`utils/scheduler.py` + `utils/enforcement.py`** — hourly compliance loop.
-  **The bot never restricts a driver** (see Conventions).
-- **`webapp/`** — the web admin panel (Telegram Mini App). `server.py` is an
-  aiohttp app started from `on_startup` (listens on `PORT`/`WEBAPP_PORT`,
-  default 8080); `auth.py` validates the Mini App's signed `initData` (admins =
-  env `ADMINS` ∪ admins table, same as the inline panel); `static/index.html`
-  is the whole UI. `/admin` shows an "Open Web Panel" button once `WEBAPP_URL`
-  (public HTTPS URL) is set. It is also where a group gets **configured by
-  hand** — unit, plus drivers picked by searching the roster (below).
-- **`handlers/groups/proposals.py`** — the "nag" loop for still-unconfigured
-  groups (the nag re-sends the onboarding prompt to admins in DM; it does not
-  message the group). It also still holds the 3-vote proposal flow, which is
-  **no longer reached** — vehicle changes are decided from the video (below).
+- **`utils/scheduler.py` + `utils/enforcement.py` + `utils/reminders.py`** —
+  the hourly loop: the 3-day overdue escalation (`reminders.py`, always on)
+  and the weekly-quota check + admin summary (`enforcement.py`, behind
+  `ENFORCEMENT_ENABLED`). **The bot never restricts a driver** (see Conventions).
+- **`utils/admins.py`** — who counts as an admin: env `ADMINS` are
+  super-admins, the `admins` table holds the rest. Every admin check (the web
+  panel, `/admin`, the group setup commands) goes through it.
+- **`webapp/`** — the web admin panel (Telegram Mini App) — **the** admin
+  panel; there is no inline copy of it any more. `server.py` is an aiohttp app
+  started from `on_startup` (listens on `PORT`/`WEBAPP_PORT`, default 8080);
+  `auth.py` validates the Mini App's signed `initData`; `static/index.html`
+  is the whole UI. `handlers/admin/panel.py` is just the door: `/admin` sends
+  a web_app button and sets the chat menu button, both pointing at
+  `WEBAPP_URL` (public HTTPS URL). The panel is also where a group gets
+  **configured by hand** — unit, plus drivers picked by searching the roster
+  (below). Timestamps in its JSON are already converted to `FLEET_TZ`.
+- **`handlers/groups/setup_nag.py`** — the "nag" loop for still-unconfigured
+  groups (it re-sends the onboarding prompt to admins in DM; it does not
+  message the group).
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
@@ -49,9 +55,11 @@ issues) is posted back into the group.
 - **`utils/phone_lookup.py`** — a separate, write-capable *user* session: phone
   number → account (`/whois`, `scripts/tg_phone_lookup.py`). Separate account on
   purpose (below).
-- **`middlewares/throttling.py`** — anti-flood for text messages.
 - **`utils/group_activity.py` + `middlewares/group_activity.py`** — the derived
-  "has this group gone quiet?" report (below).
+  "has this group gone quiet?" report (below). (There is no anti-flood
+  middleware: the bot handles no free text in groups, and the template one
+  that used to be here replied "Too many requests!" into a driver group
+  whenever someone forwarded a few messages at once.)
 
 The **live PTI path** is `handlers/groups/pti.py` → `pti_processor.process_mixed_media`.
 The other `process_*` functions in `pti_processor.py` are legacy/unused.
@@ -103,11 +111,13 @@ standing one up.
 - Route DB access through `utils/db.py` helpers.
 - **The bot never restricts, mutes or otherwise silences a driver.** Overdue
   compliance is answered with a reminder in the group and a summary to admins —
-  never by taking away someone's ability to post. `utils/enforcement.py` has no
-  `mute_driver()` and no muted-permission set, and a test asserts they stay
-  absent; `unmute_driver()` exists only to *lift* restrictions left over from
-  before this rule. `ENFORCEMENT_ENABLED` only toggles the reminders. Don't
-  reintroduce muting behind a config flag.
+  never by taking away someone's ability to post. `utils/enforcement.py` makes
+  no `restrict_chat_member` call at all — not to mute, and (since 2026-09-13)
+  not to unmute either: the unmute path only lifted restrictions from before
+  this rule, ran only behind `ENFORCEMENT_ENABLED`, and no fleet has ever
+  turned that on. A test asserts no mute helper exists and the call is absent
+  from the source. `ENFORCEMENT_ENABLED` only toggles the weekly-quota
+  reminders. Don't reintroduce muting behind a config flag.
 - **One reminder per unit per 24 hours**, whatever kind it is. Both loops run
   hourly, so the cap lives in the data, not in the cadence: `groups.last_reminder_at`
   is stamped by every sender and checked through `reminder_logic.may_remind`. The
@@ -333,8 +343,13 @@ gone. A unit is decided from the group's own title and the driver's own video.
 > unread, and dropping a column of fleet history is not something a deploy
 > should do on its own.
 
-`/adddriver` and `/setunit` still work as a manual escape hatch; they are simply
-not advertised to the group any more.
+`/adddriver`, `/setunit` and `/removedriver` still work as a manual escape
+hatch — **for the fleet's admins only** (`utils/admins.is_admin`; anyone else
+gets a one-line refusal), and they are not in the group's command menu. Left
+open to every member, a driver could re-file the truck with one `/setunit` or
+drop the co-driver out of compliance with `/removedriver`. A driver who runs
+`/check` in an unconfigured group is told the admins have been asked to set
+it up, not handed setup commands.
 
 **The roster read no longer needs a user session at all.** Before 2026-09-12
 this ran on a *user* account (`TELEGRAM_SESSION`), and inherited the same
@@ -488,11 +503,16 @@ no-op. It does not reopen blanket auto-checking — a reply is a deliberate
 address to the bot, whereas the flag is off precisely so that *any* video in the
 group doesn't start an inspection.
 
-`_replies_to_bot` matches **this bot's own id** (cached from `get_me`), not
-`from_user.is_bot`; otherwise another bot in the group could make its messages
-into inspection triggers. Every other guard still applies to rules 2 and 3:
-registered driver, not forwarded from someone else, not an album, group
-setup-complete.
+`_replies_to_bot` matches **this bot's own id** (`loader.bot_id()`, one
+`get_me` cached for the process), not `from_user.is_bot`; otherwise another bot
+in the group could make its messages into inspection triggers. Every other
+guard still applies to rules 2 and 3: registered driver, not forwarded from
+someone else, not an album, group setup-complete.
+
+`PTI_TEST_GROUP_IDS` (env, comma-separated chat ids, default empty) names test
+groups where every member's video auto-checks and the recycled-video dedup is
+skipped. It used to be a hardcoded pair in `pti.py` belonging to one fleet;
+this repo serves several, so nothing fleet-specific may be hardcoded.
 
 ## Vehicle changes: decided by the plate, not by a vote
 
@@ -517,13 +537,15 @@ purpose: genuine swaps are often filmed without a clear plate shot, and
 demanding plate evidence would strand those groups on the old truck.
 
 Because the change resolves from the video, the driver's result is never held
-back. Don't reintroduce the vote: `PROPOSAL_REMINDERS_ENABLED` and the `pv:`
-callbacks in `proposals.py` are dead for vehicle changes.
+back. Don't reintroduce the vote: the 3-vote proposal flow (`pv:` callbacks,
+vote reminders, the `pending_proposals`/`proposal_votes` tables) was deleted
+on 2026-09-13 — the tables are left in place on the live databases but
+nothing creates or reads them.
 
-Both admin surfaces used to describe their edits as "skips the 3-vote flow",
-which read as though a vote were still waiting somewhere. Nothing in the panels
-says that any more — an admin edit is simply immediate. Don't reintroduce the
-phrase in user-facing copy either.
+The panel used to describe its edits as "skips the 3-vote flow", which read as
+though a vote were still waiting somewhere. Nothing says that any more — an
+admin edit is simply immediate. Don't reintroduce the phrase in user-facing
+copy either.
 
 ## The tire pass: it observes in one call and decides in another
 
@@ -703,14 +725,16 @@ instead of piling on. Gemini calls also retry with backoff and surface a friendl
 "overloaded" message on 5xx/429. Tune `PTI_MAX_CONCURRENCY` up only if the host
 has CPU/memory headroom.
 
-**The failed-inspection retry queue is off.** `utils/pti_retry.py` still exists
-and is still tested, but `app.py` does not start `pti_retry_loop` and
-`handlers/groups/pti.py` does not enqueue, so a failed inspection is reported to
-the driver and forgotten. Its re-runs were louder than the failures they
-recovered: every attempt posts its own status message, so one Gemini outage on
-2026-08-31 left five "the analysis service is overloaded" messages in a DM World
-group over 90 minutes — for one walkaround, and not one of them a result. The
-case it was built for is real (2026-08-20: every key locked out of the model, so
-re-sending never worked either), which is why the module is kept rather than
-deleted. Re-enabling means restoring both call sites **and** first making a retry
-that fails again do so silently.
+**There is no failed-inspection retry queue.** A failed inspection is reported
+to the driver and forgotten; they re-send `/check`. One existed
+(`utils/pti_retry.py`, `pti_retry_queue`, removed 2026-09-13 — the table is
+left on the live databases, unread): it re-ran submissions that failed on an
+overload or an out-of-credit key. Its re-runs were louder than the failures
+they recovered — every attempt posted its own status message, so one Gemini
+outage on 2026-08-31 left five "the analysis service is overloaded" messages
+in a DM World group over 90 minutes, for one walkaround and not one of them a
+result. The case it was built for is real (2026-08-20: every key locked out of
+the model for two days, so re-sending never worked either); if it ever comes
+back, it has to be a retry that fails *silently* and posts only a result.
+Error messages the driver sees never carry the raw exception text — that used
+to print API JSON and file paths into the group.

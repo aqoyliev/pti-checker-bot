@@ -1,4 +1,4 @@
 from . import registration
-from . import proposals
+from . import setup_nag
 from . import monitoring
 from . import pti

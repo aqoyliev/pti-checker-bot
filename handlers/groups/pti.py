@@ -8,8 +8,8 @@ import logging
 from aiogram import types
 from aiogram.types import ContentType
 
-from data.config import PTI_AUTOCHECK_ENABLED
-from loader import bot, dp
+from data.config import PTI_AUTOCHECK_ENABLED, PTI_TEST_GROUP_IDS
+from loader import bot_id, dp
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
     log_pti, get_cached_check, get_recent_ptis,
@@ -17,34 +17,18 @@ from utils.db import (
     reset_group_reminders,
 )
 from utils.pti_processor import deliver_result, process_mixed_media
-from utils.enforcement import handle_pti_passed
 from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
 # Vehicle changes are never put to a vote. A detected truck or trailer change is
 # applied straight from the PTI, guarded by the plate rather than by people —
-# see _reconcile_vehicles for the rule. (The 3-member proposal flow in
-# handlers/groups/proposals.py is no longer reached for vehicle changes; that
-# file still owns the setup-nag loop.)
+# see _reconcile_vehicles for the rule.
 
-# When True, /check accepts media from ANYONE and attributes the PTI to whoever
-# sent it. When False (current), /check only runs on a registered driver's media
-# and otherwise replies that the video isn't from a registered driver. Either
-# way, anyone may *type* /check — the flag only governs whose media is accepted.
-# The *automatic* standalone-video inspection is always restricted to registered
-# drivers regardless of this flag (#4) — see handle_group_video.
-ALLOW_ALL_MEMBERS = False
-
-# When True, PTI runs are persisted via log_pti and the dedup cache is active.
-# Required for the reminder engine (#8/#9) to know who submitted when, and for
-# quotas/history. (Vehicle reconciliation runs regardless.)
-SAVE_PTI_LOGS = True
-
-# Hardcoded TEST groups: the bot behaves "as before" in these — it auto-inspects
-# EVERYONE's video (not just registered drivers) and skips the recycled-video
+# Test groups (PTI_TEST_GROUP_IDS, env): the bot auto-inspects EVERYONE's video
+# there (registered or not, forwarded or not) and skips the recycled-video
 # dedup so the same clip can be re-sent while testing.
-TEST_GROUP_IDS = {-1004376739828, -1003755811659}
+TEST_GROUP_IDS = PTI_TEST_GROUP_IDS
 
 
 async def _group_ready(message: types.Message) -> bool:
@@ -83,31 +67,6 @@ def _items_from_buffered(buf_item) -> dict | None:
         if mime.startswith("video/"):
             return {"kind": "video_doc", "obj": buf_item.document}
     return None
-
-
-def _items_to_refs(items: list[dict]) -> list[dict]:
-    """The parts of `items` worth storing, for a retry hours or days later.
-
-    Only the ``file_id`` and mime type: the Telegram objects themselves are not
-    serialisable, and nothing downstream needs the rest. A ``file_id`` stays
-    valid long after the update that carried it is gone, which is what lets the
-    bot fetch the media again on its own — the Bot API cannot read chat history,
-    so without this a failed inspection is unrecoverable.
-    """
-    refs = []
-    for it in items:
-        obj = it["obj"]
-        file_id = getattr(obj, "file_id", None)
-        if not file_id:
-            continue
-        refs.append({
-            "kind": it["kind"],
-            "file_id": file_id,
-            "mime_type": getattr(obj, "mime_type", None),
-            "duration": getattr(obj, "duration", None),
-            "file_size": getattr(obj, "file_size", None),
-        })
-    return refs
 
 
 def _signature_from_items(items: list[dict]) -> str | None:
@@ -334,25 +293,23 @@ async def _handle_pti_result(
     passed = data.get("status") == "PASS"
     vehicles = _extract_vehicles(data)
     primary_unit, primary_plate = _truck_log_fields(vehicles)
-    if SAVE_PTI_LOGS:
-        await log_pti(
-            group_id=message.chat.id,
-            user_id=driver_user_id,
-            passed=passed,
-            severity=data.get("severity", ""),
-            unit_number=primary_unit,
-            plate=primary_plate,
-            result_json=json.dumps(data),
-            result_text=text,
-            replied_message_id=replied_message_id,
-            media_signature=media_signature,
-            driver_name=driver_name,
-            content_signature=content_signature,
-        )
+    await log_pti(
+        group_id=message.chat.id,
+        user_id=driver_user_id,
+        passed=passed,
+        severity=data.get("severity", ""),
+        unit_number=primary_unit,
+        plate=primary_plate,
+        result_json=json.dumps(data),
+        result_text=text,
+        replied_message_id=replied_message_id,
+        media_signature=media_signature,
+        driver_name=driver_name,
+        content_signature=content_signature,
+    )
     await _reconcile_vehicles(message, data)
     # A driver submitting any PTI clears the overdue/escalation reminders (#9).
     await reset_group_reminders(message.chat.id)
-    await handle_pti_passed(message.chat.id, driver_user_id, driver_name or str(driver_user_id))
 
 
 # ---------- /check ----------
@@ -360,12 +317,12 @@ async def _handle_pti_result(
 @dp.message_handler(commands=["check"], chat_type=GROUP_TYPES)
 async def handle_check_group(message: types.Message):
     if not await _group_ready(message):
+        # Drivers are never asked to configure a group: the fleet's admins do
+        # that from their side (onboarding prompt, web panel), and the setup
+        # nag keeps reminding them until it is done.
         await message.answer(
-            "This group is not configured yet. Anyone in the group can run:\n"
-            "1. Have the driver send a message, then reply with: <code>/adddriver Driver Name</code>\n"
-            "2. Set the unit number: <code>/setunit &lt;unit_number&gt;</code>",
-            parse_mode="HTML",
-        )
+            "This group isn't set up yet — the fleet admins have been asked to "
+            "assign its unit and drivers. Once that's done, /check will work here.")
         return
 
     reply = message.reply_to_message
@@ -380,14 +337,11 @@ async def handle_check_group(message: types.Message):
         driver_uid = direct_uid
     elif forward_uid and await is_registered_driver(message.chat.id, forward_uid):
         driver_uid = forward_uid
-    if driver_uid is None and ALLOW_ALL_MEMBERS:
-        # Testing: attribute the PTI to whoever sent the replied media.
-        driver_uid = direct_uid or forward_uid
     if driver_uid is None:
         await message.answer(
             "⚠️ This video isn't from a registered driver, so it can't be checked.\n"
-            "Reply <code>/check</code> to a <b>registered driver's</b> video, or add the "
-            "driver first with <code>/adddriver Driver Name</code>.",
+            "Reply <code>/check</code> to a <b>registered driver's</b> video. If the "
+            "driver is missing, a fleet admin can add them from the admin panel.",
             parse_mode="HTML",
         )
         return
@@ -395,9 +349,6 @@ async def handle_check_group(message: types.Message):
     drivers = await get_drivers(message.chat.id)
     driver_row = next((d for d in drivers if d["user_id"] == driver_uid), None)
     driver_name = driver_row["name"] if driver_row else None
-    if not driver_name and ALLOW_ALL_MEMBERS:
-        src = reply.forward_from if forward_uid == driver_uid else reply.from_user
-        driver_name = src.full_name if src else None
 
     await _run_pti(message, reply, driver_uid, driver_name)
 
@@ -441,7 +392,7 @@ async def _run_pti(
 
     signature = _signature_from_items(items)
     content_sig = _content_signature_from_items(items)
-    if SAVE_PTI_LOGS and message.chat.id not in TEST_GROUP_IDS and (signature or content_sig):
+    if message.chat.id not in TEST_GROUP_IDS and (signature or content_sig):
         # Dedup by (file_size, duration) — an old video re-uploaded keeps the same
         # size+length even though Telegram assigns it a fresh file id. A match is
         # rejected here BEFORE any inspection runs, so a recycled PTI never counts
@@ -477,10 +428,10 @@ async def _run_pti(
     current_unit = group.get("unit_number") if group else None
     if current_unit:
         history = [h for h in history if h.get("unit_number") == current_unit]
-    # A failed inspection is not queued for a later re-run: see the note in
-    # app.py. process_mixed_media has already told the driver what to do, and
-    # they can do it now rather than read the same apology five more times over
-    # the next ninety minutes.
+    # A failed inspection is not queued for a later re-run. process_mixed_media
+    # has already told the driver what to do, and they can do it now rather
+    # than read the same apology five more times over the next ninety minutes
+    # (which is what the retry queue did on 2026-08-31, before it was removed).
     text, data, status_msg = await process_mixed_media(
         items, reply, history=history, driver_name=driver_name,
     )
@@ -540,29 +491,22 @@ def _is_forwarded_from_other(message: types.Message, sender_uid: int) -> bool:
     return True
 
 
-_bot_id: int | None = None
-
-
 async def _replies_to_bot(message: types.Message) -> bool:
     """True if this message is a reply to one of *our* bot's messages.
 
     Matched on this bot's own id, not ``from_user.is_bot`` — another bot in the
     group posting a message would otherwise become a trigger for inspections.
-    The id is fetched once and cached; a failed lookup answers False, so the
-    worst case is the pre-existing behaviour rather than an exception on a
-    message handler.
+    A failed id lookup answers False, so the worst case is the pre-existing
+    behaviour rather than an exception on a message handler.
     """
     reply = message.reply_to_message
     if reply is None or reply.from_user is None:
         return False
-    global _bot_id
-    if _bot_id is None:
-        try:
-            _bot_id = (await bot.get_me()).id
-        except Exception:
-            logging.exception("could not resolve the bot's own id")
-            return False
-    return reply.from_user.id == _bot_id
+    try:
+        return reply.from_user.id == await bot_id()
+    except Exception:
+        logging.exception("could not resolve the bot's own id")
+        return False
 
 
 @dp.message_handler(
@@ -606,8 +550,8 @@ async def handle_group_video(message: types.Message):
     if message.chat.id not in TEST_GROUP_IDS and _is_forwarded_from_other(message, uid):
         return
     # #4: the bot only AUTO-checks a registered driver's video. Anyone else must
-    # use /check explicitly (#6). This holds even when ALLOW_ALL_MEMBERS is on —
-    # except in the hardcoded TEST groups, where any member's video auto-checks.
+    # use /check explicitly (#6) — except in the test groups, where any
+    # member's video auto-checks.
     if message.chat.id not in TEST_GROUP_IDS and not await is_registered_driver(message.chat.id, uid):
         return
 

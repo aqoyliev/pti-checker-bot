@@ -5,9 +5,7 @@ env.read_env()
 
 BOT_TOKEN = env.str("BOT_TOKEN")
 ADMINS = env.list("ADMINS")
-IP = env.str("ip")
 LOCAL_SERVER_URL = env.str("LOCAL_SERVER_URL", default="")
-PTI_FRAMES = env.int("PTI_FRAMES", default=7)
 DATABASE_URL = env.str("DATABASE_URL")
 
 # Max number of PTI inspections analyzed concurrently. Each inspection runs
@@ -42,10 +40,18 @@ PTI_SPLIT_FRAMES = env.bool("PTI_SPLIT_FRAMES", default=True)
 # Auto-inspect a standalone video from a registered driver without a /check
 # command (handlers/groups/pti.py:handle_group_video). When False, the bot
 # never auto-runs a PTI on group videos — every inspection must be requested
-# explicitly with /check (in-reply). Buffering, dedup, and /check are unaffected.
-# The hardcoded TEST groups (pti.TEST_GROUP_IDS) always auto-check regardless.
-# Set False to turn the auto-inspector off everywhere except TEST groups. (default: true)
+# explicitly with /check (in-reply), or by replying to the bot with the video.
+# Buffering, dedup, and /check are unaffected. Test groups (below) always
+# auto-check regardless. (default: true)
 PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
+
+# Chat ids where the bot behaves as a test bench: every member's video is
+# auto-inspected (registered driver or not, forwarded or not) and the
+# recycled-video dedup is skipped so one clip can be re-sent while testing.
+# Comma-separated. Empty (the default) means no group gets that treatment --
+# this repo is shared by several fleets, so a test group is never hardcoded.
+PTI_TEST_GROUP_IDS = frozenset(
+    int(x) for x in env.list("PTI_TEST_GROUP_IDS", default=[]) if x.strip())
 
 # Overdue reminders. The bot never restricts a driver under any setting — this
 # only controls whether the hourly loop sends overdue reminders to the group and
@@ -69,17 +75,20 @@ GROUP_QUIET_MAX_MESSAGES = env.int("GROUP_QUIET_MAX_MESSAGES", default=3)
 # as UTC; only the week boundary shifts.
 FLEET_TZ = env.str("FLEET_TZ", default="America/New_York")
 
-# Cosmetic only: the headline on the web panel's report PDFs (see
-# webapp/server.py's /api/reports/*.pdf, scripts/fleet_report.py). Not a
-# database filter — one deployment already serves one fleet.
+# The company's name, printed as the wordmark at the top of both report PDFs
+# (webapp/server.py's /api/reports/*.pdf, scripts/fleet_report.py). Not a
+# database filter — one deployment already serves one fleet. The default is a
+# placeholder: leave it unset and every report the company sends out is headed
+# "FLEET", so setting it is part of standing up a deployment.
 FLEET_NAME = env.str("FLEET_NAME", default="Fleet")
 
-# Web admin panel (Telegram Mini App). The bot always starts a small aiohttp
-# server (webapp/server.py) that serves the panel UI + JSON API on WEBAPP_PORT —
-# on Railway the injected PORT wins, so generating a service domain "just works".
-# Set WEBAPP_URL to that public HTTPS URL (e.g. https://<app>.up.railway.app) to
-# show the "Open Web Panel" button in /admin; Telegram requires HTTPS for Mini
-# Apps, and until WEBAPP_URL is set the button is hidden (the server still runs).
+# Web admin panel (Telegram Mini App) -- the only admin panel. The bot always
+# starts a small aiohttp server (webapp/server.py) that serves the panel UI +
+# JSON API on WEBAPP_PORT — on Railway the injected PORT wins, so generating a
+# service domain "just works". Set WEBAPP_URL to that public HTTPS URL (e.g.
+# https://<app>.up.railway.app); /admin and the chat menu button point at it.
+# Telegram requires HTTPS for Mini Apps; until WEBAPP_URL is set /admin says
+# the panel isn't configured (the server still runs).
 WEBAPP_URL = env.str("WEBAPP_URL", default="").strip().rstrip("/")
 WEBAPP_PORT = env.int("PORT", default=env.int("WEBAPP_PORT", default=8080))
 

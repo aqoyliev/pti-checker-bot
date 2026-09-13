@@ -5,8 +5,9 @@ from html import escape
 
 from aiogram import types
 
-from loader import dp, bot
+from loader import bot_id, dp
 from handlers.admin.onboard import start_onboarding
+from utils.admins import is_admin
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
@@ -25,8 +26,19 @@ INTRO_MESSAGE = (
 # NOTE: there is deliberately no "this group is not configured, run /setunit"
 # message any more. Drivers are never asked to register or configure anything;
 # the unit comes off the title/description and the drivers are picked by an
-# admin in DM. /adddriver and /setunit still work as a manual escape hatch,
-# they are just not advertised to the group.
+# admin in DM. /adddriver, /setunit and /removedriver still work as a manual
+# escape hatch -- for the fleet's admins only, and not listed in the group's
+# command menu. Left open to every member, a driver could re-file the truck
+# with one /setunit, or drop the co-driver out of compliance with /removedriver.
+
+_NOT_ADMIN = "Only the fleet's admins can change a group's setup."
+
+
+async def _admin_only(message: types.Message) -> bool:
+    if message.from_user and await is_admin(message.from_user.id):
+        return True
+    await message.reply(_NOT_ADMIN)
+    return False
 
 
 @dp.message_handler(content_types=[types.ContentType.MIGRATE_TO_CHAT_ID,
@@ -56,8 +68,8 @@ async def on_chat_migrated(message: types.Message):
 
 @dp.message_handler(content_types=types.ContentType.NEW_CHAT_MEMBERS)
 async def on_bot_added(message: types.Message):
-    bot_user = await bot.get_me()
-    if not any(m.id == bot_user.id for m in message.new_chat_members):
+    me = await bot_id()
+    if not any(m.id == me for m in message.new_chat_members):
         return
 
     await upsert_group(message.chat.id)
@@ -92,6 +104,8 @@ async def on_bot_added(message: types.Message):
 
 @dp.message_handler(commands=["adddriver"], chat_type=GROUP_TYPES)
 async def cmd_add_driver(message: types.Message):
+    if not await _admin_only(message):
+        return
     args = message.get_args().strip()
     reply = message.reply_to_message
 
@@ -167,6 +181,8 @@ async def cmd_add_driver(message: types.Message):
 
 @dp.message_handler(commands=["setunit"], chat_type=GROUP_TYPES)
 async def cmd_set_unit(message: types.Message):
+    if not await _admin_only(message):
+        return
     unit = message.get_args().strip()
     if not unit:
         await message.reply(
@@ -194,7 +210,8 @@ async def cmd_set_unit(message: types.Message):
 
 @dp.message_handler(commands=["removedriver"], chat_type=GROUP_TYPES)
 async def cmd_remove_driver(message: types.Message):
-    # #3/#6: anyone can add or remove drivers — no admin check, no confirmation.
+    if not await _admin_only(message):
+        return
     reply = message.reply_to_message
     if not reply or not reply.from_user:
         drivers = await get_drivers(message.chat.id)

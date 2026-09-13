@@ -1,41 +1,25 @@
-"""Regression tests for enforcement edge cases.
+"""The compliance loop reminds and reports; it never restricts anyone.
 
-The hourly compliance loop must not crash or spam errors when a tracked driver
-is the group creator: Telegram forbids a bot from restricting the chat owner
-(`CantRestrictChatOwner`), and that should be a benign no-op, not an error.
+The rule is structural, not a config flag: the module must have no way to
+call ``restrict_chat_member`` at all, in either direction. An unmute helper
+used to exist to lift restrictions from before the rule; it ran only behind
+``ENFORCEMENT_ENABLED``, which no fleet has ever turned on, and was removed
+on 2026-09-13.
 """
 import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
-from aiogram.utils.exceptions import CantRestrictChatOwner
-
 from utils import enforcement
-from utils.enforcement import RestrictOutcome
 
 
-def test_unmute_chat_owner_returns_owner(monkeypatch):
-    monkeypatch.setattr(
-        enforcement.bot, "restrict_chat_member",
-        AsyncMock(side_effect=CantRestrictChatOwner("Can't remove chat owner")),
-    )
-    # Owner can't be restricted: benign no-op, not a deregistration, not "applied".
-    assert asyncio.run(enforcement.unmute_driver(-100123, 555)) is RestrictOutcome.OWNER
-
-
-def test_unmute_success_returns_applied(monkeypatch):
-    monkeypatch.setattr(enforcement.bot, "restrict_chat_member", AsyncMock(return_value=True))
-    assert asyncio.run(enforcement.unmute_driver(-100123, 555)) is RestrictOutcome.APPLIED
-
-
-def test_there_is_no_way_to_mute_a_driver():
-    """The rule is structural, not a config flag: no mute helper may exist.
-
-    A muted-permission set or a mute_driver() is all it would take for a future
-    change to start restricting drivers again, so their absence is asserted.
-    """
+def test_there_is_no_way_to_restrict_a_driver():
     assert not hasattr(enforcement, "mute_driver")
+    assert not hasattr(enforcement, "unmute_driver")
     assert not hasattr(enforcement, "_MUTED_PERMISSIONS")
+    # The module may *talk* about the call in its docstring; it must not make it.
+    source = open(enforcement.__file__, encoding="utf-8").read()
+    assert ".restrict_chat_member(" not in source
 
 
 def _fake_loop_env(monkeypatch, restrict_perms, sent, group=None, drivers=None):
@@ -60,8 +44,7 @@ def _fake_loop_env(monkeypatch, restrict_perms, sent, group=None, drivers=None):
 
 def test_disabled_loop_does_nothing(monkeypatch):
     # Reminders off: no restriction calls and no messages. The loop bails before
-    # touching a group, so a bot without Restrict Members rights can't produce a
-    # failed call that reads as "group unreachable".
+    # touching a group.
     assert enforcement.ENFORCEMENT_ENABLED is False
 
     restrict_perms, sent = [], []

@@ -5,9 +5,7 @@ query string. We validate it per
 https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
 (HMAC-SHA256 keyed off the bot token), so the API needs no login/session of its
 own — a request is trusted iff Telegram signed it recently and the signed user
-id resolves to an admin. Admin resolution mirrors handlers/admin/panel.py:
-env ``ADMINS`` are always super-admins; everyone else is looked up in the
-DB-backed admins table.
+id resolves to an admin (``utils.admins``, the same rule the bot itself uses).
 """
 from __future__ import annotations
 
@@ -17,15 +15,12 @@ import json
 import time
 from urllib.parse import parse_qsl
 
-from data.config import ADMINS, BOT_TOKEN
-from utils.db import get_admin
+from data.config import BOT_TOKEN
 
 # initData is minted when the Mini App opens; reject blobs older than this so a
 # leaked one can't be replayed forever. A day comfortably covers a panel tab
 # left open.
 MAX_AGE_SECONDS = 24 * 3600
-
-_ADMIN_IDS = {str(a).strip() for a in ADMINS if str(a).strip()}
 
 
 def parse_init_data(
@@ -72,10 +67,3 @@ def extract_user(data: dict) -> dict | None:
     except (TypeError, ValueError):
         return None
     return user if isinstance(user, dict) and isinstance(user.get("id"), int) else None
-
-
-async def resolve_admin(user_id: int) -> dict | None:
-    """{'user_id', 'is_super_admin'} for admins, None for everyone else."""
-    if str(user_id) in _ADMIN_IDS:
-        return {"user_id": user_id, "is_super_admin": True}
-    return await get_admin(user_id)

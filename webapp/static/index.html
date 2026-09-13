@@ -727,9 +727,13 @@ async function renderTools() {
       '<button class="btn half secondary" id="repDriver">🧑 Driver report</button>' +
       '<div class="hint" id="repStatus" style="margin-top:6px"></div></div>';
 
-  // Default to the last 7 days -- both fields stay freely editable.
+  // Default to the last 7 days -- both fields stay freely editable. Local
+  // calendar days, not toISOString(): that is UTC, and in the evening it is
+  // already tomorrow there, which put a day the fleet hasn't lived yet in the
+  // "until" box.
   const today = new Date(), weekAgo = new Date(today - 6 * 86400000);
-  const isoDay = d => d.toISOString().slice(0, 10);
+  const isoDay = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+    "-" + String(d.getDate()).padStart(2, "0");
   document.getElementById("repSince").value = isoDay(weekAgo);
   document.getElementById("repUntil").value = isoDay(today);
 

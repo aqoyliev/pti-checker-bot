@@ -3,43 +3,45 @@ from aiogram.dispatcher.filters.builtin import CommandHelp
 
 from loader import dp
 
+# The help text describes what the bot actually does today. Two things it
+# deliberately does NOT say: how to configure a group (drivers are never asked
+# to -- the fleet's admins do that from their side), and which AI vendor is
+# behind the verdict.
+
 _INTRO = (
     "🛠️ <b>PTI Checker Bot — Help</b>\n\n"
-    "I review pre-trip inspection (PTI) media and decide PASS/FAIL using a DOT-trained model.\n\n"
+    "I review pre-trip inspection (PTI) videos and photos and reply with "
+    "PASS or FAIL, the defects found, and anything that wasn't filmed.\n\n"
 )
 
-# Setup is a group-only concern -- /setunit and /adddriver only work inside a
-# group chat, so telling a DM about them just points at a command that will
-# fail there.
-_SETUP = (
-    "<b>Setup (one-time per group)</b>\n"
-    "When I'm added to a group, I read the group name and bio to detect the unit number and "
-    "driver names. If anything is missing, anyone in the group can run:\n"
-    "• <code>/setunit &lt;unit_number&gt;</code> — set the truck unit\n"
-    "• <code>/adddriver Driver Name</code> — reply to the driver's message\n\n"
+_GROUP = (
+    "<b>Sending a PTI</b>\n"
+    "1. Film the walkaround and post the video (or photos) in this group.\n"
+    "2. Reply to it with <code>/check</code> — or post the video as a reply to "
+    "one of my messages, and I'll start on my own.\n"
+    "3. The result comes back as a reply to your video, usually within a few minutes.\n\n"
+
+    "<b>What PASS / FAIL means</b>\n"
+    "PASS means every required area was filmed: brake pads, lights (shown "
+    "working), tires, mirrors, windshield, air lines, frame and the trailer ABS "
+    "lamp. FAIL means something was not filmed — re-film the areas I list under "
+    "<i>Not visible</i>. Defects are reported either way; they never change the verdict.\n\n"
+
+    "<b>Good to know</b>\n"
+    "• Only a registered driver's video counts. Anyone in the group may type /check.\n"
+    "• A video you already sent (same length and size) is rejected — record a new one.\n"
+    "• Videos over 15 minutes are too long to analyse.\n"
+    "• Group setup — the unit number and who the drivers are — is done by the "
+    "fleet's admins, not in the chat.\n"
 )
 
-_BODY = (
-    "<b>Running an inspection</b>\n"
-    "1. The driver sends the PTI as one or more photos and/or a video (one album works best).\n"
-    "2. Anyone replies to that media with <code>/check</code>.\n"
-    "3. I'll analyze every photo + every sampled video frame together and reply with the result, "
-    "severity, issues found, and what wasn't visible.\n\n"
-
-    "<b>Duplicate guard</b>\n"
-    "If the same media set has already been checked for this driver, I'll block it and tell you when "
-    "the prior check ran. Record a fresh inspection if you need a new check.\n\n"
-
-    "<b>Admin tools</b>\n"
-    "• <code>/removedriver</code> — reply to a registered driver's message (group admin only)\n\n"
-
-    "<b>Notes</b>\n"
-    "• Both drivers and any group member can run <code>/check</code>; only registered drivers' media is accepted.\n"
-    "• Times in messages are Eastern (ET); the bot auto-handles EDT/EST.\n"
+_DM = (
+    "I only inspect videos posted in your <b>driver group</b>. Send the PTI "
+    "there and reply to it with <code>/check</code>.\n"
 )
 
-GROUP_HELP_TEXT = _INTRO + _SETUP + _BODY
-DM_HELP_TEXT = _INTRO + _BODY
+GROUP_HELP_TEXT = _INTRO + _GROUP
+DM_HELP_TEXT = _INTRO + _DM
 
 
 @dp.message_handler(CommandHelp(), chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])

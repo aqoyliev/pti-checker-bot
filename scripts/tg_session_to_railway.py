@@ -1,5 +1,7 @@
 """Convert the local .session file into a Telethon StringSession and store it
-as the TELEGRAM_SESSION Railway variable.
+as the TELEGRAM_LOOKUP_SESSION Railway variable -- the phone-lookup account,
+the one user session the bot still needs (utils/phone_lookup.py; the roster
+read runs on the bot token and needs no session at all).
 
 A .session file cannot travel to Railway -- the container filesystem is
 rebuilt on every deploy -- so the session has to live in an env var.
@@ -8,22 +10,24 @@ The value is never printed. It is read, converted and handed to `railway
 variables` inside this process, so the credential does not appear in your
 terminal, your shell history or an agent transcript.
 
-SECURITY: TELEGRAM_SESSION is full access to the Telegram account it was
-created from -- messages, contacts, groups, everything. Anyone with access to
-the Railway project can read it. Use an account that only exists for this, not
-a personal one, and revoke it from Telegram > Settings > Devices when done.
+SECURITY: the session is full access to the Telegram account it was created
+from -- messages, contacts, groups, everything. Anyone with access to the
+Railway project can read it. Use an account that only exists for this, not a
+personal one, and revoke it from Telegram > Settings > Devices when done.
 
 NEVER ship a session you also use locally. Telegram revokes an authorization
 key seen from two IP addresses at once (AuthKeyDuplicatedError), killing both
 copies -- which is what happened on 2026-08-09 when the `fleet_audit` session
 was sent to Railway and then used from a local script. Hence the default here
-is `bot_userbot`, a session that exists only to be deployed:
+is `lookup_userbot`, a session that exists only to be deployed (the local twin
+for scripts/tg_phone_lookup.py is `lookup_local`):
 
-    railway run py -3.11 scripts/tg_login.py --name bot_userbot
-    railway run py -3.11 scripts/tg_session_to_railway.py
+    railway run py -3.11 scripts/tg_login.py --name lookup_userbot
+    railway run py -3.11 scripts/tg_session_to_railway.py --service <bot service>
 
-    py -3.11 scripts/tg_session_to_railway.py [--service pti-checker-bot]
-                                              [--session bot_userbot]
+    py -3.11 scripts/tg_session_to_railway.py --service <bot service>
+                                              [--session lookup_userbot]
+                                              [--var TELEGRAM_LOOKUP_SESSION]
 """
 from __future__ import annotations
 
@@ -40,13 +44,13 @@ SESSION_DIR = Path.home() / ".pti-tg"
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--service", default="pti-checker-bot")
-    ap.add_argument("--session", default="bot_userbot",
+    ap.add_argument("--service", required=True,
+                    help="the fleet's bot service on Railway (one project per company)")
+    ap.add_argument("--session", default="lookup_userbot",
                     help="session name under ~/.pti-tg. Must NOT be one you use "
-                         "locally (default: bot_userbot)")
-    ap.add_argument("--var", default="TELEGRAM_SESSION",
-                    help="Railway variable to set. Use TELEGRAM_LOOKUP_SESSION "
-                         "for the phone-lookup account (default: TELEGRAM_SESSION)")
+                         "locally (default: lookup_userbot)")
+    ap.add_argument("--var", default="TELEGRAM_LOOKUP_SESSION",
+                    help="Railway variable to set (default: TELEGRAM_LOOKUP_SESSION)")
     ap.add_argument("--print-only", action="store_true",
                     help="print the value instead of setting it (avoid: it is a credential)")
     args = ap.parse_args()

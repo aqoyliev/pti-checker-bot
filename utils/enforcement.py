@@ -1,18 +1,28 @@
+"""The weekly-quota compliance check, and the rule it lives under.
+
+**The bot never restricts, mutes or otherwise silences a driver.** There is no
+``restrict_chat_member`` call anywhere in this module -- not to mute, and (as
+of 2026-09-13) not to unmute either: the unmute path existed only to lift
+restrictions applied before the rule, ran only behind ``ENFORCEMENT_ENABLED``,
+and that flag has never been on in production, so it never ran at all. A
+non-compliant driver gets a reminder in the group and a line in the admin
+report, nothing else. A test asserts no mute helper exists.
+
+``ENFORCEMENT_ENABLED`` gates only this module's hourly pass (the weekly
+``REQUIRED_PER_WEEK`` quota reminder plus the admin summary). The 3-day
+overdue escalation in ``utils/reminders.py`` runs regardless.
+"""
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
-from enum import Enum
+from datetime import datetime
 
-from aiogram.types import ChatPermissions
 from aiogram.utils.exceptions import (
     BotBlocked,
     BotKicked,
-    CantRestrictChatOwner,
     ChatNotFound,
     MethodIsNotAvailable,
     MigrateToChat,
-    NotEnoughRightsToRestrict,
 )
 
 from loader import bot
@@ -27,25 +37,7 @@ from utils.reminder_logic import may_remind
 REQUIRED_PER_WEEK = 2
 MIN_GAP_DAYS = 3
 
-# RULE: the bot never restricts a driver. There is deliberately no "muted"
-# permission set here and no mute_driver() — the only restriction call left in
-# the module *lifts* restrictions. Non-compliance is answered with a reminder
-# and an admin report, never by taking away someone's ability to post.
-_FULL_PERMISSIONS = ChatPermissions(
-    can_send_messages=True,
-    can_send_media_messages=True,
-    can_send_other_messages=True,
-    can_add_web_page_previews=True,
-)
-
 _UNREACHABLE_EXCEPTIONS = (ChatNotFound, BotKicked, BotBlocked, MethodIsNotAvailable)
-
-
-class RestrictOutcome(Enum):
-    """Result of a mute/unmute attempt, for the compliance loop to act on."""
-    APPLIED = "applied"          # restriction set (or a transient miss we leave alone)
-    OWNER = "owner"              # target is the chat creator — can't be restricted
-    UNREACHABLE = "unreachable"  # group gone / bot lacks rights → caller deregisters
 
 
 async def _deregister_group(group_id: int, reason: str):
@@ -55,59 +47,6 @@ async def _deregister_group(group_id: int, reason: str):
         f"⚠️ Group <code>{group_id}</code> is unreachable ({reason}). "
         f"Compliance checks are disabled until it is re-registered."
     )
-
-
-async def _set_driver_restriction(group_id: int, user_id: int, permissions, action: str) -> RestrictOutcome:
-    """Apply `permissions` to a driver. `action` ('mute'/'unmute') is for log text.
-
-    Returns a RestrictOutcome: UNREACHABLE means the caller should deregister the
-    group; OWNER means the target is the chat creator and can't be restricted;
-    APPLIED covers success (and transient errors we deliberately leave alone).
-    """
-    try:
-        await bot.restrict_chat_member(group_id, user_id, permissions=permissions)
-        return RestrictOutcome.APPLIED
-    except CantRestrictChatOwner:
-        # Telegram never lets a bot restrict the chat creator, so enforcement
-        # simply doesn't apply to the owner. Benign — recurs every cycle, so log
-        # at debug to avoid spam.
-        logging.debug(f"Cannot {action} chat owner {user_id} in group {group_id}; skipped")
-        return RestrictOutcome.OWNER
-    except NotEnoughRightsToRestrict:
-        # Only reachable from unmute_driver now. Nothing is broken by this — the
-        # bot never restricts anyone — so it is a note, not an alert about
-        # enforcement being off.
-        logging.warning(f"Bot lacks restrict rights in group {group_id} — can't {action} {user_id}")
-        await notify_admins(
-            f"⚠️ Bot lacks <b>Restrict Members</b> permission in group <code>{group_id}</code>, "
-            f"so it could not lift an old restriction on user <code>{user_id}</code>. "
-            f"A group admin has to clear it by hand."
-        )
-        return RestrictOutcome.UNREACHABLE
-    except _UNREACHABLE_EXCEPTIONS as e:
-        logging.warning(f"Group {group_id} unreachable while trying to {action} {user_id}: {type(e).__name__}")
-        return RestrictOutcome.UNREACHABLE
-    except Exception:
-        logging.exception(f"Failed to {action} user {user_id} in group {group_id}")
-        return RestrictOutcome.APPLIED
-
-
-async def unmute_driver(group_id: int, user_id: int) -> RestrictOutcome:
-    """Lift restrictions on a driver. See RestrictOutcome for the return contract.
-
-    This is the only restriction call the bot makes, and it only ever *removes*
-    restrictions — there is no mute counterpart by design.
-    """
-    return await _set_driver_restriction(group_id, user_id, _FULL_PERMISSIONS, "unmute")
-
-
-def is_gap_ok(last_pti: dict | None) -> bool:
-    if not last_pti:
-        return True
-    last_dt = last_pti["submitted_at"]
-    if isinstance(last_dt, str):
-        last_dt = datetime.fromisoformat(last_dt)
-    return datetime.utcnow() - last_dt.replace(tzinfo=None) >= timedelta(days=MIN_GAP_DAYS)
 
 
 def compliance_verdict(
@@ -151,11 +90,6 @@ async def notify_admins(text: str):
 
 async def run_compliance_check():
     """Remind overdue drivers and report them to admins. Never restricts anyone.
-
-    The loop makes no restriction calls at all: a driver who is behind gets a
-    message, not a muzzle. That also removes the old hazard where a group whose
-    bot lacked Restrict Members rights looked "unreachable" and got deregistered
-    on the strength of a failed mute.
 
     One reminder per unit per 24 hours. This runs hourly, so an overdue driver
     used to be told once an hour, every hour; and it shares the rule -- and the
@@ -204,7 +138,6 @@ async def run_compliance_check():
         # group only hears about it once a day.
         if overdue_names and may_remind(now, group.get("last_reminder_at")):
             # Plain text: this send has no parse_mode, so no HTML markup here.
-            # Nobody is restricted, so the reminder never claims otherwise.
             reminder = (
                 f"⚠️ {', '.join(overdue_names)}, your PTI is overdue. Please submit "
                 f"one as soon as possible. Reply /check to your PTI video."
@@ -231,16 +164,3 @@ async def run_compliance_check():
     if non_compliant:
         lines = ["🚨 <b>Non-compliant drivers:</b>\n"] + non_compliant
         await notify_admins("\n".join(lines))
-
-
-async def handle_pti_passed(group_id: int, user_id: int, driver_name: str):
-    """Call after any PTI is logged to lift a restriction the driver may still carry.
-
-    The bot no longer mutes anyone, so this exists only to clear restrictions
-    left over from before that rule — it can never re-apply one.
-    """
-    if not ENFORCEMENT_ENABLED:
-        return
-    compliant, _ = await check_driver_compliance(group_id, user_id)
-    if compliant:
-        await unmute_driver(group_id, user_id)

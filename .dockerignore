@@ -1,4 +1,5 @@
 .env
+.env.*
 .git
 __pycache__
 *.pyc
@@ -10,7 +11,17 @@ __pycache__
 .github
 tests
 .pytest_cache
+.ruff_cache
 ruff.toml
 pytest.ini
 requirements-dev.txt
 CLAUDE.md
+docs
+assets
+
+# A sample walkaround left in the working tree for local testing is 50 MB the
+# image has no use for.
+*.MOV
+*.mov
+*.mp4
+IMG_*

@@ -89,12 +89,12 @@ AVAILABLE_GEMINI_MODELS = (
     "gemini-flash-latest",
     "gemini-pro-latest",
 )
-# Admin-facing label for each id, shown by both the inline panel and the web
-# panel. It carries the **price** because picking a model here is a spend
-# decision -- ~$0.26 vs ~$0.70 per inspection is the difference between the top
-# and bottom of this list, and an admin choosing blind has no way to see that.
-# Lives here rather than in either panel so the two can't drift apart, and so it
-# sits next to the ordering rationale above that it has to stay consistent with.
+# Admin-facing label for each id, shown by the web panel. It carries the
+# **price** because picking a model here is a spend decision -- ~$0.26 vs ~$0.70
+# per inspection is the difference between the top and bottom of this list, and
+# an admin choosing blind has no way to see that. Lives here rather than in the
+# panel so it sits next to the ordering rationale above that it has to stay
+# consistent with.
 MODEL_HINTS = {
     "gemini-3.7-flash": "$0.75/1M in — ~$0.26 a PTI (promo until 2027)",
     "gemini-3.6-flash": "$0.75/1M in — ~$0.26 a PTI (promo until 2027)",
@@ -524,58 +524,6 @@ def _format_timestamp(seconds: float) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
-def call_gemini(frames: list[tuple[float, str]], history: list[dict] | None = None, api_key: str | None = None):
-    client = genai.Client(api_key=_resolve_api_key(api_key))
-    n = len(frames)
-    use_file_api = n > FILE_API_THRESHOLD
-    uploaded_files = []
-
-    # Label each frame with its real video position ("Video frame at M:SS") so the
-    # model can cite an accurate timestamp. Without this it can't know the position
-    # and may grab a burned-in clock overlay instead.
-    labels = [f"Video frame at {_format_timestamp(ts)}" for ts, _ in frames]
-
-    try:
-        parts = []
-        if use_file_api:
-            logging.info(f"Uploading {n} frames via File API (parallel)...")
-            frame_tuples = [("image/jpeg", path, labels[i]) for i, (_, path) in enumerate(frames)]
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                futs = {pool.submit(_upload_one, client, path, mime, label): idx
-                        for idx, (mime, path, label) in enumerate(frame_tuples)}
-                results = [None] * n
-                for fut in as_completed(futs):
-                    results[futs[fut]] = fut.result()
-            uploaded_files = results
-            for i, uf in enumerate(uploaded_files):
-                parts.append(genai_types.Part.from_uri(file_uri=uf.uri, mime_type="image/jpeg"))
-                parts.append(labels[i])
-        else:
-            for i, (_, path) in enumerate(frames):
-                with open(path, "rb") as f:
-                    parts.append(genai_types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
-                parts.append(labels[i])
-
-        history_text = _build_history_text(history or [])
-        if history_text:
-            parts.append(history_text)
-        parts.append(f"Analyze all {n} frames above as a single PTI inspection and return the JSON result.")
-
-        response = client.models.generate_content(
-            model=_active_model,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-            contents=parts,
-        )
-        return response
-    finally:
-        if uploaded_files:
-            _delete_files_background(client, uploaded_files)
-
-
 def call_gemini_photos(
     images: list[tuple],
     history: list[dict] | None = None,
@@ -882,8 +830,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\nSending {len(frames)} frames to Gemini...")
+    # Same labels the bot attaches (utils/pti_processor.py), so the model can
+    # cite the real video position instead of a burned-in clock overlay.
+    images = [(path, "image/jpeg", f"Video frame at {_format_timestamp(ts)}")
+              for ts, path in frames]
     try:
-        response = call_gemini(frames)
+        response = call_gemini_photos(images)
     finally:
         delete_frames(frames)
         print("Temporary frame files deleted.")

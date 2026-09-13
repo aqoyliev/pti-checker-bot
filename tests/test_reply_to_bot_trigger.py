@@ -8,6 +8,7 @@ import types as pytypes
 
 import pytest
 
+import loader
 from handlers.groups import pti
 
 OUR_BOT_ID = 424242
@@ -34,8 +35,8 @@ def _stub_bot(monkeypatch):
         calls.append(1)
         return pytypes.SimpleNamespace(id=OUR_BOT_ID)
 
-    monkeypatch.setattr(pti.bot, "get_me", fake_get_me)
-    monkeypatch.setattr(pti, "_bot_id", None)
+    monkeypatch.setattr(loader.bot, "get_me", fake_get_me)
+    monkeypatch.setattr(loader, "_bot_id", None)
     return calls
 
 
@@ -85,8 +86,8 @@ def test_failed_lookup_answers_false_rather_than_raising(monkeypatch):
     async def boom():
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(pti.bot, "get_me", boom)
-    monkeypatch.setattr(pti, "_bot_id", None)
+    monkeypatch.setattr(loader.bot, "get_me", boom)
+    monkeypatch.setattr(loader, "_bot_id", None)
     reply = _Msg()
     reply.from_user = _User(OUR_BOT_ID)
     # Must degrade to the previous behaviour, never break a message handler.

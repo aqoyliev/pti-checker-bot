@@ -27,7 +27,7 @@ The session rule is not a preference: see [The lookup userbot](#3-the-lookup-use
   (Railway reference variable). The schema is created on first boot by
   `init_db()` — there is no migration step and nothing to import.
 - Generate a service domain, then set `WEBAPP_URL` to it. Until it is set the
-  web panel still runs, the "Open Web Panel" button in `/admin` is just hidden.
+  web panel still runs, but `/admin` has nothing to point at and says so.
 
 ### Variables
 
@@ -38,8 +38,6 @@ BOT_TOKEN=
 DATABASE_URL=            # Railway Postgres reference
 GEMINI_API_KEYS=         # comma-separated; GEMINI_API_KEY works for a single key
 ADMINS=                  # comma-separated Telegram user ids
-ip=127.0.0.1             # read by data/config.py and used nowhere; it has no
-                         # default, so leaving it out is a startup crash
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 LOCAL_SERVER_URL=http://localhost:8081
@@ -51,6 +49,7 @@ Per-fleet decisions — every one has a default, so set only what differs:
 | --- | --- | --- |
 | `ENFORCEMENT_ENABLED` | `false` | Whether the hourly loop nags overdue drivers in the group and summarises to admins. Start `false`; turn it on once the roster is actually right, or the first thing a new company sees is the bot chasing drivers it has mis-registered. |
 | `PTI_AUTOCHECK_ENABLED` | `true` | `false` in production on the existing fleets. With it off, an inspection needs `/check` or a video replying to the bot — a stray dashcam clip does not start one. |
+| `PTI_TEST_GROUP_IDS` | unset | Comma-separated chat ids of test groups: every member's video auto-checks there and the same clip may be re-sent. Leave unset unless the company keeps a test group. |
 | `FLEET_TZ` | `America/New_York` | The zone the weekly PTI quota resets in (midnight Monday). |
 | `FLEET_NAME` | `Fleet` | **The company's name**, printed as the wordmark at the top of both report PDFs (Tools tab). The default is a placeholder — leave it unset and every report the company sends out is headed "FLEET". |
 | `PTI_MAX_CONCURRENCY` | `3` | Raise only if the container has CPU/memory headroom; each inspection is ffmpeg plus a worker thread. |
@@ -93,16 +92,17 @@ session value.
 The account must be a member of the groups it needs to resolve numbers for.
 
 Skipping it is supported: `/whois` and the phone-based auto-config path are
-off, and drivers are added by hand (`/adddriver`, `/setunit`, or the web
-panel's search, which still works off the bot-token roster either way).
+off, and drivers are added by hand — the web panel's member search (which
+still works off the bot-token roster either way), or an admin running
+`/adddriver` / `/setunit` in the group.
 
 ## 4. Verify the first deploy
 
 1. **Logs.** `Gemini model in use: <id>` on startup. Check it — a new Google
    project's keys do not serve every model the registry offers, and the
    failover switches in memory without saying so anywhere else.
-2. **Admin DM.** The startup notice arrives; `/admin` opens the panel; the
-   "Open Web Panel" button appears once `WEBAPP_URL` is set.
+2. **Admin DM.** The startup notice arrives; `/admin` answers with the panel
+   button once `WEBAPP_URL` is set (and says so when it isn't).
 3. **A group.** Add the bot, make it an admin. It posts an intro and works the
    setup out on its own; if it cannot, the admins get a DM prompt. Nothing is
    written to the database until an admin presses Save on that prompt.
@@ -115,6 +115,5 @@ panel's search, which still works off the bot-token roster either way).
 - The database. There is nothing to migrate; a new fleet starts empty.
 - `WEBAPP_URL` — each service has its own domain, and a wrong one points the
   Mini App at another company's panel.
-- `TEST_GROUP_IDS` in `handlers/groups/pti.py` is a hardcoded pair of test
-  groups that always auto-check. They belong to the original fleet and are
-  inert elsewhere; a new fleet that wants a test group needs that set edited.
+- `PTI_TEST_GROUP_IDS` — a test group is one company's chat; set it per
+  deployment, never in code.

@@ -16,7 +16,7 @@ URL = "https://example.up.railway.app"
 
 def _wire(monkeypatch, *, is_admin: bool, url: str = URL):
     monkeypatch.setattr(panel, "WEBAPP_URL", url)
-    monkeypatch.setattr(panel, "_is_admin", AsyncMock(return_value=is_admin))
+    monkeypatch.setattr(panel, "is_admin", AsyncMock(return_value=is_admin))
     set_button = AsyncMock()
     monkeypatch.setattr(panel.bot, "set_chat_menu_button", set_button)
     return set_button
@@ -46,7 +46,7 @@ def test_a_driver_is_reset_rather_than_offered_the_panel(monkeypatch):
 
 def test_no_webapp_url_means_no_call_at_all(monkeypatch):
     # Telegram requires HTTPS for Mini Apps, so an unset WEBAPP_URL has nothing
-    # to point at — and the inline panel keeps working either way.
+    # to point at.
     set_button = _wire(monkeypatch, is_admin=True, url="")
     asyncio.run(panel.sync_menu_button(7564871221))
 

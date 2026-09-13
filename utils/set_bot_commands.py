@@ -4,21 +4,19 @@ from aiogram import types
 
 from data.config import ADMINS
 
-# /adddriver and /setunit only have handlers registered for group chats (see
-# handlers/groups/registration.py) -- offering them in a private chat's command
-# menu points at a command that silently does nothing there. Split the menu the
-# same way handlers/users/help.py already splits its text.
 _PRIVATE_COMMANDS = [
     types.BotCommand("start", "Start the bot"),
     types.BotCommand("help", "Help"),
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
 ]
 
+# /adddriver, /setunit and /removedriver are deliberately NOT listed: they are
+# an admin-only escape hatch (handlers/groups/registration.py), and drivers are
+# never asked to configure their own group. A command in the menu is an
+# invitation to run it.
 _GROUP_COMMANDS = [
     types.BotCommand("help", "Help"),
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
-    types.BotCommand("adddriver", "Register a driver in this group"),
-    types.BotCommand("setunit", "Set the current truck unit number"),
 ]
 
 # DM-only, admin-only commands from handlers/admin/*.py.

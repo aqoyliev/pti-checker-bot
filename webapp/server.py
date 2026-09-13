@@ -1,10 +1,10 @@
 """aiohttp server for the web admin panel (Telegram Mini App).
 
-Runs inside the bot process (started from ``app.py:on_startup``) and exposes the
-same capabilities as the inline /admin panel, as JSON under ``/api/*`` plus the
-single-page UI at ``/``. Every API request must carry the Mini App's signed
-``initData`` in an ``Authorization: tma <initData>`` header; webapp/auth.py
-validates the signature and resolves the user to an admin, so there is no
+Runs inside the bot process (started from ``app.py:on_startup``) and exposes
+everything an admin can do, as JSON under ``/api/*`` plus the single-page UI
+at ``/``. Every API request must carry the Mini App's signed ``initData`` in an
+``Authorization: tma <initData>`` header; webapp/auth.py validates the
+signature and utils/admins.py resolves the user to an admin, so there is no
 separate login. aiohttp is already a dependency (aiogram runs on it).
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from data.config import DATABASE_URL, FLEET_NAME, FLEET_TZ, WEBAPP_PORT
 from loader import bot
 from scripts import fleet_report as _report
 from utils import userbot
+from utils.admins import resolve_admin
 from utils.db import (
     add_admin,
     add_driver,
@@ -56,12 +57,25 @@ from utils.db import (
 from utils.enforcement import REQUIRED_PER_WEEK, compliance_verdict
 from utils.gemini import (AVAILABLE_GEMINI_MODELS, MODEL_HINTS, get_active_model,
                           set_active_model)
-from webapp.auth import extract_user, parse_init_data, resolve_admin
+from webapp.auth import extract_user, parse_init_data
 
 _INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 
+_TZ = ZoneInfo(FLEET_TZ)
 
-_dumps = partial(json.dumps, default=str)  # asyncpg rows carry datetimes
+
+def _json_default(o):
+    """asyncpg hands back naive UTC datetimes; the admin reads them in the
+    fleet's own zone, so they are converted here rather than shown four hours
+    off. Fixed-width "YYYY-MM-DD HH:MM" keeps the panel's string sort working."""
+    if isinstance(o, datetime):
+        if o.tzinfo is None:
+            o = o.replace(tzinfo=timezone.utc)
+        return o.astimezone(_TZ).strftime("%Y-%m-%d %H:%M")
+    return str(o)
+
+
+_dumps = partial(json.dumps, default=_json_default)
 
 
 def _json(payload, status: int = 200) -> web.Response:
@@ -569,7 +583,7 @@ async def api_broadcast(request: web.Request) -> web.Response:
     sent = failed = 0
     for gid in await get_active_group_ids():
         try:
-            await bot.send_message(gid, escape(text))  # plain text, like the inline panel
+            await bot.send_message(gid, escape(text))  # sent as plain text
             sent += 1
         except Exception:
             failed += 1
@@ -599,8 +613,14 @@ def _slug(name: str) -> str:
     return out.strip("-") or "fleet"
 
 
+# One Chromium at a time. A render is a whole browser process on a small
+# container, and two admins (or one impatient one) tapping both report buttons
+# at once is exactly how it runs out of memory mid-inspection.
+_render_lock = asyncio.Semaphore(1)
+
+
 async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, str]:
-    tz = ZoneInfo(FLEET_TZ)
+    tz = _TZ
     since = date.fromisoformat(since_s)
     # `until_s` is the last day the admin picked, inclusive -- one day is
     # added here so the rest of the pipeline can keep working with a
@@ -633,7 +653,8 @@ async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, st
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "report.pdf"
         # Shells out to headless Chromium; keep it off the event loop.
-        await asyncio.to_thread(_report.to_pdf, html_text, out)
+        async with _render_lock:
+            await asyncio.to_thread(_report.to_pdf, html_text, out)
         pdf_bytes = out.read_bytes()
 
     tag = f"{_slug(FLEET_NAME)}-{until - timedelta(days=1):%Y%m%d}"
