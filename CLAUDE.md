@@ -603,58 +603,62 @@ groups where every member's video auto-checks and the recycled-video dedup is
 skipped. It used to be a hardcoded pair in `pti.py` belonging to one fleet;
 this repo serves several, so nothing fleet-specific may be hardcoded.
 
-## Vehicle changes: the trailer is stored, the truck is reported
+## A PTI never decides what vehicle it was filmed on
 
-A PTI reads the unit number and plate off whatever it filmed
-(`_extract_vehicles`), and the two vehicles are treated differently on purpose,
-because they have different owners:
+**Removed 2026-09-13, at the fleet's instruction.** Reading the truck's unit
+number, its plate or the trailer number off the footage and storing it is gone:
+`_extract_vehicles`, `truck_verdict`, `_reconcile_vehicles`, `set_trailer`,
+`set_truck_plate` and `set_truck_unit` are all deleted, and so is the
+`vehicles` key in `merge_frame_passes`. An inspection produces a verdict; that
+is the whole of it.
 
-- **The trailer is written** (`set_trailer`). Nothing else in the fleet records
-  which trailer a truck is pulling — it is not in the group's title, no sweep
-  maintains it, and it changes weekly. The video is the only source there is.
-- **The truck unit is not.** It comes from the group's *title*, and the daily
-  title sweep re-files it from there, so a PTI that overwrote it would be undone
-  within a day and spend the hours in between filing inspections under a unit
-  nothing else agrees with. A mismatch is DMed to the admins instead
-  (`_report_truck_change`), naming both numbers and saying nothing was changed.
-  Its **plate** is still stored: no unit is decided from a plate, and the plate
-  is what makes the misread rule below work at all.
+A stencilled number on a dirty panel is the least legible thing in a
+walkaround, and everything a reading could be written to already has a better
+source — **the truck's unit comes from the chat title and is re-checked by the
+daily sweep, the drivers come from the roster.** A video-driven write would also
+have fought that sweep: it re-files a group from its title every day, so a unit
+adopted from footage would be undone within a day and spend the hours in between
+filing inspections under a number nothing else agreed with.
 
-`truck_verdict` (pure, in `handlers/groups/pti.py`) still decides what a reading
-*means*:
+The model is still *asked* for a `vehicles` block — the prompt is not ours to
+edit — and the answer is simply not used. A single-call inspection keeps it in
+`result_json`; a split one (which is every inspection in production) drops it at
+the merge. Nothing reads either.
 
-| Registered vs. filmed | Result |
-| --- | --- |
-| unit differs, **plate identical** | **misread — silent, nobody is told** |
-| unit differs, plate differs *or* no plate filmed | tell the admins; store nothing |
-| unit same, plate differs | store the plate, silently |
+Gone with it, on the live databases only: `groups.truck_plate`,
+`groups.trailer_unit`, `groups.trailer_plate` and `pti_log.plate`. They are not
+created on a fresh database and nothing reads them on an old one — same
+treatment as the retired tables, since a deploy should not delete fleet history
+on its own. The panel no longer offers a Truck-plate or Trailer row either: a
+field nothing maintains reads as missing data rather than as absent data.
 
-The misread rule is the point of the whole thing. A plate is a far more legible
-marking than a stencilled unit number, so a matching plate outweighs a differing
-unit: that is one truck filmed badly. It is silent everywhere — an admin told
-about every badly-lit stencil stops reading the ones that matter.
+`tests/test_no_vehicle_reads.py` pins all three ways it could creep back — a
+helper that reads the block, a merge that carries it, a write that stores it.
 
-Nothing about a vehicle change reaches the **group**. The driver's inspection is
-unaffected and there is nothing for them to do about it. Don't reintroduce the
-vote either: the 3-vote proposal flow (`pv:` callbacks, vote reminders, the
-`pending_proposals`/`proposal_votes` tables) was deleted on 2026-09-13 — the
-tables are left in place on the live databases but nothing creates or reads them.
-The panel used to describe its edits as "skips the 3-vote flow", which read as
-though a vote were still waiting somewhere; don't reintroduce that phrase in
-user-facing copy either.
+### `pti_log.unit_number` is deliberately empty, and that is a switch
 
-> **None of this had ever run.** `merge_frame_passes` rebuilds the result dict
-> from a fixed list of keys and `vehicles` was not one of them, so every split
-> inspection — which is every inspection wherever there is more than one API
-> key, i.e. all of production — threw the readings away before
-> `_reconcile_vehicles` saw them. Measured 2026-09-13: 299 of dmworld's last 300
-> stored results carry no `vehicles` key, and not one of its 108 active groups
-> has ever had a trailer recorded. **Any key that merge forgets is a feature
-> that silently stops existing**, so add to it whenever the result schema grows.
-> Readings are merged by `merge_vehicles`, which **votes**: frames are strided,
-> so several chunks read the same stencil and two agreeing chunks must outrank
-> one misread that happened to land first. Unit and plate are voted separately,
-> so a chunk that caught only the plate still gets a say.
+Nothing writes it. Filling it from the group's registered unit would be correct
+and is one line — and it would **turn the previous-inspection history back on
+for the model**, which is not a side effect to discover by accident:
+
+`_run_pti` passes the last five inspections to `call_gemini_photos(history=…)`,
+filtered to rows whose `unit_number` matches the group's current one. The filter
+exists so a truck's history cannot follow a group onto a different truck. With
+the column never written, every row fails the match and `history` comes out
+empty for any configured group — which is every group that can file a PTI.
+
+**It has always been empty in practice**: the same merge bug that dropped
+`vehicles` meant only 3 of dmworld's 405 logged inspections ever carried a unit
+number, so the filter discarded the rest. The fleet's results, which it is happy
+with, are the results with no history. Asked on 2026-09-13 whether to let it
+switch on, the answer was no — the prompt already says "check whether prior
+issues are now fixed", so turning it on changes what the model sees on every
+inspection across four fleets, and a model reminded of last week's cracked rim
+may well flag it again.
+
+So the two pieces are left wired up and inert rather than half-removed. Don't
+"fix" the empty column, and don't delete the filter — deleting it switches the
+history on just as surely as filling the column does.
 
 ## The tire pass: it observes in one call and decides in another
 

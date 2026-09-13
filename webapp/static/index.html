@@ -380,14 +380,9 @@ async function renderGroup(gid) {
   catch (e) { view.innerHTML = '<div class="center">' + esc(e.message) + '</div>'; return; }
   titleEl.textContent = groupIcon(g) + " " + (g.unit_number || "Group");
 
-  const truck = esc(g.unit_number || "—") + (g.truck_plate ? " (plate " + esc(g.truck_plate) + ")" : "");
-  const trailer = (g.trailer_unit || g.trailer_plate)
-    ? esc(g.trailer_unit || "—") + (g.trailer_plate ? " (plate " + esc(g.trailer_plate) + ")" : "")
-    : "—";
-
   // A group with no unit is not yet configured: no PTI can be filed against it
   // and no reminder covers it. Say what is missing rather than leaving the
-  // admin to infer it from an empty "Truck" row.
+  // admin to infer it from an empty "Unit" row.
   const setupBanner = g.setup_complete ? "" :
     '<div class="card" style="border:1px solid var(--warn)">' +
       '<b>⚙️ This group isn\'t set up yet</b>' +
@@ -411,8 +406,7 @@ async function renderGroup(gid) {
       '<div class="kv"><div class="k">ID</div><div><code>' + g.group_id + '</code></div></div>' +
       '<div class="kv"><div class="k">Status</div><div>' + (g.is_active ? "🟢 active" : "💤 inactive") +
         ' · ' + (g.setup_complete ? "setup complete" : "setup incomplete") + '</div></div>' +
-      '<div class="kv"><div class="k">Truck</div><div>' + truck + '</div></div>' +
-      '<div class="kv"><div class="k">Trailer</div><div>' + trailer + '</div></div>' +
+      '<div class="kv"><div class="k">Unit</div><div>' + esc(g.unit_number || "—") + '</div></div>' +
       '<div class="kv"><div class="k">Reminders</div><div>' + (g.notifications_disabled ? "🔕 disabled" : "🔔 on") + '</div></div>' +
     '</div>' +
 

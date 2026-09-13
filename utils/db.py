@@ -34,8 +34,16 @@ async def init_db():
                 submitted_at       TIMESTAMP DEFAULT NOW(),
                 passed             BOOLEAN,
                 severity           TEXT,
+                -- Nothing writes this. It used to hold the unit number read
+                -- off the video, which is gone (2026-09-13); filling it from
+                -- the group's registered unit instead would switch the
+                -- previous-inspection history back on for the model, which the
+                -- fleet chose to leave off. Two readers tolerate the NULL: the
+                -- report prefers the group's unit anyway, and the history
+                -- filter in handlers/groups/pti.py drops every row, which is
+                -- what keeps the history off. Kept so that turning it on is
+                -- one line rather than a migration.
                 unit_number        TEXT,
-                plate              TEXT,
                 result_json        TEXT,
                 result_text        TEXT,
                 media_signature    TEXT
@@ -50,13 +58,16 @@ async def init_db():
             -- 3-vote vehicle-change flow), driver_verify (a one-off
             -- verification queue), pti_retry_queue (the failed-inspection
             -- retry, removed 2026-09-13). None is created on a fresh database.
+            --
+            -- Same for three groups columns -- truck_plate, trailer_unit,
+            -- trailer_plate -- and pti_log.plate. A PTI no longer reads the
+            -- vehicle it was filmed on (2026-09-13), so nothing fills them;
+            -- they are not added to a fresh database and nothing reads them on
+            -- an old one.
 
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS setup_nag_count INT DEFAULT 0;
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS last_setup_nag_at TIMESTAMP;
 
-            ALTER TABLE groups ADD COLUMN IF NOT EXISTS truck_plate TEXT;
-            ALTER TABLE groups ADD COLUMN IF NOT EXISTS trailer_unit TEXT;
-            ALTER TABLE groups ADD COLUMN IF NOT EXISTS trailer_plate TEXT;
 
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS driver_name TEXT;
 
@@ -163,10 +174,6 @@ async def init_db():
                SET unit_number = NULLIF(BTRIM(TRANSLATE(unit_number, '<>', '')), '')
              WHERE unit_number IS DISTINCT FROM
                    NULLIF(BTRIM(TRANSLATE(unit_number, '<>', '')), '');
-            UPDATE groups
-               SET trailer_unit = NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '')
-             WHERE trailer_unit IS DISTINCT FROM
-                   NULLIF(BTRIM(TRANSLATE(trailer_unit, '<>', '')), '');
         """)
 
 
@@ -499,7 +506,7 @@ async def reset_setup_nag(group_id: int):
     )
 
 
-# ---------- vehicle info ----------
+# ---------- the group's unit number ----------
 
 def normalize_unit(unit: str | None) -> str:
     """Bare unit number: drop the <angle brackets> and stray whitespace that
@@ -508,30 +515,6 @@ def normalize_unit(unit: str | None) -> str:
     if not unit:
         return ""
     return unit.replace("<", "").replace(">", "").strip()
-
-
-async def set_truck_plate(group_id: int, plate: str):
-    await _pool_check().execute(
-        "UPDATE groups SET truck_plate = $1 WHERE group_id = $2", plate, group_id,
-    )
-
-
-async def set_trailer(group_id: int, unit: str | None, plate: str | None):
-    if unit is not None:
-        unit = normalize_unit(unit)
-    if unit is not None and plate is not None:
-        await _pool_check().execute(
-            "UPDATE groups SET trailer_unit = $1, trailer_plate = $2 WHERE group_id = $3",
-            unit, plate, group_id,
-        )
-    elif unit is not None:
-        await _pool_check().execute(
-            "UPDATE groups SET trailer_unit = $1 WHERE group_id = $2", unit, group_id,
-        )
-    elif plate is not None:
-        await _pool_check().execute(
-            "UPDATE groups SET trailer_plate = $1 WHERE group_id = $2", plate, group_id,
-        )
 
 
 async def set_group_unit(group_id: int, unit_number: str):
@@ -680,8 +663,6 @@ async def log_pti(
     user_id: int,
     passed: bool,
     severity: str,
-    unit_number: str | None,
-    plate: str | None,
     result_json: str,
     result_text: str,
     replied_message_id: int | None = None,
@@ -689,15 +670,17 @@ async def log_pti(
     driver_name: str | None = None,
     content_signature: str | None = None,
 ) -> int:
+    """Record one inspection. ``unit_number`` is deliberately left unwritten --
+    see the column's comment in ``init_db``."""
     row = await _pool_check().fetchrow(
         """INSERT INTO pti_log
            (group_id, user_id, replied_message_id, passed, severity,
-            unit_number, plate, result_json, result_text, media_signature,
+            result_json, result_text, media_signature,
             driver_name, content_signature)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id""",
         group_id, user_id, replied_message_id,
-        passed, severity, unit_number, plate, result_json, result_text,
+        passed, severity, result_json, result_text,
         media_signature, driver_name, content_signature,
     )
     return row["id"]

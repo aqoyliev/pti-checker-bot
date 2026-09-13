@@ -576,52 +576,6 @@ def filter_hallucinated_issues(data: dict) -> int:
     return dropped
 
 
-def merge_vehicles(passes: list[dict]) -> list[dict]:
-    """One entry per vehicle type from the per-chunk readings, by majority.
-
-    Frames are strided, so every chunk sees the whole walkaround sparsely and
-    several of them usually read the same stencilled number. That makes the
-    reading a **vote** rather than a race: two chunks agreeing on "2570" must
-    outrank one that read "Z570" off a dirty panel, and picking the first
-    non-empty value would let exactly that misread win whenever it happened to
-    land in an earlier chunk. Ties go to the reading seen first, which is the
-    earliest frame in the footage.
-
-    Unit number and plate are voted on **separately**: a chunk that caught the
-    plate but never got a legible unit number still gets a say on the plate.
-    """
-    votes: dict[str, dict[str, list[str]]] = {}
-    for p in passes:
-        for v in p.get("vehicles") or []:
-            if not isinstance(v, dict):
-                continue
-            vtype = str(v.get("type") or "").strip().lower()
-            if vtype not in ("truck", "trailer"):
-                continue
-            slot = votes.setdefault(vtype, {"unit_number": [], "plate": []})
-            for field in ("unit_number", "plate"):
-                value = str(v.get(field) or "").strip()
-                # "null"/"none"/"n/a" are the model writing the schema's own
-                # placeholder into the string instead of emitting JSON null.
-                if value and value.lower() not in ("null", "none", "n/a", "unknown"):
-                    slot[field].append(value)
-
-    def _winner(values: list[str]) -> str | None:
-        if not values:
-            return None
-        return max(values, key=lambda v: (values.count(v), -values.index(v)))
-
-    out: list[dict] = []
-    for vtype in ("truck", "trailer"):
-        slot = votes.get(vtype)
-        if not slot:
-            continue
-        unit, plate = _winner(slot["unit_number"]), _winner(slot["plate"])
-        if unit or plate:
-            out.append({"type": vtype, "unit_number": unit, "plate": plate})
-    return out
-
-
 def merge_frame_passes(passes: list[dict]) -> dict:
     """Combine the per-chunk results of a split-frame inspection into one data dict.
 
@@ -635,14 +589,15 @@ def merge_frame_passes(passes: list[dict]) -> dict:
         as an issue) won't list it missing, so it drops out of the intersection. This
         is what stops a perfectly-filmed truck from FAILing just because no single
         70-frame slice contained all 8 areas.
-      - vehicles: VOTED (merge_vehicles). Rebuilding the dict from a fixed list of
-        keys used to drop this one on the floor, and since splitting is on by default
-        wherever there is more than one API key, that is every inspection in
-        production: 299 of dmworld's last 300 stored results carry no "vehicles" key
-        at all and not one of its 108 active groups has ever had a trailer recorded.
-        Truck and trailer detection were not disabled — they were unreachable. Any
-        key this function forgets is a feature that silently stops existing, so add
-        to it whenever the result schema grows.
+      - vehicles: DROPPED, deliberately. The prompt still asks for the unit number
+        and plate it can read off the footage, but nothing acts on the answer any
+        more (see handlers/groups/pti.py), so it is not carried into the merged
+        result. **Every other key the schema grows has to be added here**: this
+        function rebuilds the dict from the list above rather than copying it, so a
+        field it forgets is a feature that silently stops existing. That is not
+        hypothetical — "vehicles" was missing from this list for as long as frame
+        splitting has been on, which is every inspection in production, and truck
+        and trailer detection were never disabled so much as unreachable.
     status/severity/advice are intentionally omitted — finalize_result recomputes them.
     """
     passes = [p for p in passes if isinstance(p, dict)]
@@ -685,7 +640,6 @@ def merge_frame_passes(passes: list[dict]) -> dict:
         "missing_areas": missing,
         "what_was_not_visible": sorted(common_not_visible - clean_keys),
         "fire_extinguisher_shown": fire,
-        "vehicles": merge_vehicles(passes),
         # Cosmetic meta — keep the first reported value; the verdict doesn't depend on it.
         "confidence": confidences[0] if confidences else "",
         "image_quality": qualities[0] if qualities else "",

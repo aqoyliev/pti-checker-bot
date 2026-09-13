@@ -10,11 +10,9 @@ from aiogram.types import ContentType
 
 from data.config import PTI_AUTOCHECK_ENABLED, PTI_TEST_GROUP_IDS
 from loader import bot_id, dp
-from utils.admins import notify_super_admins
 from utils.db import (
     get_group, get_drivers, is_registered_driver,
-    log_pti, get_cached_check, get_recent_ptis, normalize_unit,
-    set_truck_plate, set_trailer,
+    log_pti, get_cached_check, get_recent_ptis,
     reset_group_reminders,
 )
 from utils.pti_processor import deliver_result, process_mixed_media
@@ -22,9 +20,16 @@ from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
-# Vehicle changes are never put to a vote. The trailer a PTI films is stored
-# straight away; a truck number that disagrees with the registered one is
-# reported to the admins instead of overwriting it — see _reconcile_vehicles.
+# **A PTI never decides what vehicle it was filmed on.** Reading the unit
+# number, the plate or the trailer number off the footage and storing it is
+# gone (2026-09-13, at the fleet's instruction). A stencilled number on a dirty
+# panel is the least legible thing in a walkaround, and everything it could be
+# written to already has a better source: the truck's unit comes from the chat
+# title and is swept daily, and the drivers come from the roster. What is left
+# is an inspection verdict, which is what this module is for. The model is
+# still asked for a `vehicles` block — the prompt is not ours to edit — and the
+# answer is simply not used: a split inspection drops it at the merge, a
+# single-call one leaves it in `result_json`, and nothing reads either.
 
 # Test groups (PTI_TEST_GROUP_IDS, env): the bot auto-inspects EVERYONE's video
 # there (registered or not, forwarded or not) and skips the recycled-video
@@ -119,174 +124,6 @@ def _content_signature_from_items(items: list[dict]) -> str | None:
     return f"content:{h}"
 
 
-def _extract_vehicles(data: dict) -> list[dict]:
-    """Normalize Gemini's vehicle output. Returns a list of {type, unit_number, plate}."""
-    vehicles = data.get("vehicles")
-    if isinstance(vehicles, list):
-        out = [v for v in vehicles if isinstance(v, dict)]
-    else:
-        v = data.get("vehicle")
-        out = [v] if isinstance(v, dict) else []
-    norm: list[dict] = []
-    for v in out:
-        vtype = (v.get("type") or "").lower()
-        if vtype not in ("truck", "trailer"):
-            continue
-        unit = v.get("unit_number")
-        plate = v.get("plate")
-        norm.append({"type": vtype, "unit_number": unit, "plate": plate})
-    return norm
-
-
-def _truck_log_fields(vehicles: list[dict]) -> tuple[str | None, str | None]:
-    truck = next((v for v in vehicles if v["type"] == "truck"), None)
-    trailer = next((v for v in vehicles if v["type"] == "trailer"), None)
-    primary = truck or trailer
-    if not primary:
-        return None, None
-    return primary.get("unit_number"), primary.get("plate")
-
-
-def truck_verdict(
-    stored_unit: str | None, stored_plate: str | None,
-    seen_unit: str | None, seen_plate: str | None,
-) -> tuple[str, str | None, str | None]:
-    """Decide what a PTI's truck reading means. Pure, so it can be tested directly.
-
-    Returns ``(action, unit, plate)`` where action is one of:
-
-    - ``"change"``  — a real truck swap; store ``unit`` and ``plate``.
-    - ``"plate"``   — same truck, new plate reading; store ``plate`` only.
-    - ``"misread"`` — the unit differs but the plate is identical. A plate is a
-      far more legible marking than a stencilled unit number, so a matching
-      plate outweighs a differing unit: this is the same truck filmed badly,
-      and adopting the unit would silently misattribute every later inspection.
-      Store nothing.
-    - ``"none"``    — nothing to do.
-
-    A differing unit with *no* plate to compare is treated as a real change: a
-    genuine swap is often filmed without a clear plate shot, and refusing to
-    move without plate evidence would leave those groups stuck on the old truck.
-    """
-    seen_unit = (seen_unit or "").strip() or None
-    seen_plate = (seen_plate or "").strip() or None
-    stored_unit = (stored_unit or "").strip() or None
-    stored_plate = (stored_plate or "").strip() or None
-
-    if seen_unit and stored_unit and seen_unit != stored_unit:
-        if seen_plate and stored_plate and seen_plate == stored_plate:
-            return "misread", None, None
-        return "change", seen_unit, seen_plate
-
-    # Same unit (or nothing registered yet) — the plate is the only thing that
-    # can still be new.
-    if seen_plate and seen_plate != stored_plate:
-        return "plate", None, seen_plate
-    return "none", None, None
-
-
-async def _report_truck_change(
-    message: types.Message,
-    old_truck_unit: str | None,
-    new_truck_unit: str,
-    new_truck_plate: str | None,
-):
-    """Tell the admins a PTI was filmed on a different truck than the registered one.
-
-    A DM, not a message in the group. The driver's inspection is unaffected and
-    there is nothing for them to do about it, so telling the whole group is
-    noise; and it is an admin who decides what the unit really is, either by
-    editing it in the panel or by fixing the group's title, which the daily
-    sweep then re-files from.
-    """
-    old = html.escape(old_truck_unit) if old_truck_unit else "—"
-    plate = f" (plate {html.escape(new_truck_plate)})" if new_truck_plate else ""
-    title = html.escape(message.chat.title or str(message.chat.id))
-    await notify_super_admins(
-        "🔁 <b>Truck number doesn't match</b>\n"
-        f"{title}\n"
-        f"Registered: <b>{old}</b> · filmed: <b>{html.escape(new_truck_unit)}</b>{plate}\n\n"
-        "<i>Nothing was changed. If the truck really was swapped, set the unit "
-        "in the panel or rename the group — the daily title sweep re-files it "
-        "from there.</i>"
-    )
-
-
-async def _reconcile_vehicles(message: types.Message, data: dict):
-    """Store what the PTI saw of the vehicles, and flag what it can't decide.
-
-    The two halves are deliberately asymmetric, because the two numbers have
-    different owners:
-
-    * **The trailer is written.** Nothing else in the fleet records which
-      trailer a truck is pulling — it is not in the group's title, no sweep
-      maintains it, and it changes weekly. The video is the only source there
-      is, so what it reads is stored.
-    * **The truck unit is not.** It comes from the group's title and the daily
-      title sweep re-files it from there, so a PTI that overwrote it would be
-      undone within a day and spend the time in between filing inspections
-      under a unit no other part of the system agrees with. The mismatch is
-      worth an admin's attention, not a silent rewrite, so it goes out as a DM
-      (see _report_truck_change). Its *plate* is still stored: no unit is
-      decided from a plate, and it is what makes the misread rule work at all.
-    """
-    vehicles = _extract_vehicles(data)
-    if not vehicles:
-        return
-
-    group = await get_group(message.chat.id)
-    if not group:
-        return
-
-    truck = next((v for v in vehicles if v["type"] == "truck"), None)
-    trailer = next((v for v in vehicles if v["type"] == "trailer"), None)
-
-    def _norm(v: dict | None) -> tuple[str | None, str | None]:
-        if not v:
-            return None, None
-        u = normalize_unit(v.get("unit_number") or "") or None
-        p = (v.get("plate") or "").strip() or None
-        return u, p
-
-    truck_unit, truck_plate = _norm(truck)
-    trailer_unit, trailer_plate = _norm(trailer)
-
-    stored_truck_unit = normalize_unit(group.get("unit_number") or "") or None
-    stored_truck_plate = (group.get("truck_plate") or "").strip() or None
-    stored_trailer_unit = normalize_unit(group.get("trailer_unit") or "") or None
-    stored_trailer_plate = (group.get("trailer_plate") or "").strip() or None
-
-    # Both sides are normalized before comparing, so an unchanged trailer read
-    # back as " 53821 " doesn't rewrite the same value on every inspection.
-    if trailer_unit and trailer_unit != stored_trailer_unit:
-        await set_trailer(message.chat.id, trailer_unit, trailer_plate)
-        logging.info("group %s: trailer %s -> %s (from PTI)",
-                     message.chat.id, stored_trailer_unit, trailer_unit)
-    elif trailer_plate and trailer_plate != stored_trailer_plate:
-        await set_trailer(message.chat.id, None, trailer_plate)
-
-    if not truck:
-        return
-
-    action, new_unit, new_plate = truck_verdict(
-        stored_truck_unit, stored_truck_plate, truck_unit, truck_plate,
-    )
-
-    if action == "change":
-        await _report_truck_change(message, stored_truck_unit, new_unit, new_plate)
-    elif action == "plate":
-        await set_truck_plate(message.chat.id, new_plate)
-    elif action == "misread":
-        # Same plate, different unit — the unit number just wasn't legible.
-        # Deliberately silent everywhere: nothing changed, and an admin told
-        # about every badly-lit stencil stops reading the ones that matter.
-        logging.info(
-            "group %s: PTI read truck unit %s but plate %s matches registered "
-            "unit %s — treating the unit as a misread, not a change",
-            message.chat.id, truck_unit, truck_plate, stored_truck_unit,
-        )
-
-
 async def _handle_pti_result(
     message: types.Message,
     text: str | None,
@@ -301,15 +138,16 @@ async def _handle_pti_result(
     if not text or not data:
         return
     passed = data.get("status") == "PASS"
-    vehicles = _extract_vehicles(data)
-    primary_unit, primary_plate = _truck_log_fields(vehicles)
+    # `unit_number` is deliberately not passed: it used to be whatever the video
+    # showed, and nothing else is written into it. See _run_pti's history filter
+    # for what leaving it empty keeps switched off, and the module comment above
+    # for why the video is no longer a source. The inspection belongs to
+    # `group_id` either way, which is what every report groups by.
     await log_pti(
         group_id=message.chat.id,
         user_id=driver_user_id,
         passed=passed,
         severity=data.get("severity", ""),
-        unit_number=primary_unit,
-        plate=primary_plate,
         result_json=json.dumps(data),
         result_text=text,
         replied_message_id=replied_message_id,
@@ -317,7 +155,6 @@ async def _handle_pti_result(
         driver_name=driver_name,
         content_signature=content_signature,
     )
-    await _reconcile_vehicles(message, data)
     # A driver submitting any PTI clears the overdue/escalation reminders (#9).
     await reset_group_reminders(message.chat.id)
 
@@ -433,6 +270,15 @@ async def _run_pti(
                 )
             return
 
+    # Previous inspections are **not** shown to the model, and this filter is
+    # what keeps them from being. It was written to stop a truck's history
+    # following the group onto a different truck, matching against the unit each
+    # PTI recorded; nothing writes `pti_log.unit_number` any more, so every row
+    # fails the match and `history` comes out empty for any configured group.
+    # That is the state the fleet chose to keep on 2026-09-13 — the results it
+    # gets today are the results with no history — so the two are left wired up
+    # and inert rather than half-removed. Filling the column is the one line
+    # that turns it on; read the column's comment in db.init_db first.
     group = await get_group(message.chat.id)
     history = await get_recent_ptis(message.chat.id, limit=5)
     current_unit = group.get("unit_number") if group else None
@@ -449,10 +295,10 @@ async def _run_pti(
     if text is None or data is None or status_msg is None:
         return  # error path; process_mixed_media already edited the status message
 
-    # The result is always shown now: a truck change is resolved from the video
-    # itself, so there is nothing left to hold the driver's verdict for. It goes
-    # out as a *new* reply quoting the video, not as an edit of the progress
-    # message — see deliver_result for why.
+    # Nothing is ever held back waiting on something else to be decided — there
+    # used to be a confirmation vote on a truck change, and there is no longer
+    # even a truck change. The verdict goes out as a *new* reply quoting the
+    # video, not as an edit of the progress message — see deliver_result.
     result_msg = await deliver_result(reply, status_msg, text)
 
     await _handle_pti_result(
@@ -466,7 +312,7 @@ async def _run_pti(
     )
 
 
-# ---------- media buffering (for vehicle detection + /check lookup) ----------
+# ---------- media buffering (so /check can find what it replies to) ----------
 
 @dp.message_handler(content_types=[ContentType.PHOTO], chat_type=GROUP_TYPES)
 async def handle_group_photo(message: types.Message):
