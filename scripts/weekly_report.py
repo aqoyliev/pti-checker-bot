@@ -1,13 +1,15 @@
 """A week of a fleet's inspections, as a PDF you can open on a phone.
 
-    # terminal 1 -- the database is on Railway's private network, so tunnel to it
-    railway link -p jrd-pti -e production -s Postgres
-    railway connect Postgres --tunnel-only -P 15432
-
-    # terminal 2
+    railway link -p jrd-pti -e production
     railway run py -3.11 scripts/weekly_report.py --fleet JRD --out jrd-week.pdf
 
 Needs ``pip install reportlab``; everything else is already a dependency.
+
+The database is on Railway's private network, so this opens its own tunnel
+(``railway connect --tunnel-only``) and closes it again -- the second terminal
+is the step that gets skipped, and skipping it fails with a connection error
+that reads like the database is down. Pass ``--port`` if something already
+listens there and the script will use it rather than starting a second one.
 
 **Why a PDF and not a chat message.** The panel answers "how is the fleet doing
 right now"; this answers "what happened last week", which is the thing that gets
@@ -28,8 +30,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
+import socket
+import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -39,6 +45,48 @@ import asyncpg
 # utils/enforcement.REQUIRED_PER_WEEK -- imported rather than copied would drag
 # the whole config import (and its required env vars) into a reporting script.
 REQUIRED_PER_WEEK = 2
+
+
+def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    with socket.socket() as s:
+        s.settimeout(timeout)
+        return s.connect_ex((host, port)) == 0
+
+
+@contextlib.contextmanager
+def tunnel(args):
+    """Hold open a Railway tunnel to the database for the duration.
+
+    Nothing is started when --dsn names a database directly, or when something
+    already listens on the port -- re-running against a tunnel you opened
+    yourself should use it, not race a second one onto the same port.
+    """
+    if args.dsn or _port_open(args.host, args.port):
+        yield
+        return
+
+    proc = subprocess.Popen(
+        ["railway", "connect", args.service, "--tunnel-only", "-P", str(args.port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + args.tunnel_timeout
+        while not _port_open(args.host, args.port):
+            if proc.poll() is not None:
+                # railway's own message says which of the usual things it is:
+                # no project linked, no SSH key registered, wrong service name.
+                raise SystemExit(
+                    "Could not open the database tunnel.\n"
+                    + (proc.stderr.read() or "").strip())
+            if time.monotonic() > deadline:
+                raise SystemExit(
+                    f"The tunnel did not come up within {args.tunnel_timeout}s. "
+                    "Outbound SSH (port 22) may be blocked on this network.")
+            time.sleep(0.5)
+        yield
+    finally:
+        proc.terminate()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
 
 
 def _conn_kwargs(args) -> dict:
@@ -242,7 +290,14 @@ def _grid(colors):
 
 
 async def run(args) -> None:
-    conn = await asyncpg.connect(**_conn_kwargs(args))
+    try:
+        conn = await asyncpg.connect(**_conn_kwargs(args))
+    except (OSError, asyncpg.PostgresError) as e:
+        # The likeliest cause by far, and a raw traceback here reads as "the
+        # database is down" rather than "nothing is listening on the tunnel".
+        raise SystemExit(
+            f"Could not reach the database at {args.dsn or f'{args.host}:{args.port}'} "
+            f"— {type(e).__name__}: {e}") from e
     try:
         start, end, label = await _window(conn, args)
         data = await collect(conn, start, end)
@@ -266,8 +321,13 @@ def main() -> None:
                     help="timezone the quota week starts in")
     ap.add_argument("--host", default="127.0.0.1", help="tunnel host")
     ap.add_argument("--port", type=int, default=15432, help="tunnel port")
+    ap.add_argument("--service", default="Postgres", help="Railway database service")
+    ap.add_argument("--tunnel-timeout", type=int, default=30,
+                    help="seconds to wait for the tunnel (default 30)")
     ap.add_argument("--dsn", help="full connection string, instead of the tunnel")
-    asyncio.run(run(ap.parse_args()))
+    args = ap.parse_args()
+    with tunnel(args):
+        asyncio.run(run(args))
 
 
 if __name__ == "__main__":
