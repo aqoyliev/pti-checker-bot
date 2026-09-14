@@ -10,18 +10,21 @@ separate login. aiohttp is already a dependency (aiogram runs on it).
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from html import escape
 from pathlib import Path
 
+from aiogram.types import InputFile
 from aiohttp import web
 
 from data.config import WEBAPP_PORT
 from loader import bot
-from utils import userbot
+from utils import userbot, weekly_pdf
 from utils.db import (
     add_admin,
     add_driver,
@@ -37,7 +40,9 @@ from utils.db import (
     get_pti_count_this_week,
     get_recent_ptis,
     get_weekly_pti_stats,
+    get_weekly_report,
     normalize_unit,
+    quota_week_start,
     remove_admin,
     remove_driver,
     set_driver_names,
@@ -576,6 +581,61 @@ async def api_broadcast(request: web.Request) -> web.Response:
     return _json({"ok": True, "sent": sent, "failed": failed})
 
 
+async def api_report(request: web.Request) -> web.Response:
+    """Build the weekly PDF and send it to the admin's own Telegram chat.
+
+    **The panel deliberately does not serve the file.** It runs inside
+    Telegram's in-app browser, where a download has nowhere to land -- on a
+    phone nothing happens at all, which is the complaint this answers. Sending
+    it as a document puts it in a chat, where saving and forwarding already
+    work everywhere. It also means no download URL exists to leak: the file
+    goes to the admin who asked, over a channel Telegram already authenticated.
+    """
+    body = await _body(request)
+    admin_id = request["admin"]["user_id"]
+
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
+    if body.get("quota_week"):
+        start = await quota_week_start()
+        label, slug = "quota week (from Monday)", "week"
+    else:
+        try:
+            days = max(1, min(90, int(body.get("days", 7))))
+        except (TypeError, ValueError):
+            return _err(400, "days must be a number.")
+        start = end - timedelta(days=days)
+        label, slug = f"rolling {days} days", f"{days}d"
+
+    data = await get_weekly_report(start, end)
+    try:
+        me = await bot.get_me()
+        # reportlab is CPU work and this runs in the bot's own loop.
+        pdf = await asyncio.to_thread(
+            weekly_pdf.render, me.full_name, start, end, label, data,
+            REQUIRED_PER_WEEK)
+    except RuntimeError as e:          # reportlab missing
+        return _err(500, str(e))
+
+    # The period is in the name: pulling 7-day and 30-day reports on one day
+    # otherwise puts two different documents under one filename in the chat.
+    name = f"pti-report-{slug}-{end:%Y-%m-%d}.pdf"
+    try:
+        await bot.send_document(
+            admin_id, InputFile(io.BytesIO(pdf), filename=name),
+            caption=f"📄 {label}, {start:%b %d} – {end:%b %d}")
+    except Exception:
+        logging.exception("web panel: could not send the report to %s", admin_id)
+        # Almost always the one cause: the admin has never opened a chat with
+        # the bot, so it may not open one with them.
+        return _err(502, "Couldn't send the PDF. Open a chat with the bot "
+                         "(press Start) and try again.")
+
+    logging.info("web panel: admin %s pulled the %s report (%s inspections)",
+                 admin_id, label, sum(u["ptis"] for u in data["units"]))
+    return _json({"ok": True, "filename": name,
+                  "inspections": sum(u["ptis"] for u in data["units"])})
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", index)
@@ -599,6 +659,7 @@ def build_app() -> web.Application:
     app.router.add_post("/api/admins", api_admins_add)
     app.router.add_delete("/api/admins/{uid}", api_admins_remove)
     app.router.add_post("/api/broadcast", api_broadcast)
+    app.router.add_post("/api/report", api_report)
     return app
 
 

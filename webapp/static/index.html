@@ -148,6 +148,7 @@ let me = null;
 let groupsCache = null;
 let groupSort = null;                         // null = server default order
 let groupFilter = null;                       // null = every group
+let reportPeriod = "7";                       // weekly PDF window: 7 | 30 | week
 let current = { tab: "groups", gid: null };   // gid set = group detail open
 
 // ---------- helpers ----------
@@ -678,6 +679,18 @@ async function renderStats() {
         s.drivers_compliant + '/' + s.drivers_total + '</div><div class="hint">compliant (quota ' +
         s.required_per_week + '/week)</div></div>' +
     '</div>' +
+    // Telegram's in-app browser has nowhere to put a downloaded file, so the
+    // panel never offers one -- the bot sends the PDF to the admin's own chat,
+    // where saving and forwarding work on every phone. Say so on the button,
+    // or the file looks like it went nowhere.
+    '<div class="card" style="margin-top:10px"><b>📄 Weekly report</b>' +
+      '<div class="hint" style="margin:4px 0 8px">Sent to you as a PDF in Telegram.</div>' +
+      '<div class="sortbar"><span class="hint" style="font-size:12px">Period</span>' +
+        [["7", "7 days"], ["30", "30 days"], ["week", "This week"]].map(p =>
+          '<span class="chip mut' + (p[0] === reportPeriod ? " on" : "") +
+          '" data-period="' + p[0] + '">' + p[1] + '</span>').join("") + '</div>' +
+      '<button class="btn" id="repSend">Send PDF</button>' +
+      '<div class="hint" id="repResult" style="margin-top:6px"></div></div>' +
     '<div class="card" style="margin-top:10px"><b>Non-compliant drivers</b>' +
       (s.non_compliant.length
         ? s.non_compliant.map(n =>
@@ -689,6 +702,33 @@ async function renderStats() {
     '</div>';
   view.querySelectorAll(".item[data-gid]").forEach(el =>
     el.onclick = () => { current = { tab: "groups", gid: Number(el.dataset.gid) }; render(); });
+
+  view.querySelectorAll(".chip[data-period]").forEach(c => c.onclick = () => {
+    reportPeriod = c.dataset.period;
+    view.querySelectorAll(".chip[data-period]").forEach(x =>
+      x.classList.toggle("on", x.dataset.period === reportPeriod));
+  });
+
+  document.getElementById("repSend").onclick = async () => {
+    const btn = document.getElementById("repSend");
+    const out = document.getElementById("repResult");
+    btn.disabled = true;
+    btn.textContent = "Building…";          // 150 units takes a moment
+    out.textContent = "";
+    const body = reportPeriod === "week"
+      ? { quota_week: true } : { days: Number(reportPeriod) };
+    try {
+      const r = await api("/api/report", { method: "POST", body: body });
+      out.textContent = "✅ Sent to your Telegram chat — " + r.inspections +
+                        " inspection(s). Check your chat with the bot.";
+      toast("PDF sent to your chat");
+    } catch (e) {
+      out.textContent = "⚠️ " + e.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send PDF";
+    }
+  };
 }
 
 // ---------- tools (model + broadcast) ----------

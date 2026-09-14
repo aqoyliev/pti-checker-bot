@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import asyncpg
 from data.config import DATABASE_URL, FLEET_TZ
@@ -936,6 +937,75 @@ async def get_weekly_pti_stats() -> dict[tuple[int, int], dict]:
     return {
         (r["group_id"], r["user_id"]): {"week_count": r["week_count"], "last_at": r["last_at"]}
         for r in rows
+    }
+
+
+async def quota_week_start() -> datetime:
+    """Midnight Monday of the current quota week, in UTC.
+
+    Asked of Postgres rather than computed here so the boundary is the same one
+    get_weekly_pti_stats counts against -- two opinions about where the week
+    starts is how a report and the panel come to disagree.
+    """
+    return await _pool_check().fetchval(
+        "SELECT (date_trunc('week', NOW() AT TIME ZONE $1) AT TIME ZONE $1) "
+        "AT TIME ZONE 'UTC'", FLEET_TZ)
+
+
+# The three shapes the weekly report is made of. Module-level so a script
+# holding its own connection runs the same SQL the bot does; the report is read
+# by people who will compare it against the panel, and two copies of a query
+# drift.
+_REPORT_UNITS = """
+    SELECT g.group_id, g.unit_number, g.title,
+           COUNT(p.id)                                 AS ptis,
+           COUNT(p.id) FILTER (WHERE p.passed)         AS passed,
+           COUNT(p.id) FILTER (WHERE p.passed = FALSE) AS failed,
+           MAX(p.submitted_at)                         AS last_at
+    FROM groups g
+    LEFT JOIN pti_log p
+      ON p.group_id = g.group_id
+     AND p.submitted_at >= $1 AND p.submitted_at < $2
+    WHERE COALESCE(g.is_active, TRUE) AND g.setup_complete
+    GROUP BY g.group_id, g.unit_number, g.title
+    ORDER BY g.unit_number NULLS LAST"""
+
+_REPORT_DRIVERS = """
+    SELECT d.group_id, d.user_id, d.name, g.unit_number,
+           COUNT(p.id) AS ptis
+    FROM group_drivers d
+    JOIN groups g ON g.group_id = d.group_id
+    LEFT JOIN pti_log p
+      ON p.group_id = d.group_id AND p.user_id = d.user_id
+     AND p.submitted_at >= $1 AND p.submitted_at < $2
+    WHERE COALESCE(g.is_active, TRUE) AND g.setup_complete
+    GROUP BY d.group_id, d.user_id, d.name, g.unit_number
+    ORDER BY COUNT(p.id), g.unit_number NULLS LAST"""
+
+# Severity is only meaningful on a failure, and an older row can carry NULL.
+_REPORT_SEVERITY = """
+    SELECT COALESCE(severity, 'unspecified') AS severity, COUNT(*) AS n
+    FROM pti_log
+    WHERE submitted_at >= $1 AND submitted_at < $2 AND passed = FALSE
+    GROUP BY 1 ORDER BY 2 DESC"""
+
+
+async def get_weekly_report(start: datetime, end: datetime, *, conn=None) -> dict:
+    """Everything the weekly PDF prints, for [start, end) in UTC.
+
+    Retired and un-onboarded groups are left out of both counts: a group with no
+    unit has no truck to report on, and a retired one would show as silent every
+    week forever.
+
+    ``conn`` lets a local script pass its own connection -- scripts/weekly_report.py
+    reaches the database through a tunnel and must not open the bot's pool (which
+    runs the schema migrations on the way up).
+    """
+    ex = conn or _pool_check()
+    return {
+        "units": await ex.fetch(_REPORT_UNITS, start, end),
+        "drivers": await ex.fetch(_REPORT_DRIVERS, start, end),
+        "severities": await ex.fetch(_REPORT_SEVERITY, start, end),
     }
 
 
