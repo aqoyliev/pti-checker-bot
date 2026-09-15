@@ -770,9 +770,12 @@ async function renderTools() {
   document.getElementById("repDriver").onclick = e => downloadReport("driver", e.currentTarget);
 }
 
-// Downloads a binary file behind the same "tma" auth as api() — a plain
-// <a href> can't carry that header, so the bytes come in via fetch and go
-// out again as a blob URL.
+// A fetch+blob+<a download> click used to do this, which works on desktop but
+// not on a phone: that click lands inside the sandboxed WebView the Mini App
+// itself runs in, which has nowhere to save a file. tg.openLink() hands the
+// URL to Telegram's own in-app browser instead -- a real one, with a working
+// download flow -- so this mints a one-time token (the plain navigation can't
+// carry the "tma" auth header) and opens the PDF's URL directly.
 async function downloadReport(which, btn) {
   const status = document.getElementById("repStatus");
   const orig = btn.textContent;
@@ -781,24 +784,12 @@ async function downloadReport(which, btn) {
     const since = document.getElementById("repSince").value;
     const until = document.getElementById("repUntil").value;
     if (!since || !until) throw new Error("Pick a start and end date.");
-    const qs = "since=" + since + "&until=" + until;
-    const res = await fetch("/api/reports/" + which + ".pdf?" + qs, {
-      headers: { "Authorization": "tma " + (tg ? tg.initData : "") },
-    });
-    if (!res.ok) {
-      let msg = "HTTP " + res.status;
-      try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
-      throw new Error(msg);
-    }
-    const blob = await res.blob();
-    const match = (res.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
-    const fname = match ? match[1] : which + ".pdf";
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = fname;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    toast("Downloaded " + fname);
+    const { token } = await api("/api/reports/token", { method: "POST" });
+    const qs = "since=" + since + "&until=" + until + "&token=" + token;
+    const url = location.origin + "/api/reports/" + which + ".pdf?" + qs;
+    if (tg && tg.openLink) tg.openLink(url);
+    else window.open(url, "_blank");
+    toast("Opening the report…");
   } catch (e) { status.textContent = "⚠️ " + e.message; }
   btn.disabled = false; btn.textContent = orig;
 }

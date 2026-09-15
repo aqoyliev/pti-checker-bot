@@ -5,13 +5,17 @@ everything an admin can do, as JSON under ``/api/*`` plus the single-page UI
 at ``/``. Every API request must carry the Mini App's signed ``initData`` in an
 ``Authorization: tma <initData>`` header; webapp/auth.py validates the
 signature and utils/admins.py resolves the user to an admin, so there is no
-separate login. aiohttp is already a dependency (aiogram runs on it).
+separate login. The one exception is the report PDFs, which are opened with a
+plain navigation instead of a header-carrying fetch -- see the one-time
+download tokens below ``_report_pdf``. aiohttp is already a dependency
+(aiogram runs on it).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import secrets
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -207,19 +211,28 @@ async def auth_middleware(request: web.Request, handler):
     if not request.path.startswith("/api/"):
         return await handler(request)
 
-    auth = request.headers.get("Authorization", "")
-    scheme, _, init_data = auth.partition(" ")
-    if scheme.lower() != "tma":
-        return _err(401, "Open this panel from Telegram.")
-    data = parse_init_data(init_data.strip())
-    if data is None:
-        return _err(401, "Session invalid or expired — reopen the panel from Telegram.")
-    user = extract_user(data)
-    if user is None:
-        return _err(401, "No user in session data.")
-    admin = await resolve_admin(user["id"])
-    if admin is None:
-        return _err(403, "Not authorized.")
+    # The report PDFs are opened with a plain navigation (see
+    # _download_tokens below), which can't carry the Authorization header --
+    # a one-time token in the query string stands in for it there instead.
+    token = request.query.get("token") if request.path.startswith("/api/reports/") else None
+    if token:
+        admin = _consume_download_token(token)
+        if admin is None:
+            return _err(401, "Link expired — generate the report again.")
+    else:
+        auth = request.headers.get("Authorization", "")
+        scheme, _, init_data = auth.partition(" ")
+        if scheme.lower() != "tma":
+            return _err(401, "Open this panel from Telegram.")
+        data = parse_init_data(init_data.strip())
+        if data is None:
+            return _err(401, "Session invalid or expired — reopen the panel from Telegram.")
+        user = extract_user(data)
+        if user is None:
+            return _err(401, "No user in session data.")
+        admin = await resolve_admin(user["id"])
+        if admin is None:
+            return _err(403, "Not authorized.")
 
     request["admin"] = admin
     try:
@@ -625,6 +638,42 @@ def _slug(name: str) -> str:
 _render_lock = asyncio.Semaphore(1)
 
 
+# ---------- one-time download tokens ----------
+# The report buttons used to fetch the PDF as a blob and trigger the save with
+# a synthetic <a download> click -- reliable on desktop, but on a phone that
+# click lands inside the sandboxed WebView the Mini App itself runs in, which
+# has nowhere to put a downloaded file. `tg.openLink()` hands the URL to
+# Telegram's own in-app browser instead, a real one with a working download
+# flow -- but that is a plain navigation with no custom header, so the
+# Authorization header can't ride along. This token stands in for it on that
+# one GET: minted from an already-authenticated call, single-use, and expiring
+# almost immediately, so it is not the standing credential initData is.
+_DOWNLOAD_TOKEN_TTL = 120
+_download_tokens: dict[str, tuple[float, dict]] = {}
+
+
+def _mint_download_token(admin: dict) -> str:
+    now = time.monotonic()
+    for k, (expires, _) in list(_download_tokens.items()):
+        if now > expires:
+            del _download_tokens[k]
+    token = secrets.token_urlsafe(24)
+    _download_tokens[token] = (now + _DOWNLOAD_TOKEN_TTL, admin)
+    return token
+
+
+def _consume_download_token(token: str) -> dict | None:
+    entry = _download_tokens.pop(token, None)
+    if entry is None:
+        return None
+    expires, admin = entry
+    return admin if time.monotonic() <= expires else None
+
+
+async def api_report_token(request: web.Request) -> web.Response:
+    return _json({"token": _mint_download_token(request["admin"])})
+
+
 async def _report_pdf(which: str, since_s: str, until_s: str) -> tuple[bytes, str]:
     tz = _TZ
     since = date.fromisoformat(since_s)
@@ -714,6 +763,7 @@ def build_app() -> web.Application:
     app.router.add_post("/api/admins", api_admins_add)
     app.router.add_delete("/api/admins/{uid}", api_admins_remove)
     app.router.add_post("/api/broadcast", api_broadcast)
+    app.router.add_post("/api/reports/token", api_report_token)
     app.router.add_get("/api/reports/{which}.pdf", api_report_pdf)
     return app
 
