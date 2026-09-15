@@ -614,6 +614,37 @@ already sitting in the chat, its join long since missed. It used to be a
 hardcoded pair in `pti.py` belonging to one fleet; this repo serves several, so
 nothing fleet-specific may be hardcoded.
 
+### One inspection at a time, and never two of the same video
+
+Two `/check` replies to one video used to start two full inspections, and the
+recycled-video dedup structurally could not stop it: that reads `pti_log`, and
+the row is only written once an inspection *finishes*, so through the minutes
+in between the second command looked exactly like the first. Both ran, both
+logged, and one walkaround was counted as two PTIs — which is how drivers who
+send one video a day showed up on the fleet report with six submissions.
+
+`utils/pti_gate` holds the window the database cannot, in memory, and the two
+halves do different jobs:
+
+- **`claim`** reserves the submission's media signatures before a single frame
+  is extracted, and refuses a second claim on any of them — the driver is told
+  the video is already being inspected, and nothing runs twice. It is
+  **synchronous on purpose**: an `await` between asking and reserving is the
+  race it exists to close, and the two commands that cause this arrive
+  milliseconds apart. Don't make it a coroutine.
+- **`group_lock`** then lets one inspection run at a time per group; the rest
+  wait their turn. A queued submission therefore starts only after the one
+  ahead of it has logged its row, which is what lets the ordinary dedup finally
+  see a video that was still in flight when it was first asked about. Taking
+  turns is also the cheaper order — two clips of one walkaround stop competing
+  for the same frames budget and the same Gemini quota.
+
+One process per fleet, so a module-level dict is the whole of the state, and
+nothing survives a restart — which is right: neither does an inspection that
+was in flight. The locks dict is never pruned (one small object per group seen
+since boot); dropping a lock somebody is still queued on would strand them on
+an object no new caller can find. `tests/test_pti_gate.py` pins both halves.
+
 ## A PTI never decides what vehicle it was filmed on
 
 **Removed 2026-09-13, at the fleet's instruction.** Reading the truck's unit
@@ -798,7 +829,54 @@ explanation.
 - An unreadable `result_json` scores 0 with every area counted missing, because
   a submission the pipeline could not read is not evidence of a walkaround.
 
-CSVs of the same numbers land beside the PDFs, unrounded.
+CSVs of the same numbers land beside the PDFs, unrounded — and they keep both
+counts the sheets no longer print side by side: how many inspections, and how
+many clips those inspections arrived in.
+
+### An inspection is a walkaround, not an upload
+
+Some drivers film the PTI in two or three passes and post the clips one after
+another. Scored one at a time each clip covers a third of the truck, so every
+one of them lands as a Partial and not one clears the real-PTI bar — while
+between them the driver filmed everything. That is backwards: they did the
+walkaround, just not in one take. So `sessions_from` groups a driver's clips in
+one group into a **session** while each is within `SESSION_GAP_MINUTES` (30) of
+the one before it, and `report_scoring.merge_session` scores the union:
+
+- an area is unfilmed only when **no** clip showed it (the intersection of the
+  clips' missing lists);
+- the extinguisher counts as shown if **any** clip showed it;
+- a sub-item counts as not visible only when **every** clip said so — a clip
+  that never pointed at the trailer is no evidence about its tape;
+- and PASS follows the coverage, since the bot's own rule is "was every
+  required area filmed".
+
+Two rules that are easy to undo:
+
+- **A session of one is that submission untouched.** `merge_session` returns
+  the very same `Score` object. Nearly every driver sends a single video, and
+  the published per-driver numbers must not move because the report learned to
+  read the ones who don't.
+- **The gap rolls, clip to clip — it is not a fixed bucket.** A walkaround
+  filmed over twenty minutes holds together; a genuine second PTI that
+  afternoon stays a second PTI. Widening it to "same day" would quietly
+  collapse a team driver's two walkarounds into one.
+
+A merged row says so on its own line ("3 clips, scored together"): a number
+that came from three clips must not look like one that came from a single take.
+The session also absorbs the other way one walkaround used to count twice — a
+`/check` run again on a video already inspected. That is refused up front now
+(`utils/pti_gate`), but the rows it already wrote are in the database and every
+report over a past window still reads them. `tests/test_session_merge.py` pins
+the arithmetic and the grouping.
+
+**The driver table prints one count, not two.** `Sub` was every submission and
+`Real` the ones that were a walkaround; with clips merged the two ran within a
+hair of each other, and a pair of near-identical columns invites the question
+of what the difference is rather than answering it. What is printed is the real
+ones, headed **`Subs`** — the legend says so, the CSV has both. The same word
+means the same thing on the driver report's index and cards; don't let "subs"
+mean sessions in one place and real PTIs in another.
 
 ### How the two sheets are laid out
 
@@ -808,6 +886,14 @@ portrait) and the charts are emitted at exactly the width they occupy —
 `viewBox`, `width` and `height` all agreeing. An SVG stretched to fit a
 flexible column rescales its own labels, which is how chart text ends up
 smaller than everything around it.
+
+**Inspections per day is one bar.** It used to be two, the second counting the
+distinct units behind the day's submissions — dropped 2026-09-15 at the
+fleet's instruction, because the sheet is read as "how much came in today" and
+a second bar three quarters the height of the first invites the question of
+what the difference means rather than answering it. One series also gets the
+width the pair shared, so the bars and their value labels survive a window
+about twice as long as before.
 
 - **The document carries its own typeface.** `scripts/report_fonts/` holds
   Inter (SIL OFL, licence beside the files) and `font_css()` base64s it into
@@ -825,7 +911,12 @@ smaller than everything around it.
   exactly the printable height; `STATS_ROWS` is what is left for the two
   bottom tables once everything above them is paid for. Raise the chart, the
   type scale or the legend and rows have to come off the bottom to match, or
-  the legend silently lands alone on a second page.
+  the legend silently lands alone on a second page. **The legend is four
+  columns, and a fifth is not free**: `flex:1` narrows all four, every one of
+  them wraps onto a fourth line, and the sheet goes to two pages — which is
+  exactly what a fifth entry for the session rule did before it was folded
+  into the one that defines the `Subs` column. The driver report's intro, which
+  has the room, carries the long version.
 - **The driver report paginates itself.** Each index block is sized *under* a
   page and forced to break after it, because how many rows fit depends on how
   many names wrap to a second line — a block sized to the page exactly spills

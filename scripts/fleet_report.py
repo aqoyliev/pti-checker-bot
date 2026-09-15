@@ -106,8 +106,63 @@ async def fetch(dsn: str, since_utc: datetime, until_utc: datetime) -> dict:
 
 # ------------------------------------------------------------- aggregating
 
+SESSION_GAP = timedelta(minutes=report_scoring.SESSION_GAP_MINUTES)
+
+
+def sessions_from(submissions: list[dict]) -> list[dict]:
+    """Collapse each driver's back-to-back clips into the walkaround they are.
+
+    A driver who films the PTI in three passes and posts the three clips one
+    after another has done **one** walkaround. Counted one clip at a time the
+    report read that as three inspections, each covering a third of the truck
+    and none of them a real PTI -- which is precisely backwards: the driver
+    did the walkaround, just not in one take.
+
+    So clips from the same driver in the same group are one session while each
+    is within SESSION_GAP of the one before it -- a rolling gap, not a fixed
+    bucket, so a walkaround filmed over twenty minutes holds together while a
+    genuine second PTI that afternoon stays a second PTI. `merge_session`
+    scores the union; see its docstring for what "union" means area by area.
+
+    It absorbs the other way one walkaround used to count twice, too: a
+    `/check` run again on a video already inspected. That is now refused
+    up front (`utils/pti_gate`), but the rows it already wrote are in the
+    database and every report over a past window still reads them.
+    """
+    runs: dict[tuple[int, int], list[list[dict]]] = defaultdict(list)
+    for sub_row in sorted(submissions, key=lambda s: s["at"]):
+        bucket = runs[(sub_row["group_id"], sub_row["user_id"])]
+        if bucket and sub_row["at"] - bucket[-1][-1]["at"] <= SESSION_GAP:
+            bucket[-1].append(sub_row)
+        else:
+            bucket.append([sub_row])
+
+    out = []
+    for driver_runs in runs.values():
+        for clips in driver_runs:
+            merged = report_scoring.merge_session([c["score"] for c in clips])
+            first = clips[0]
+            out.append({
+                **first,
+                "score": merged,
+                "clips": len(clips),
+                # The bot FAILs an inspection iff a required area was never
+                # filmed, so `or not merged.missing` changes nothing for a
+                # session of one clip -- and passes the session that filmed
+                # everything between its clips, which no single clip did.
+                "passed": any(c["passed"] for c in clips) or not merged.missing,
+            })
+    out.sort(key=lambda s: s["at"])
+    return out
+
+
 def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
-    """Turn raw rows into everything both reports print."""
+    """Turn raw rows into everything both reports print.
+
+    "Inspection" here means a *session* -- one driver's walkaround, however
+    many clips they filmed it in (see `sessions_from`). The raw `pti_log` rows
+    are submissions, and each session says how many of them it merged.
+    """
     groups = {g["group_id"]: g for g in data["groups"]}
     drivers_by_group = defaultdict(list)
     driver_name = {}
@@ -120,7 +175,7 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
             ts = ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(tz).date()
 
-    inspections = []
+    submissions = []
     for row in data["window"]:
         gid = row["group_id"]
         g = groups.get(gid, {})
@@ -133,7 +188,11 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
         if not g.get("is_active", True):
             continue
         s = score_inspection(row["result_json"])
-        inspections.append({
+        at = row["submitted_at"]
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        submissions.append({
+            "at": at,
             "day": local_day(row["submitted_at"]),
             "group_id": gid,
             "user_id": row["user_id"],
@@ -143,6 +202,10 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
             "passed": bool(row["passed"]),
             "score": s,
         })
+
+    # One walkaround is one inspection, whether it arrived as one clip or
+    # three. Everything below counts sessions; nothing else reads the raw rows.
+    inspections = sessions_from(submissions)
 
     # --- per-driver rollup, ranked the way the fleet reads it: real PTIs first
     per_driver = defaultdict(list)
@@ -157,7 +220,8 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
             "key": key,
             "name": items[0]["name"],
             "unit": items[0]["unit"],
-            "submissions": len(items),
+            "inspections": len(items),
+            "clips": sum(i["clips"] for i in items),
             "real": len(real),
             "passed": sum(1 for i in items if i["passed"]),
             "avg": round(sum(scores) / len(scores)) if scores else 0,
@@ -175,7 +239,8 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
         driver_rows.append({
             "key": (gid, uid), "name": name,
             "unit": g.get("unit_number") or "no unit no.",
-            "submissions": 0, "real": 0, "passed": 0, "avg": 0, "best": 0,
+            "inspections": 0, "clips": 0, "real": 0, "passed": 0,
+            "avg": 0, "best": 0,
             "items": [],
         })
     driver_rows.sort(key=lambda r: (-r["real"], -r["passed"], -r["avg"], r["name"]))
@@ -206,12 +271,10 @@ def build(data: dict, tz: ZoneInfo, since: date, until: date) -> dict:
     by_day = defaultdict(list)
     for i in inspections:
         by_day[i["day"]].append(i)
-    daily = [{
-        "day": d,
-        "n": len(by_day.get(d, [])),
-        "units": len({i["group_id"] for i in by_day.get(d, [])}),
-        "real": sum(1 for i in by_day.get(d, []) if i["score"].is_real),
-    } for d in days]
+    # One number a day: how many inspections were filed. The chart used to carry
+    # a second bar for the distinct units behind them, and a `real` count
+    # nothing ever read.
+    daily = [{"day": d, "n": len(by_day.get(d, []))} for d in days]
 
     klass_mix = defaultdict(int)
     for i in inspections:
@@ -307,7 +370,7 @@ CSS = """
   --rule:#e5e9ef; --rule-2:#ccd4de; --panel:#f7f9fb;
   --brand:#15304e; --brand-ink:#ffffff; --brand-sub:#9fb7d0;
   --g:#12684a; --o:#4f9a6f; --w:#b3800f; --r:#a8434a;
-  --bar:#1c6b4c; --bar-2:#a8ccb8; --bar-0:#e2e7ec;
+  --bar:#1c6b4c; --bar-0:#e2e7ec;
 }
 *{box-sizing:border-box;}
 html,body{background:#fff;}
@@ -437,8 +500,7 @@ tr.dim td.u{color:var(--faint);font-weight:400;}
 .wknd{fill:#f4f6f9;}
 .grid{stroke:#edf1f5;stroke-width:1;}
 .axis{stroke:#ccd4de;stroke-width:1;}
-.b-sub{fill:var(--bar);} .b-unit{fill:var(--bar-2);}
-.b-sub.zero,.b-unit.zero{fill:var(--bar-0);}
+.b-sub{fill:var(--bar);} .b-sub.zero{fill:var(--bar-0);}
 .vlab{font-size:9px;font-weight:600;fill:#4b5563;text-anchor:middle;}
 .vlab.q{fill:#9aa3b1;}
 .xlab{font-size:9.4px;font-weight:600;fill:#3a434f;text-anchor:middle;}
@@ -585,7 +647,14 @@ def panel(title, note, body, cls="") -> str:
 # ---------------------------------------------------------------- charting
 
 def day_chart(daily, *, width=DAY_CHART_W, height=170) -> str:
-    """Two bars a day: every submission, and the distinct trucks behind them.
+    """One bar a day: the inspections filed on it.
+
+    It used to be two, the second counting the distinct units behind those
+    submissions -- dropped because the fleet reads this as "how much came in
+    today", and a second bar three quarters the height of the first invites
+    the question of what the difference means rather than answering it. A
+    single series also gets the width the pair had to share, so the bars and
+    their value labels survive a longer window.
 
     The SVG is emitted at exactly the size it occupies -- viewBox, width and
     height all agree -- so a font-size in here is the font-size on the page.
@@ -599,15 +668,16 @@ def day_chart(daily, *, width=DAY_CHART_W, height=170) -> str:
     top = max([d["n"] for d in daily] or [0]) or 1
     base = pad_t + plot_h
 
-    gap = 2.4 if slot >= 26 else 1.0
-    bw = max(1.6, min((slot * 0.7 - gap) / 2, 19))
-    show_vals = slot >= 27
+    bw = max(1.8, min(slot * 0.58, 26))
+    # One label a day instead of two side by side, so it stays legible on a
+    # window roughly twice as long as before.
+    show_vals = slot >= 15
     every = 1 if slot >= 24 else max(1, round(26 / max(slot, 1)))
     weekdays = slot >= 22
 
     p = [f'<svg class="chart" width="{width}" height="{height}" '
-         f'viewBox="0 0 {width} {height}" role="img" aria-label="'
-         f'Submissions and distinct units per day">']
+         f'viewBox="0 0 {width} {height}" role="img" '
+         f'aria-label="Inspections per day">']
 
     for i, d in enumerate(daily):                       # weekends, behind all
         if d["day"].weekday() >= 5:
@@ -622,19 +692,17 @@ def day_chart(daily, *, width=DAY_CHART_W, height=170) -> str:
 
     for i, d in enumerate(daily):
         cx = pad_x + slot * (i + 0.5)
-        for off, key, cls in ((-bw - gap / 2, "n", "b-sub"),
-                              (gap / 2, "units", "b-unit")):
-            v, x = d[key], cx + off
-            h = plot_h * v / top
-            y = base - h if v else base - 1.4
-            zero = "" if v else " zero"
-            p.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" '
-                     f'height="{max(h, 1.4):.1f}" rx="1.5" class="{cls}{zero}"/>')
-            if show_vals and v:
-                p.append(f'<text x="{x + bw / 2:.1f}" y="{y - 3.6:.1f}" '
-                         f'class="vlab">{v}</text>')
-        if show_vals and not d["n"]:
-            p.append(f'<text x="{cx:.1f}" y="{base - 5:.1f}" class="vlab q">0</text>')
+        v = d["n"]
+        h = plot_h * v / top
+        # A day with nothing still draws a stub, so the axis reads as a row of
+        # days rather than as a gap in the chart.
+        y = base - h if v else base - 1.4
+        p.append(f'<rect x="{cx - bw / 2:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                 f'height="{max(h, 1.4):.1f}" rx="1.5" '
+                 f'class="b-sub{"" if v else " zero"}"/>')
+        if show_vals:
+            p.append(f'<text x="{cx:.1f}" y="{y - 3.6:.1f}" '
+                     f'class="vlab{"" if v else " q"}">{v}</text>')
         if i % every == 0 or i == n - 1:
             p.append(f'<text x="{cx:.1f}" y="{height - (14 if weekdays else 9):.1f}" '
                      f'class="xlab">{d["day"].day:02d}</text>')
@@ -695,7 +763,7 @@ def stats_html(agg, meta):
     real_d = "at most two areas unfilmed"
     pass_d = "every required area filmed"
     if n:
-        real_d = f'{pctf(t["real"], n)} of submissions — {real_d}'
+        real_d = f'{pctf(t["real"], n)} of inspections — {real_d}'
         pass_d = f'{pctf(t["passed"], n)} — {pass_d}'
     cards = [
         ("Inspections", str(n), "",
@@ -712,13 +780,12 @@ def stats_html(agg, meta):
         for k, v, extra, d in cards
     )
 
-    chart_note = ('<span class="sw" style="background:var(--bar)"></span> '
-                  'submissions <span class="sw" style="background:var(--bar-2)">'
-                  '</span> distinct units')
-    chart_panel = panel("Inspections per day", chart_note,
+    per_day = round(t["inspections"] / max(len(agg["daily"]), 1))
+    chart_note = f'{per_day} a day on average · weekends shaded'
+    chart_panel = panel("Inspections per day", html.escape(chart_note),
                         day_chart(agg["daily"], height=DAY_CHART_H), "p-day")
 
-    mix_note = f'{t["inspections"]} submissions scored'
+    mix_note = f'{t["inspections"]} inspections scored'
     mix_panel = panel("How complete they were", html.escape(mix_note),
                       quality_block(agg["klass_mix"], t["inspections"]), "p-mix")
 
@@ -754,12 +821,11 @@ def stats_html(agg, meta):
                          f'<div class="cols">{silent_body}</div>', "p-silent")
 
     # --- who did submit
-    submitters = [r for r in agg["driver_rows"] if r["submissions"]]
+    submitters = [r for r in agg["driver_rows"] if r["inspections"]]
     top = submitters[:STATS_ROWS]
     trows = "".join(
         f'<tr><td class="u">{html.escape(r["name"][:28])}</td>'
         f'<td class="nw">{html.escape(str(r["unit"]))}</td>'
-        f'<td class="n">{r["submissions"]}</td>'
         f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
         f'<td class="n">{pct_cell(r["avg"])}</td></tr>'
         for r in top
@@ -767,10 +833,15 @@ def stats_html(agg, meta):
     rest = len(submitters) - len(top)
     drv_note = (f'top {len(top)} of {len(submitters)} · the rest in the driver report'
                 if rest > 0 else 'full detail in the driver report')
+    # One count, not two. `Sub` was every submission and `Real` the ones that
+    # were a walkaround; with back-to-back clips now merged into one session
+    # the two ran within a hair of each other, and the pair invited the
+    # question of what the difference was rather than answering it. `Subs` is
+    # the real ones -- the legend says so, and the raw counts are in the CSV.
     drv_body = (
-        '<table>' + colgroup(None, 66, 30, 34, 36, 76)
-        + '<thead><tr><th>Driver</th><th>Unit</th><th class="n">Sub</th>'
-          '<th class="n">Real</th><th class="n">Pass</th>'
+        '<table>' + colgroup(None, 70, 38, 40, 78)
+        + '<thead><tr><th>Driver</th><th>Unit</th>'
+          '<th class="n">Subs</th><th class="n">Pass</th>'
           '<th class="b">Avg</th></tr></thead>'
         f'<tbody>{trows}</tbody></table>'
     ) if top else '<p class="d">Nobody submitted an inspection in this window.</p>'
@@ -780,9 +851,11 @@ def stats_html(agg, meta):
     last_day = fmt_day(meta["until"] - timedelta(days=1))
     legend = (
         '<div class="legend">'
-        '<div><span class="lt">Real PTI</span>Read off the area coverage the '
-        'inspection recorded, not its verdict — coverage is the one thing an '
-        'unrelated clip cannot fake.</div>'
+        f'<div><span class="lt">Real PTI</span>What the <em>Subs</em> column '
+        f'counts, read off the area coverage recorded rather than the verdict. '
+        f'Clips from one driver under {report_scoring.SESSION_GAP_MINUTES} min '
+        f'apart score as one walkaround, so a PTI filmed in three passes '
+        f'counts once.</div>'
         '<div><span class="lt">Pass is stricter</span>Every required area filmed. '
         'The extinguisher is scored but never fails one, so filming all else '
         'scores 95% and passes.</div>'
@@ -813,17 +886,17 @@ def driver_html(agg, meta):
     idx = []
     for i, r in enumerate(rows, 1):
         anchor = f'd{r["key"][0]}_{r["key"][1]}'
-        dim = "" if r["submissions"] else ' class="dim"'
-        avg = pct_cell(r["avg"]) if r["submissions"] else "—"
+        dim = "" if r["inspections"] else ' class="dim"'
+        avg = pct_cell(r["avg"]) if r["inspections"] else "—"
         idx.append(
             f'<tr{dim}><td class="n">{i}</td>'
             f'<td class="u"><a href="#{anchor}">{html.escape(r["name"][:26])}</a></td>'
             f'<td class="nw">{html.escape(str(r["unit"]))}</td>'
             f'<td class="n">{r["real"]}</td><td class="n">{r["passed"]}</td>'
             f'<td class="n">{avg}</td></tr>')
-    head = (colgroup(26, None, 52, 30, 32, 72)
+    head = (colgroup(26, None, 52, 34, 32, 72)
             + '<thead><tr><th class="n">#</th><th>Driver</th><th>Unit</th>'
-              '<th class="n">Real</th><th class="n">Pass</th>'
+              '<th class="n">Subs</th><th class="n">Pass</th>'
               '<th class="b">Avg</th></tr></thead>')
     # One block per page, forced. How many rows actually fit depends on how
     # many names wrap to a second line, so a block sized to the page exactly
@@ -871,6 +944,9 @@ def driver_html(agg, meta):
             s = it["score"]
             chips = "".join(f'<span class="chip hot">{html.escape(a)}</span>'
                             for a in s.missing)
+            if it["clips"] > 1:
+                chips = (f'<span class="chip">{it["clips"]} clips, '
+                         f'scored together</span>') + chips
             notes = []
             if not s.fire_extinguisher:
                 notes.append("extinguisher not shown")
@@ -888,9 +964,11 @@ def driver_html(agg, meta):
                 f'<td class="n">{s.filmed}/{s.required}</td>'
                 f'<td>{verdict}</td>'
                 f'<td>{chips}{" " if chips and note else ""}{note}</td></tr>')
-        stats = (f'<em>{r["submissions"]}</em> subs<span><em>{r["real"]}</em> real'
-                 f'</span><span><em>{r["passed"]}</em> passed</span>'
-                 f'<span><em>{r["avg"]}%</em> avg{sbar(r["avg"])}</span>'
+        # "subs" is the real ones here too, as in the column -- the same word
+        # must not mean two things across the two sheets. How many sessions
+        # there were in total is the row count of the table right below it.
+        stats = (f'<em>{r["real"]}</em> subs<span><em>{r["passed"]}</em> passed'
+                 f'</span><span><em>{r["avg"]}%</em> avg{sbar(r["avg"])}</span>'
                  f'<span><em>{r["best"]}%</em> best</span>')
         sections.append(
             f'<section class="drv" id="{anchor}"><div class="dh">'
@@ -903,7 +981,7 @@ def driver_html(agg, meta):
               '<th>Areas not filmed</th></tr></thead>'
             f'<tbody>{"".join(lines)}</tbody></table></section>')
 
-    silent_drivers = sum(1 for r in rows if not r["submissions"])
+    silent_drivers = sum(1 for r in rows if not r["inspections"])
     last_day = fmt_day(meta["until"] - timedelta(days=1))
     intro = (
         '<div class="intro">'
@@ -915,6 +993,11 @@ def driver_html(agg, meta):
         'decided only by whether every required area was filmed. The extinguisher '
         'never fails an inspection, so filming everything but the extinguisher '
         'scores 95% and still passes.</div>'
+        f'<div><span class="lt">One walkaround, one row</span>Clips from the same '
+        f'driver less than {report_scoring.SESSION_GAP_MINUTES} minutes apart are '
+        f'one inspection, scored on everything they showed between them — a PTI '
+        f'filmed in three passes is one row, marked as such, not three partial '
+        f'ones. <em>Subs</em> counts the rows that were a real walkaround.</div>'
         f'<div><span class="lt">Reading the list</span>Class is by areas unfilmed: '
         f'Complete 0, Real 1–2, Partial 3–5, Not a PTI 6+. The '
         f'{silent_drivers} greyed drivers submitted nothing in this window and show '
@@ -956,11 +1039,11 @@ def write_csvs(agg, stem: Path) -> list[Path]:
     p = stem.with_name(stem.name + "-drivers.csv")
     with p.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["driver", "unit", "submissions", "real_ptis", "passed",
-                    "avg_completeness", "best"])
+        w.writerow(["driver", "unit", "inspections", "clips_uploaded",
+                    "real_ptis", "passed", "avg_completeness", "best"])
         for r in agg["driver_rows"]:
-            w.writerow([r["name"], r["unit"], r["submissions"], r["real"],
-                        r["passed"], r["avg"], r["best"]])
+            w.writerow([r["name"], r["unit"], r["inspections"], r["clips"],
+                        r["real"], r["passed"], r["avg"], r["best"]])
     made.append(p)
 
     p = stem.with_name(stem.name + "-silent-units.csv")
@@ -975,13 +1058,13 @@ def write_csvs(agg, stem: Path) -> list[Path]:
     p = stem.with_name(stem.name + "-inspections.csv")
     with p.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["day", "unit", "driver", "score", "class", "filmed",
-                    "required", "verdict", "areas_not_filmed",
+        w.writerow(["day", "unit", "driver", "clips", "score", "class",
+                    "filmed", "required", "verdict", "areas_not_filmed",
                     "fire_extinguisher_shown", "not_visible"])
         for i in agg["inspections"]:
             s = i["score"]
-            w.writerow([i["day"].isoformat(), i["unit"], i["name"], s.score,
-                        s.klass, s.filmed, s.required,
+            w.writerow([i["day"].isoformat(), i["unit"], i["name"], i["clips"],
+                        s.score, s.klass, s.filmed, s.required,
                         "PASS" if i["passed"] else "FAIL", "; ".join(s.missing),
                         s.fire_extinguisher, "; ".join(s.not_visible)])
     made.append(p)

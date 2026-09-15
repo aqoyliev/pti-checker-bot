@@ -14,6 +14,10 @@ reports), so it must not drift:
 A driver who filmed every area but never showed the extinguisher scores 95%.
 The score is *not* the verdict: the bot's PASS/FAIL is decided only by whether
 every required area was filmed, and the extinguisher never fails an inspection.
+
+`merge_session` is the one thing here that spans more than one submission --
+see its docstring for why a walkaround filmed in three clips has to be scored
+as one.
 """
 
 from __future__ import annotations
@@ -77,6 +81,15 @@ def missing_required(data: dict) -> list[str]:
     return out
 
 
+def _points(filmed: int, required: int, fe: bool, not_visible: list) -> int:
+    """The published formula, in one place so a session cannot drift from a
+    single submission's score."""
+    areas_pts = 85.0 * filmed / required if required else 0.0
+    fe_pts = 5.0 if fe else 0.0
+    detail_pts = max(0.0, 10.0 - 2.0 * len(not_visible))
+    return int(round(areas_pts + fe_pts + detail_pts))
+
+
 def classify(n_missing: int) -> str:
     if n_missing == 0:
         return COMPLETE
@@ -134,12 +147,72 @@ def score_inspection(result_json: str | dict | None) -> Score:
     fe = bool(data.get("fire_extinguisher_shown"))
     not_visible = _as_list(data, "what_was_not_visible")
 
-    areas_pts = 85.0 * filmed / required if required else 0.0
-    fe_pts = 5.0 if fe else 0.0
-    detail_pts = max(0.0, 10.0 - 2.0 * len(not_visible))
+    return Score(
+        score=_points(filmed, required, fe, not_visible),
+        filmed=filmed,
+        required=required,
+        missing=missing,
+        fire_extinguisher=fe,
+        not_visible=not_visible,
+    )
+
+
+# How long a driver's clips may be apart and still be one walkaround. Wide
+# enough for someone filming the truck in three passes and posting them one
+# after the other; far short of a genuine second PTI later in the day, which
+# has to stay a second PTI.
+SESSION_GAP_MINUTES = 30
+
+
+def merge_session(scores: list[Score]) -> Score:
+    """Score a run of submissions as the one walkaround they add up to.
+
+    Some drivers film the PTI in two or three clips and post them back to
+    back. Scored one at a time each clip covers a third of the truck, so every
+    one of them lands as a Partial and not one clears the "real PTI" bar --
+    while between them the driver filmed everything. The union is what
+    actually happened, so:
+
+    * an area counts as unfilmed only when **no** clip in the session showed
+      it, which is the intersection of the clips' missing lists;
+    * the extinguisher counts as shown if **any** clip showed it;
+    * a sub-item counts as not visible only when **every** clip said so -- a
+      clip that never pointed at the trailer cannot be evidence about its tape.
+
+    A session of one returns that submission's own score object, untouched:
+    nearly every driver sends a single video, and their published numbers must
+    not move because the report learned to read the ones who don't.
+    """
+    if not scores:
+        raise ValueError("a session has at least one submission")
+    if len(scores) == 1:
+        return scores[0]
+
+    required = max(s.required for s in scores)
+    unfilmed = set(scores[0].missing)
+    for s in scores[1:]:
+        unfilmed &= set(s.missing)
+    # Ordered by REQUIRED_AREAS rather than by whichever clip came first, so
+    # the report reads the same however the driver split the walkaround.
+    missing = [a for a in REQUIRED_AREAS if a in unfilmed]
+    filmed = max(0, required - len(missing))
+
+    fe = any(s.fire_extinguisher for s in scores)
+
+    keep = {_norm(x) for x in scores[0].not_visible}
+    for s in scores[1:]:
+        keep &= {_norm(x) for x in s.not_visible}
+    seen: set[str] = set()
+    not_visible = []
+    for s in scores:
+        for item in s.not_visible:
+            key = _norm(item)
+            if key in keep and key not in seen:
+                seen.add(key)
+                not_visible.append(item)
 
     return Score(
-        score=int(round(areas_pts + fe_pts + detail_pts)),
+        score=_points(filmed, required, fe, not_visible),
         filmed=filmed,
         required=required,
         missing=missing,

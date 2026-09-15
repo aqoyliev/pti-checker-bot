@@ -104,7 +104,7 @@ def test_a_driver_who_sent_nothing_still_appears():
         window=[submission(-1, 11)],
     )
     silent = next(r for r in agg["driver_rows"] if r["name"] == "SILENT")
-    assert silent["submissions"] == 0
+    assert silent["inspections"] == 0
     assert silent["items"] == []
 
 

@@ -15,6 +15,7 @@ from utils.db import (
     log_pti, get_cached_check, get_recent_ptis,
     reset_group_reminders,
 )
+from utils import pti_gate
 from utils.pti_processor import deliver_result, process_mixed_media
 from handlers.groups.monitoring import buffer_message, get_album_media
 
@@ -150,7 +151,7 @@ async def _handle_pti_result(
         return
     passed = data.get("status") == "PASS"
     # `unit_number` is deliberately not passed: it used to be whatever the video
-    # showed, and nothing else is written into it. See _run_pti's history filter
+    # showed, and nothing else is written into it. See `_inspect`'s history filter
     # for what leaving it empty keeps switched off, and the module comment above
     # for why the video is no longer a source. The inspection belongs to
     # `group_id` either way, which is what every report groups by.
@@ -223,11 +224,12 @@ async def _run_pti(
     driver_uid: int,
     driver_name: str | None,
 ):
-    """Run the PTI pipeline for the media in ``reply`` and post the result.
+    """Gate the media in ``reply`` into an inspection, and post the result.
 
     Shared by the ``/check`` command and the standalone-video auto-trigger.
     Caller is responsible for resolving ``driver_uid``/``driver_name`` and for
-    the group-ready check.
+    the group-ready check. Everything expensive is in `_inspect`, behind the
+    two guards below.
     """
     items = _items_from_reply(reply)
     if items is None:
@@ -256,6 +258,50 @@ async def _run_pti(
 
     signature = _signature_from_items(items)
     content_sig = _content_signature_from_items(items)
+    sigs = {s for s in (signature, content_sig) if s}
+
+    # Two `/check`s replying to one video used to start two inspections. The
+    # dedup inside `_inspect` reads `pti_log`, and that row is not written
+    # until an inspection *finishes*, so for the minutes in between the second
+    # command looked exactly like the first: both ran, both logged, and one
+    # walkaround was counted as two PTIs. `utils/pti_gate` closes that window
+    # in memory, before a single frame has been extracted.
+    if not pti_gate.claim(message.chat.id, sigs):
+        await message.reply(
+            "⏳ This video is <b>already being inspected</b> — the result "
+            "is on its way. No need to send /check again.",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        # One inspection at a time per group; anything else waits its turn. A
+        # queued submission therefore starts only once the one ahead of it has
+        # logged its row, which is what lets the dedup finally see a video that
+        # was still in flight when it was first asked about. Taking turns is
+        # also the cheaper order -- two clips of one walkaround stop competing
+        # for the same frames budget and the same quota.
+        async with pti_gate.group_lock(message.chat.id):
+            await _inspect(message, reply, items, driver_uid, driver_name,
+                           signature, content_sig)
+    finally:
+        pti_gate.release(message.chat.id, sigs)
+
+
+async def _inspect(
+    message: types.Message,
+    reply: types.Message,
+    items: list[dict],
+    driver_uid: int,
+    driver_name: str | None,
+    signature: str | None,
+    content_sig: str | None,
+):
+    """Inspect ``items`` and post the verdict, holding this group's turn.
+
+    Split out of `_run_pti` so the gate in front of it reads as the gate: every
+    expensive step lives in here, behind both the in-flight claim and the
+    group's lock.
+    """
     if message.chat.id not in TEST_GROUP_IDS and (signature or content_sig):
         # Dedup by (file_size, duration) — an old video re-uploaded keeps the same
         # size+length even though Telegram assigns it a fresh file id. A match is
