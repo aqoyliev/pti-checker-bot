@@ -11,7 +11,7 @@ from aiogram.types import ContentType
 from data.config import PTI_AUTOCHECK_ENABLED, PTI_TEST_GROUP_IDS
 from loader import bot_id, dp
 from utils.db import (
-    get_group, get_drivers, is_registered_driver,
+    get_group, get_drivers, is_registered_driver, upsert_group,
     log_pti, get_cached_check, get_recent_ptis,
     reset_group_reminders,
 )
@@ -32,12 +32,23 @@ GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 # single-call one leaves it in `result_json`, and nothing reads either.
 
 # Test groups (PTI_TEST_GROUP_IDS, env): the bot auto-inspects EVERYONE's video
-# there (registered or not, forwarded or not) and skips the recycled-video
-# dedup so the same clip can be re-sent while testing.
+# there (registered or not, forwarded or not), needs no group setup at all, and
+# skips the recycled-video dedup so the same clip can be re-sent while testing.
 TEST_GROUP_IDS = PTI_TEST_GROUP_IDS
 
 
 async def _group_ready(message: types.Message) -> bool:
+    # A test group needs no setup. It exists to try the inspection out, so
+    # there is no truck to file the result under and nobody to be on a roster --
+    # waiting for either would leave the bot silent through the one thing a
+    # trial is for. `pti_log` still references the group's row, so the upsert
+    # makes sure there is one: an id can be added to PTI_TEST_GROUP_IDS while
+    # the bot is already sitting in the chat, in which case its join was never
+    # seen and nothing ever created it.
+    if message.chat.id in TEST_GROUP_IDS:
+        await upsert_group(message.chat.id)
+        return True
+
     group = await get_group(message.chat.id)
 
     if not group or not group["setup_complete"]:
@@ -180,7 +191,11 @@ async def handle_check_group(message: types.Message):
     direct_uid = reply.from_user.id if reply.from_user else None
     forward_uid = reply.forward_from.id if reply.forward_from else None
     driver_uid: int | None = None
-    if direct_uid and await is_registered_driver(message.chat.id, direct_uid):
+    if message.chat.id in TEST_GROUP_IDS:
+        # Nobody is registered in a test group -- anyone's video is inspected,
+        # same as the auto-trigger below.
+        driver_uid = direct_uid or forward_uid
+    elif direct_uid and await is_registered_driver(message.chat.id, direct_uid):
         driver_uid = direct_uid
     elif forward_uid and await is_registered_driver(message.chat.id, forward_uid):
         driver_uid = forward_uid
@@ -195,7 +210,9 @@ async def handle_check_group(message: types.Message):
 
     drivers = await get_drivers(message.chat.id)
     driver_row = next((d for d in drivers if d["user_id"] == driver_uid), None)
-    driver_name = driver_row["name"] if driver_row else None
+    driver_name = driver_row["name"] if driver_row else (
+        reply.from_user.full_name if reply.from_user else None
+    )
 
     await _run_pti(message, reply, driver_uid, driver_name)
 

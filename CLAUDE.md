@@ -357,9 +357,14 @@ gone. A unit is decided from the group's own title and the driver's own video.
 
 `/adddriver`, `/setunit` and `/removedriver` still work as a manual escape
 hatch — **for the fleet's admins only** (`utils/admins.is_admin`; anyone else
-gets a one-line refusal), and they are not in the group's command menu. Left
-open to every member, a driver could re-file the truck with one `/setunit` or
-drop the co-driver out of compliance with `/removedriver`. A driver who runs
+gets a one-line refusal). Left open to every member, a driver could re-file the
+truck with one `/setunit` or drop the co-driver out of compliance with
+`/removedriver`, so that refusal is the whole guard: `/setunit` and `/adddriver`
+are **in** the group command menu, because an admin configuring a group by hand
+is standing in the group rather than in the panel, and a command nothing lists
+has to be typed from memory. `/removedriver` is not listed — `/adddriver`'s own
+reply names it in the single case it is needed, a group that already has two
+drivers. A driver who runs
 `/check` in an unconfigured group is told the admins have been asked to set
 it up, not handed setup commands.
 
@@ -599,9 +604,15 @@ guard still applies to rules 2 and 3: registered driver, not forwarded from
 someone else, not an album, group setup-complete.
 
 `PTI_TEST_GROUP_IDS` (env, comma-separated chat ids, default empty) names test
-groups where every member's video auto-checks and the recycled-video dedup is
-skipped. It used to be a hardcoded pair in `pti.py` belonging to one fleet;
-this repo serves several, so nothing fleet-specific may be hardcoded.
+groups where every member's video auto-checks, the recycled-video dedup is
+skipped, and **no setup is required** — `_group_ready` answers yes for them
+outright, and `/check` there accepts anyone's video too. A trial group has no
+truck behind it, so waiting for a unit and a roster would leave the bot silent
+through the one thing the trial is for. It still upserts the `groups` row,
+since `pti_log` references it and an id can be configured while the bot is
+already sitting in the chat, its join long since missed. It used to be a
+hardcoded pair in `pti.py` belonging to one fleet; this repo serves several, so
+nothing fleet-specific may be hardcoded.
 
 ## A PTI never decides what vehicle it was filmed on
 

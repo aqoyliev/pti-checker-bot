@@ -10,13 +10,18 @@ _PRIVATE_COMMANDS = [
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
 ]
 
-# /adddriver, /setunit and /removedriver are deliberately NOT listed: they are
-# an admin-only escape hatch (handlers/groups/registration.py), and drivers are
-# never asked to configure their own group. A command in the menu is an
-# invitation to run it.
+# /setunit and /adddriver are listed even though they are admin-only: an admin
+# setting a group up by hand is standing in the group, and a command nothing
+# lists has to be typed from memory. What keeps them admin-only is the refusal
+# in handlers/groups/registration.py, not their absence from this list.
+# /removedriver stays off it -- it is the one that can drop a driver out of
+# compliance, and /adddriver's own reply names it in the single case it is
+# needed, a group that already has two drivers.
 _GROUP_COMMANDS = [
     types.BotCommand("help", "Help"),
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
+    types.BotCommand("setunit", "Admin: set this group's unit number"),
+    types.BotCommand("adddriver", "Admin: register a driver (reply to them)"),
 ]
 
 # DM-only, admin-only commands from handlers/admin/*.py.

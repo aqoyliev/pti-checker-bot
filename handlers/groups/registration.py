@@ -27,9 +27,12 @@ INTRO_MESSAGE = (
 # message any more. Drivers are never asked to register or configure anything;
 # the unit comes off the title/description and the drivers are picked by an
 # admin in DM. /adddriver, /setunit and /removedriver still work as a manual
-# escape hatch -- for the fleet's admins only, and not listed in the group's
-# command menu. Left open to every member, a driver could re-file the truck
-# with one /setunit, or drop the co-driver out of compliance with /removedriver.
+# escape hatch -- for the fleet's admins only. Left open to every member, a
+# driver could re-file the truck with one /setunit, or drop the co-driver out
+# of compliance with /removedriver, so the refusal below is the whole guard:
+# /setunit and /adddriver are in the group command menu
+# (utils/set_bot_commands.py), since an admin configuring a group by hand is in
+# the group rather than in the panel.
 
 _NOT_ADMIN = "Only the fleet's admins can change a group's setup."
 
