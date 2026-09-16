@@ -300,6 +300,16 @@ and the candidates for any name it would have had to guess at. Three rules:
   fleet-wide setup that is common, and the picker hides them behind "Show N
   hidden" until someone asks.
 
+**`--pair GID:UID --apply` writes one pair an operator has read and approved.**
+It is the only place a *name* match reaches `set_group_unit`, so it is fenced
+in: the pairing is recomputed at write time (the report is minutes old, the
+roster is live), the person must still be the proven match, a unit must parse
+out of the title, and the evidence must be `STRONG_SHARED_WORDS` (2) — a first
+and a last name agreeing, not the single "mohamed" that pairs two unrelated
+men. It registers one driver, sets the unit, clears that person's non-driver
+row, and **sweeps nothing**: confirming one pick is not a judgement on the
+other seventeen members, the same view the panel's driver search takes.
+
 ### `/fixnames`: the backfill for groups configured earlier
 
 Groups set up before that are filed under Telegram names, and re-resolving every

@@ -137,22 +137,27 @@ def test_the_failure_streak_resets_on_a_group_that_worked(monkeypatch):
 
 def test_names_come_out_of_the_title_when_the_about_text_has_none():
     """Half these groups write the drivers into the title and nowhere else --
-    no label, no phone line under them, nothing a parser can hold on to."""
+    no label, no phone line under them, nothing a parser can hold on to.
+
+    The fleet's titles SHOUT; the stored form is `_clean_name`'s, the same one a
+    name read from the About text gets, so one driver cannot end up filed two
+    ways depending on which line they were read from.
+    """
     assert setup_groups._names_from_title(
         "2643 |GONZALEZ OSVALDO / VAZQUEZ LIZBETH", "2643"
-    ) == ["GONZALEZ OSVALDO", "VAZQUEZ LIZBETH"]
+    ) == ["Gonzalez Osvaldo", "Vazquez Lizbeth"]
     assert setup_groups._names_from_title(
         "1164 - SINEUS RUDOLPH / KNIGHT, DAMON", "1164"
-    ) == ["SINEUS RUDOLPH", "KNIGHT DAMON"]
+    ) == ["Sineus Rudolph", "Knight Damon"]
     # "UNIT" labels the number, "( LO )" labels the lease, neither is a name.
     assert setup_groups._names_from_title(
         "UNIT 2644 MOLO, DAVID / JOSEPH , NICKEL ( LO )", "2644"
-    ) == ["MOLO DAVID", "JOSEPH NICKEL"]
+    ) == ["Molo David", "Joseph Nickel"]
     # Some titles carry the phone numbers too; a word with a digit in it is not
     # part of anybody's name.
     assert setup_groups._names_from_title(
         "212582 - GAITER ERIC 772-489-1955 ; MILLER MURTON 772-626-4417", "212582"
-    ) == ["GAITER ERIC", "MILLER MURTON"]
+    ) == ["Gaiter Eric", "Miller Murton"]
 
 
 def test_a_title_with_no_names_yields_none():
@@ -227,3 +232,123 @@ def test_a_group_with_no_roster_is_reported_not_guessed(monkeypatch, wired):
 
     assert pairs == 0
     assert "no member list" in "\n".join(lines)
+
+
+# ---------- confirming a reviewed pair ----------
+
+@pytest.fixture
+def writes(monkeypatch):
+    """The four writes a confirmed pick makes, and the read it makes first."""
+    stubs = {
+        "upsert_group": AsyncMock(),
+        "add_driver": AsyncMock(return_value=True),
+        "set_group_unit": AsyncMock(),
+        "unmark_non_drivers": AsyncMock(),
+        "get_drivers": AsyncMock(return_value=[]),
+        "init_db": AsyncMock(),
+    }
+    for name, mock in stubs.items():
+        monkeypatch.setattr(setup_groups.db, name, mock)
+    return stubs
+
+
+STRONG = [SimpleNamespace(user_id=11, label="Osvaldo Gonzalez", is_bot=False),
+          SimpleNamespace(user_id=13, label="Dispatch Ana", is_bot=False)]
+
+
+def _confirm(monkeypatch, *, uid=11, apply=True, title="2643 GONZALEZ OSVALDO",
+             about="", roster=STRONG):
+    monkeypatch.setattr(setup_groups.bot, "get_chat",
+                        AsyncMock(return_value=SimpleNamespace(title=title)))
+    monkeypatch.setattr(setup_groups.userbot, "list_members",
+                        AsyncMock(return_value=list(roster)))
+    monkeypatch.setattr(setup_groups.userbot, "get_description",
+                        AsyncMock(return_value=about))
+    return asyncio.run(setup_groups._confirm_one(-100123, uid, apply))
+
+
+def test_a_reviewed_pair_is_registered_under_the_fleets_name(monkeypatch, writes):
+    ok, detail = _confirm(monkeypatch)
+
+    assert ok and "Gonzalez Osvaldo" in detail
+    writes["add_driver"].assert_awaited_once_with(-100123, 11, "Gonzalez Osvaldo")
+    writes["set_group_unit"].assert_awaited_once_with(-100123, "2643")
+    # Being chosen as a driver outranks a stale non-driver row, as everywhere.
+    writes["unmark_non_drivers"].assert_awaited_once_with([11])
+
+
+def test_a_dry_run_writes_nothing(monkeypatch, writes):
+    ok, detail = _confirm(monkeypatch, apply=False)
+
+    assert not ok and detail.startswith("would register")
+    writes["add_driver"].assert_not_awaited()
+    writes["set_group_unit"].assert_not_awaited()
+
+
+def test_a_single_shared_word_is_too_weak_to_write(monkeypatch, writes):
+    """One shared word is how two men called Mohamed pair to each other, and
+    this path has no phone number to corroborate it with."""
+    roster = [SimpleNamespace(user_id=11, label="Mohamed Abd", is_bot=False)]
+
+    ok, detail = _confirm(monkeypatch, title="525814 ABDI MOHAMED", roster=roster)
+
+    assert not ok and "too weak" in detail
+    writes["add_driver"].assert_not_awaited()
+
+
+def test_a_pair_that_no_longer_holds_is_refused(monkeypatch, writes):
+    """The report an operator read is minutes old; the roster is live."""
+    ok, detail = _confirm(monkeypatch, uid=999)
+
+    assert not ok and "no longer the proven match" in detail
+    writes["add_driver"].assert_not_awaited()
+
+
+def test_no_unit_means_no_write(monkeypatch, writes):
+    """A unit nothing corroborates is the one thing never written unattended --
+    it misfiles every later inspection in the group."""
+    ok, detail = _confirm(monkeypatch, title="GONZALEZ OSVALDO / VAZQUEZ")
+
+    assert not ok and "no unit" in detail
+    writes["add_driver"].assert_not_awaited()
+    writes["set_group_unit"].assert_not_awaited()
+
+
+def test_a_group_that_already_has_two_drivers_is_left_alone(monkeypatch, writes):
+    writes["get_drivers"].return_value = [{"user_id": 1, "name": "A"},
+                                          {"user_id": 2, "name": "B"}]
+
+    ok, detail = _confirm(monkeypatch)
+
+    assert not ok and "already has 2 drivers" in detail
+    writes["add_driver"].assert_not_awaited()
+
+
+def test_an_already_registered_driver_is_not_written_twice(monkeypatch, writes):
+    writes["get_drivers"].return_value = [{"user_id": 11, "name": "Gonzalez Osvaldo"}]
+
+    ok, detail = _confirm(monkeypatch)
+
+    assert not ok and "already registered" in detail
+    writes["add_driver"].assert_not_awaited()
+
+
+def test_confirming_never_sweeps_the_roster(monkeypatch, writes):
+    """Confirming one pick is not a judgement on the other 17 members -- the
+    panel's driver search takes the same view."""
+    marked = AsyncMock(return_value=0)
+    monkeypatch.setattr(setup_groups.db, "mark_non_drivers", marked, raising=False)
+
+    assert _confirm(monkeypatch)[0] is True
+    marked.assert_not_awaited()
+
+
+def test_a_malformed_pair_is_skipped_not_guessed(monkeypatch, writes, capsys):
+    monkeypatch.setattr(setup_groups, "_confirm_one",
+                        AsyncMock(return_value=(True, "registered")))
+
+    asyncio.run(setup_groups.confirm(["-100123", "-100123:11"], apply=True, sleep=0))
+
+    out = capsys.readouterr().out
+    assert "expected GROUP_ID:USER_ID" in out
+    assert "1 of 1 written" in out
