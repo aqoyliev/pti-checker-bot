@@ -37,15 +37,21 @@ import argparse
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
-from handlers.admin.onboard import (
+# Run as a file (`python /app/scripts/setup_groups.py`), Python puts *this*
+# directory on the path and not the repo root, so the bot's own packages are
+# invisible. Same one-liner as scripts/tg_phone_lookup.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from handlers.admin.onboard import (  # noqa: E402
     LOOKUP_UNAVAILABLE,
     _apply_auto_config,
     _try_auto_config,
 )
-from loader import bot
-from utils import db, userbot
-from utils.unit_parse import guess_unit
+from loader import bot  # noqa: E402
+from utils import db, phone_lookup, userbot  # noqa: E402
+from utils.unit_parse import guess_unit  # noqa: E402
 
 # Once the lookup account is contact-import limited, every remaining group gets
 # the same non-answer, and marching through forty of them would fill the report
@@ -144,7 +150,11 @@ def main() -> int:
         try:
             return await run(args.apply, args.group, args.sleep, args.limit)
         finally:
+            # Both MTProto clients get a clean disconnect: the lookup account is
+            # the fragile one, and a session dropped mid-flight is exactly what
+            # it should not have to recover from.
             await userbot.close()
+            await phone_lookup.close()
             session = await bot.get_session()
             await session.close()
 
