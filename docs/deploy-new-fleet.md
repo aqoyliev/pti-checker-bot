@@ -109,6 +109,28 @@ still works off the bot-token roster either way), or an admin running
 4. **An inspection.** Post a walkaround video and reply `/check` to it. A
    result posts back into the group.
 
+## 4b. The groups the bot joined before the drivers did
+
+Standing a fleet up does not happen in onboarding's order. The bot is added to
+sixty groups on one afternoon; the drivers are added to them over the days
+after. At join time each About text's phone numbers resolved to accounts that
+were not in the chat yet, which the automatic path refuses to configure from --
+an account that is not in the group can never post a PTI -- so every group fell
+through to the admin picker, and that picker is sent **once per group**. Nothing
+asks again on its own.
+
+`scripts/setup_groups.py` is the second ask, for the whole fleet at once. It
+runs where the bot's credentials live, previews by default, and configures only
+the groups the ordinary decision accepts:
+
+```bash
+railway ssh -- python /app/scripts/setup_groups.py            # preview
+railway ssh -- python /app/scripts/setup_groups.py --apply
+```
+
+Groups it declines are printed with an `/onboard <group_id>` line each; those
+need a person. Run it again whenever another batch of drivers has been added.
+
 ## 5. Things that do not travel between fleets
 
 - Telethon sessions (above).

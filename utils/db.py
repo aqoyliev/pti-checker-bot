@@ -489,6 +489,22 @@ async def get_groups_needing_setup_nag() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_unconfigured_groups() -> list[dict]:
+    """Active groups with no unit and no drivers, whether they were nagged or not.
+
+    The nag query above deliberately stops after one prompt per group; this one
+    is what scripts/setup_groups.py sweeps, for the case that prompt was sent
+    before the drivers were even in the chat.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT * FROM groups
+            WHERE setup_complete = FALSE
+              AND COALESCE(is_active, TRUE) = TRUE
+            ORDER BY group_id"""
+    )
+    return [dict(r) for r in rows]
+
+
 async def bump_setup_nag(group_id: int):
     await _pool_check().execute(
         """UPDATE groups
@@ -731,6 +747,18 @@ async def get_all_drivers_by_group() -> dict[int, list[dict]]:
             {"user_id": r["user_id"], "name": r["name"]}
         )
     return out
+
+
+async def get_registered_driver_ids() -> set[int]:
+    """Everyone this fleet has registered as a driver, in any group.
+
+    The automatic setup records the rest of a group's roster as non-drivers,
+    and this is what it checks first: a driver who sits in two chats -- a team
+    driver who changed trucks, someone added to a group before their own -- is
+    left alone rather than hidden fleet-wide.
+    """
+    rows = await _pool_check().fetch("SELECT DISTINCT user_id FROM group_drivers")
+    return {r["user_id"] for r in rows}
 
 
 async def get_last_pti_per_group() -> dict[int, dict]:

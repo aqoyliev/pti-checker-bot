@@ -216,8 +216,24 @@ check stopped it. That includes `LookupUnavailable`: a rate-limited lookup
 account may cost an automatic setup, never a wrong one. With no lookup session
 configured the whole step is skipped silently.
 
-Nobody is marked as a non-driver on this path — only people actually shown a
-picker count as passed over.
+**Everyone else in the chat is recorded as a non-driver** (as of 2026-09-16).
+This path knows who the drivers are from the fleet's own phone numbers rather
+than from someone tapping names, so the rest of the roster is dispatch, safety
+or a mechanic — better evidence than a picker tap, not worse — and recording it
+is what stops the same handful of office people being offered in every later
+group's prompt. Two things follow from there being no screen here:
+
+- **the whole roster is judged**, not the first `MEMBER_BUTTONS` of it. That cap
+  exists only because an admin can only judge what fitted on their screen;
+- **a driver of any other group is left alone** (`get_registered_driver_ids`,
+  read *after* the write so this group's own drivers are in the set). A team
+  driver who changed trucks sits in two chats, and hiding them fleet-wide would
+  cost the next setup its buttons.
+
+The admin notice says how many rows were written, because this is a fleet-wide
+exclusion and that notice is the only place it is visible. It stays reversible
+the same three ways as always — picking someone clears their row, "Show hidden"
+reveals them for one prompt, `/nondrivers clear` empties the table.
 
 **The stored name is the fleet's, not Telegram's.** The About text names the
 drivers on their own line (`Name: ZAMA, EMILE / FLEURMOND, JACQUES`), and
@@ -230,6 +246,37 @@ Telegram name beside the stored one when they differ, because that is the line
 on which a swapped pair becomes visible. The picker's Save keeps whatever name a
 driver is already stored with, so editing one pick can't quietly swap the other
 back to a Telegram handle.
+
+### `scripts/setup_groups.py`: the groups that were asked too early
+
+The automatic path declines a group whose About-text numbers resolve to people
+who are not in the chat yet, and that is the normal state of a fleet being
+stood up: the bot is added to sixty groups on one afternoon and the drivers
+are added over the following days. Every one of those groups fell through to
+the picker, and the setup nag sends that picker **once per group** -- so the
+answer arrives after the only question was asked, and nothing retries.
+
+The script is the retry, over every unconfigured active group
+(`get_unconfigured_groups` -- the nag's query, without the one-prompt
+ceiling). It decides nothing of its own: it reads the roster and the About
+text the way onboarding does and hands them to the same `plan_auto_config`,
+then calls the same `_apply_auto_config`. Three things it does carry:
+
+- **preview is the default**; `--apply` writes. It runs unattended over a whole
+  live fleet, which is the same reason `/titlecheck` and `/fixnames` show their
+  work first.
+- **the title is read fresh from Telegram**, never from `groups.title` -- the
+  cache is refreshed by traffic, so the stalest titles belong to the quietest
+  groups, and the unit is parsed out of it.
+- **it gives up after `LOOKUP_FAILURE_LIMIT` refusals in a row**
+  (`LOOKUP_UNAVAILABLE`, named in `onboard.py` so both sides agree on it).
+  Contact import is the most rate-limited call the lookup account has; once it
+  stops answering, the remaining groups were never really asked, and filing
+  them all as "declined" would hide that.
+
+It needs the bot's own credentials (bot token for the roster, the lookup
+session for the numbers), so unlike `scripts/fleet_report.py` it runs on the
+deployment — `railway ssh -- python /app/scripts/setup_groups.py`.
 
 ### `/fixnames`: the backfill for groups configured earlier
 

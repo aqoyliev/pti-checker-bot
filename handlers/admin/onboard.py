@@ -36,6 +36,7 @@ from utils.db import (
     get_drivers,
     get_group,
     get_non_driver_ids,
+    get_registered_driver_ids,
     mark_non_drivers,
     replace_drivers,
     set_group_unit,
@@ -50,6 +51,11 @@ from utils.unit_parse import guess_unit, looks_retired
 _pending: dict[tuple[int, int], dict] = {}
 
 MAX_DRIVERS = 2
+# The decline reason for a lookup that refused to answer, as opposed to one
+# that answered "nobody". Named because scripts/setup_groups.py reads it: over
+# a whole fleet, "the account is rate-limited" means the remaining groups were
+# never really asked, and marching on would file them all as declined.
+LOOKUP_UNAVAILABLE = "phone lookup unavailable"
 # Member buttons per row, and how much of a name fits in one that narrow.
 MEMBER_COLUMNS = 2
 LABEL_CHARS = 24
@@ -238,20 +244,48 @@ async def _try_auto_config(group_id: int, unit: str | None, description: str,
         resolved = await phone_lookup.lookup(phones)
     except phone_lookup.LookupUnavailable as e:
         logging.warning("auto-config for %s fell back to the picker: %s", group_id, e)
-        return None, f"phone lookup unavailable ({e})"
+        return None, f"{LOOKUP_UNAVAILABLE} ({e})"
     return plan_auto_config(unit, phones, resolved, members,
                             parse_driver_names(description))
 
 
-async def _apply_auto_config(group_id: int, plan) -> str:
-    """Write the unit and drivers, and return the notice for the admins."""
+async def _apply_auto_config(group_id: int, plan, members: list) -> str:
+    """Write the unit, the drivers and the rest of the roster; return the notice.
+
+    The "rest of the roster" is the part the picker cannot do as well. Here the
+    two drivers were named by the fleet's own phone numbers rather than chosen
+    by eye, so everyone else in the chat is a dispatcher, a mechanic or safety
+    staff -- and recording them is what stops the same handful of people being
+    offered again in every later group's prompt.
+
+    Two differences from the Save path, both following from there being no
+    screen on this one:
+
+      * the *whole* roster counts, not the first MEMBER_BUTTONS of it. That cap
+        exists because an admin can only judge what fitted on their screen;
+      * a driver of some other group is left alone. A team driver who changed
+        trucks sits in two chats, and hiding them fleet-wide would cost the
+        next setup its buttons.
+
+    And nothing is swept at all unless the plan named every driver the group can
+    hold. One phone number for a two-name About text configures a solo driver,
+    and the co-driver it could not place is still sitting in that roster --
+    hiding them would bury the one person the group is still missing.
+    """
     await set_group_unit(group_id, plan.unit)
     await replace_drivers(group_id, [{"user_id": uid, "name": label}
                                      for uid, label in plan.drivers])
     # Being chosen as a driver outranks a stale "not a driver" row, exactly as
-    # it does on the Save path. Nobody was shown a picker here, so nobody is
-    # marked as a non-driver: only people actually passed over count.
-    await unmark_non_drivers([uid for uid, _ in plan.drivers])
+    # it does on the Save path.
+    picked = [uid for uid, _ in plan.drivers]
+    await unmark_non_drivers(picked)
+    newly_hidden = 0
+    if len(picked) >= MAX_DRIVERS:
+        # Read after the write, so this group's own drivers are in the set too.
+        registered = await get_registered_driver_ids()
+        passed_over = [(m.user_id, m.label) for m in members
+                       if m.user_id not in registered and m.user_id not in picked]
+        newly_hidden = await mark_non_drivers(passed_over)
 
     lines = [f"🤖 <b>Unit {escape(plan.unit)} configured automatically.</b>"]
     for user_id, name in plan.drivers:
@@ -262,6 +296,13 @@ async def _apply_auto_config(group_id: int, plan) -> str:
         also = f", Telegram: {escape(tg)}" if tg and tg != name else ""
         lines.append(f"• {escape(name)} — <code>{user_id}</code> "
                      f"(from {escape(plan.sources[user_id])}{also})")
+    if newly_hidden:
+        # Silent would be wrong: this writes a fleet-wide exclusion, and the
+        # admin who reads this notice is the only person who can see it happen.
+        lines.append(f"\n<i>{newly_hidden} other member(s) of the group were "
+                     f"recorded as non-drivers, so they are no longer offered "
+                     f"in later setup prompts. Picking someone as a driver "
+                     f"undoes that; /nondrivers clear undoes all of it.</i>")
     # No button. The notice tells the admin what happened; it does not ask them
     # to check it, and a button on every automatic setup invites a tap on the
     # ones that were right. Fixing a wrong one is still one command away, and
@@ -300,7 +341,7 @@ async def start_onboarding(group_id: int, title: str, manual: bool = False) -> b
     # unclear falls through to the prompt below, with the reason attached.
     plan, auto_note = await _try_auto_config(group_id, unit, description, roster)
     if plan is not None:
-        notice = await _apply_auto_config(group_id, plan)
+        notice = await _apply_auto_config(group_id, plan, roster)
         extra = {}
         if manual:
             extra["reply_markup"] = InlineKeyboardMarkup().add(InlineKeyboardButton(

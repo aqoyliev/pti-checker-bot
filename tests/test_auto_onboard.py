@@ -167,6 +167,8 @@ def _wire(monkeypatch, *, lookup, description=ABOUT, members=ROSTER):
         "set_group_unit": AsyncMock(),
         "replace_drivers": AsyncMock(),
         "unmark_non_drivers": AsyncMock(),
+        "mark_non_drivers": AsyncMock(return_value=0),
+        "get_registered_driver_ids": AsyncMock(return_value=set()),
     }
     for name, mock in writes.items():
         monkeypatch.setattr(onboard, name, mock)
@@ -303,3 +305,118 @@ def test_without_a_lookup_session_nothing_changes(monkeypatch):
 
     writes["replace_drivers"].assert_not_awaited()
     assert "Couldn't do this automatically" not in sent.await_args.args[1]
+
+
+# ---------- the rest of the roster ----------
+
+def _clean_lookup():
+    return AsyncMock(return_value={
+        "+17864882619": Match("+17864882619", 8063167928, "M Mgn", None, False),
+        "+15616747866": Match("+15616747866", 6066541941, "Noor Dubat",
+                              "noor", False)})
+
+
+def test_everyone_else_in_the_group_is_recorded_as_a_non_driver(monkeypatch):
+    """The point of the whole table: stop offering the same office staff.
+
+    This path knows who the drivers are from the fleet's own phone numbers, so
+    the rest of the chat is dispatch, safety or a mechanic -- better evidence
+    than a picker tap, not worse.
+    """
+    roster = ROSTER + [Member(555, "Dispatch", None, False),
+                       Member(556, "Safety", "safety", False)]
+    writes, _ = _wire(monkeypatch, lookup=_clean_lookup(), members=roster)
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert writes["mark_non_drivers"].await_args.args[0] == [
+        (555, "Dispatch"), (556, "Safety")]
+    # And being a driver still outranks a stale row, as everywhere else.
+    assert writes["unmark_non_drivers"].await_args.args[0] == [8063167928, 6066541941]
+
+
+def test_a_driver_of_another_group_is_not_swept_up(monkeypatch):
+    """A team driver who changed trucks sits in two chats. Hiding them
+    fleet-wide would cost the next group's prompt its buttons."""
+    roster = ROSTER + [Member(555, "Dispatch", None, False),
+                       Member(777, "Drives 1102", None, False)]
+    writes, _ = _wire(monkeypatch, lookup=_clean_lookup(), members=roster)
+    writes["get_registered_driver_ids"].return_value = {777}
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert writes["mark_non_drivers"].await_args.args[0] == [(555, "Dispatch")]
+
+
+def test_the_whole_roster_is_judged_not_just_the_keyboard(monkeypatch):
+    """MEMBER_BUTTONS caps what an admin can *see*, and nobody sees this."""
+    padding = [Member(900_000 + i, f"Dispatch {i}", None, False)
+               for i in range(onboard.MEMBER_BUTTONS + 5)]
+    writes, _ = _wire(monkeypatch, lookup=_clean_lookup(), members=ROSTER + padding)
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert len(writes["mark_non_drivers"].await_args.args[0]) == len(padding)
+
+
+def test_a_group_of_nothing_but_drivers_marks_nobody(monkeypatch):
+    writes, _ = _wire(monkeypatch, lookup=_clean_lookup())
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert writes["mark_non_drivers"].await_args.args[0] == []
+
+
+def test_the_notice_says_a_fleet_wide_exclusion_was_written(monkeypatch):
+    """It is the one moment an admin can see this happen, and it is reversible
+    two ways -- so the notice has to name both."""
+    roster = ROSTER + [Member(555, "Dispatch", None, False)]
+    writes, sent = _wire(monkeypatch, lookup=_clean_lookup(), members=roster)
+    writes["mark_non_drivers"].return_value = 1
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    text = sent.await_args.args[1]
+    assert "1 other member(s)" in text
+    assert "/nondrivers clear" in text
+
+
+def test_nothing_new_to_hide_says_nothing(monkeypatch):
+    """Everyone was already on the list: a re-run must not report a change."""
+    roster = ROSTER + [Member(555, "Dispatch", None, False)]
+    _, sent = _wire(monkeypatch, lookup=_clean_lookup(), members=roster)
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert "recorded as non-drivers" not in sent.await_args.args[1]
+
+
+def test_the_picker_path_marks_nobody_up_front(monkeypatch):
+    """Declining is not a judgement on the roster -- only a Save is."""
+    resolved = {"+17864882619": Match("+17864882619", 8063167928, "M Mgn",
+                                      None, False),
+                "+15616747866": None}
+    writes, _ = _wire(monkeypatch, lookup=AsyncMock(return_value=resolved),
+                      members=ROSTER + [Member(555, "Dispatch", None, False)])
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    writes["mark_non_drivers"].assert_not_awaited()
+
+
+def test_a_setup_short_of_a_driver_sweeps_nobody(monkeypatch):
+    """One number for two names configures a solo driver -- and the co-driver
+    it could not place is still in that roster. Hiding them would bury the one
+    person the group is missing."""
+    one_phone = "UNIT 1216\nName: ABDULAHI MAHAMED / JAMA MOHAMED\nPhone# 786-488-2619"
+    roster = ROSTER + [Member(555, "Dispatch", None, False)]
+    writes, _ = _wire(
+        monkeypatch, description=one_phone, members=roster,
+        lookup=AsyncMock(return_value={
+            "+17864882619": Match("+17864882619", 8063167928, "M Mgn", None, False)}))
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert writes["replace_drivers"].await_args.args[1] == [
+        {"user_id": 8063167928, "name": "M Mgn"}]
+    writes["mark_non_drivers"].assert_not_awaited()
