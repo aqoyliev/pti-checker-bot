@@ -300,7 +300,9 @@ and the candidates for any name it would have had to guess at. Three rules:
   fleet-wide setup that is common, and the picker hides them behind "Show N
   hidden" until someone asks.
 
-**`--pair GID:UID --apply` writes one pair an operator has read and approved.**
+**`--pair=GID:UID --apply` writes one pair an operator has read and approved.**
+(The `=` is required: a group id starts with a minus, which argparse otherwise
+reads as another option.)
 It is the only place a *name* match reaches `set_group_unit`, so it is fenced
 in: the pairing is recomputed at write time (the report is minutes old, the
 roster is live), the person must still be the proven match, a unit must parse

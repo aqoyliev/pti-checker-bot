@@ -21,7 +21,12 @@ need an admin, and the report names them with the command to open each one.
     python scripts/setup_groups.py --apply
     python scripts/setup_groups.py --group -1001234 --apply
     python scripts/setup_groups.py --suggest           # who to pick, for a person
-    python scripts/setup_groups.py --pair -100123:456 --apply   # one reviewed pick
+    python scripts/setup_groups.py --pair=-100123:456 --apply    # one reviewed pick
+
+The `=` in that last one is not optional: a group id starts with a minus sign,
+and argparse reads a bare `-100123:456` as another option. (A plain `--group
+-100123` is fine -- that one *is* a number, and argparse lets negative numbers
+through when no option looks like one.)
 
 `--suggest` is for what is left over. The commonest decline by far is one of
 the two numbers matching no Telegram account -- the driver is in the chat, they
@@ -380,8 +385,9 @@ def main() -> int:
                    help="report who to pick for the groups that need a person; "
                         "writes nothing and spends no phone lookup")
     p.add_argument("--pair", action="append", default=[], metavar="GID:UID",
-                   help="register a pair from that report (repeatable). Needs "
-                        "--apply; re-checks the pairing before writing")
+                   help="register a pair from that report, as --pair=-100:456 "
+                        "(repeatable; the = is required, a group id starts with "
+                        "a minus). Needs --apply; re-checks before writing")
     p.add_argument("--group", type=int, action="append", default=[],
                    metavar="ID", help="only this group id (repeatable)")
     p.add_argument("--sleep", type=float, default=4.0, metavar="SECONDS",

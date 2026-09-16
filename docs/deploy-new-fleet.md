@@ -141,7 +141,16 @@ railway ssh -- python /app/scripts/setup_groups.py --suggest --sleep 1
 
 It pairs the names the fleet wrote against each member list and prints only the
 pairs it can prove, with the word that proved them. Nothing is written; confirm
-each one in the panel's driver search or through `/onboard <group_id>`.
+each one in the panel's driver search, through `/onboard <group_id>`, or by
+handing the pairs back to the script:
+
+```bash
+railway ssh -- python /app/scripts/setup_groups.py --apply     --pair=-1004438996513:7242667900 --pair=-5594909794:5016375864
+```
+
+The `=` is required (a group id starts with a minus). Each pair is re-checked
+before it is written — still the proven match, a unit in the title, and at
+least two shared words — so a stale report cannot write anything.
 
 ## 5. Things that do not travel between fleets
 
