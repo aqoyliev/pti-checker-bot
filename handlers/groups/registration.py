@@ -8,6 +8,7 @@ from aiogram import types
 from loader import bot_id, dp
 from handlers.admin.onboard import start_onboarding
 from utils.admins import is_admin
+from utils.driver_names import tidy_name
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
@@ -135,6 +136,9 @@ async def cmd_add_driver(message: types.Message):
     parts = driver_name.split(None, 1)
     if parts and parts[0].startswith("@"):
         driver_name = parts[1].strip() if len(parts) > 1 else ""
+    # The shape it will be stored in, so the confirmation below names the
+    # driver the way every report will.
+    driver_name = tidy_name(driver_name)
 
     if not driver_name:
         await message.reply(

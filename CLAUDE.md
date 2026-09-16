@@ -247,6 +247,20 @@ on which a swapped pair becomes visible. The picker's Save keeps whatever name a
 driver is already stored with, so editing one pick can't quietly swap the other
 back to a Telegram handle.
 
+**Every stored driver name has one shape** (`tidy_name`, as of 2026-09-16):
+commas and extra spaces dropped, a name typed all in capitals or all in lower
+case title-cased — `SAINTIL, FEDJ` is stored as `Saintil Fedj`, the same shape
+the automatic setup already wrote. A name with mixed casing is left exactly as
+typed (`McDonald`, `DJ CueVayb`): that is someone's deliberate spelling. It is
+applied **in `utils/db`, on every write to `group_drivers.name`** — add,
+replace, swap, rename — the way `normalize_unit` guards the unit, so no caller
+can store the other shape by forgetting; `init_db` tidies the rows that predate
+it, in Python rather than SQL, because Postgres' `initcap()` does not agree
+with `str.title()` and two definitions of the shape would drift. The panel and
+`/adddriver` answer with the stored name, not the typed one. Unlike
+`_clean_name` (which parses About text, and so refuses digits), `tidy_name`
+shapes a name and never judges it — `Lovensky 509` is how that driver is known.
+
 ### `scripts/setup_groups.py`: the groups that were asked too early
 
 The automatic path declines a group whose About-text numbers resolve to people

@@ -576,9 +576,11 @@ function drawDrivers(g) {
     const name = document.getElementById("nameIn").value.trim();
     if (!name) return toast("Name can't be empty");
     try {
-      await api("/api/groups/" + gid + "/drivers/" + drvUI.rename + "/name",
+      const r = await api("/api/groups/" + gid + "/drivers/" + drvUI.rename + "/name",
         { method: "POST", body: { name } });
-      toast("Renamed to " + name);
+      // The server stores names in one shape ("SAINTIL, FEDJ" -> "Saintil
+      // Fedj"), so say what was saved rather than what was typed.
+      toast("Renamed to " + ((r && r.name) || name));
       afterDriverChange(gid);
     } catch (e) { toast(e.message); }
   };

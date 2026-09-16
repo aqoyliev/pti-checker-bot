@@ -224,7 +224,8 @@ def test_a_swap_clears_the_incoming_driver_non_driver_row(db):
                       body={"user_id": 2002, "name": "NEW"})
 
     assert status == 200
-    db["swap_driver"].assert_awaited_once_with(-100, 2001, 2002, "NEW")
+    # "NEW" is passed on in the one shape names are stored in.
+    db["swap_driver"].assert_awaited_once_with(-100, 2001, 2002, "New")
     db["unmark_non_drivers"].assert_awaited_once_with([2002])
 
 
@@ -237,3 +238,23 @@ def test_renaming_via_swap_to_the_same_id_is_allowed(db):
                       body={"user_id": 2001, "name": "NEW"})
 
     assert status == 200
+
+
+def test_a_rename_answers_with_the_name_as_stored(db):
+    """Typed as the fleet writes it, stored the way every other name is -- and
+    the panel says what was saved, not what was typed."""
+    status, body = _call(server.api_rename_driver,
+                         match_info={"gid": -100, "uid": 2001},
+                         body={"name": "SAINTIL, FEDJ"})
+
+    assert status == 200
+    assert body["name"] == "Saintil Fedj"
+    db["set_driver_names"].assert_awaited_once_with([(-100, 2001, "Saintil Fedj")])
+
+
+def test_adding_answers_with_the_name_as_stored(db):
+    status, body = _call(server.api_add_driver, match_info={"gid": -100},
+                         body={"user_id": 2002, "name": "GONZALEZ OSVALDO"})
+
+    assert status == 200 and body["name"] == "Gonzalez Osvaldo"
+    db["add_driver"].assert_awaited_once_with(-100, 2002, "Gonzalez Osvaldo")

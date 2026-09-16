@@ -31,7 +31,7 @@ from loader import bot
 from scripts import fleet_report as _report
 from utils import userbot
 from utils.admins import resolve_admin
-from utils.driver_names import match_names_to_drivers, parse_driver_contacts
+from utils.driver_names import match_names_to_drivers, parse_driver_contacts, tidy_name
 from utils.group_health import note_send_failure, note_send_ok
 from utils.phones import find_phones
 from utils.db import (
@@ -467,7 +467,10 @@ async def api_group_members(request: web.Request) -> web.Response:
 
 
 def _driver_name(body: dict) -> str:
-    return str(body.get("name") or "").strip()
+    """The name as it will be stored. utils/db tidies it anyway; doing it here
+    too means the log line and the reply say what was saved, not what was
+    typed."""
+    return tidy_name(str(body.get("name") or ""))
 
 
 async def api_add_driver(request: web.Request) -> web.Response:
@@ -491,7 +494,7 @@ async def api_add_driver(request: web.Request) -> web.Response:
     await unmark_non_drivers([uid])
     logging.info("web panel: admin %s added driver %s (%r) to group %s",
                  request["admin"]["user_id"], uid, name, gid)
-    return _json({"ok": True})
+    return _json({"ok": True, "name": name})
 
 
 async def api_rename_driver(request: web.Request) -> web.Response:
@@ -507,7 +510,7 @@ async def api_rename_driver(request: web.Request) -> web.Response:
                  request["admin"]["user_id"], uid, gid, name)
     # changed=False also means "the name already said that", which is a no-op
     # rather than a failure — the caller only needs to know it went through.
-    return _json({"ok": True, "changed": bool(changed)})
+    return _json({"ok": True, "changed": bool(changed), "name": name})
 
 
 async def api_replace_driver(request: web.Request) -> web.Response:
@@ -533,7 +536,7 @@ async def api_replace_driver(request: web.Request) -> web.Response:
     await unmark_non_drivers([new_uid])
     logging.info("web panel: admin %s replaced driver %s with %s (%r) in group %s",
                  request["admin"]["user_id"], old_uid, new_uid, name, gid)
-    return _json({"ok": True})
+    return _json({"ok": True, "name": name})
 
 
 async def api_model(request: web.Request) -> web.Response:

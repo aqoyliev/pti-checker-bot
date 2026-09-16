@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncpg
 from data.config import DATABASE_URL, FLEET_TZ
+from utils.driver_names import tidy_name
 
 _pool: asyncpg.Pool | None = None
 
@@ -175,6 +176,27 @@ async def init_db():
              WHERE unit_number IS DISTINCT FROM
                    NULLIF(BTRIM(TRANSLATE(unit_number, '<>', '')), '');
         """)
+        # Driver names typed before tidy_name guarded the writes -- the same
+        # one-time, idempotent cleanup as the unit numbers above. Done in Python
+        # rather than SQL so there is exactly one definition of the shape:
+        # Postgres' initcap() does not agree with str.title() on every name.
+        rows = await conn.fetch("SELECT id, name FROM group_drivers")
+        fixes = untidy_driver_names(rows)
+        if fixes:
+            await conn.executemany(
+                "UPDATE group_drivers SET name = $2 WHERE id = $1", fixes)
+
+
+def untidy_driver_names(rows) -> list[tuple[int, str]]:
+    """(id, tidy name) for every stored name not already in its one shape."""
+    out = []
+    for r in rows:
+        tidy = tidy_name(r["name"])
+        # A blank name stays for a person to fill in: there is nothing better
+        # to put there, and "" is no fix for "  ".
+        if tidy and tidy != r["name"]:
+            out.append((r["id"], tidy))
+    return out
 
 
 def _pool_check() -> asyncpg.Pool:
@@ -551,11 +573,15 @@ async def get_drivers(group_id: int) -> list[dict]:
 
 
 async def add_driver(group_id: int, user_id: int, name: str) -> bool:
-    """Returns False if driver already registered."""
+    """Returns False if driver already registered.
+
+    Like every write to `group_drivers.name` below, the name is stored in its
+    one shape (`tidy_name`), whoever typed it.
+    """
     try:
         await _pool_check().execute(
             "INSERT INTO group_drivers (group_id, user_id, name) VALUES ($1, $2, $3)",
-            group_id, user_id, name,
+            group_id, user_id, tidy_name(name),
         )
         return True
     except asyncpg.UniqueViolationError:
@@ -610,7 +636,7 @@ async def replace_drivers(group_id: int, drivers: list[dict]) -> None:
                     """INSERT INTO group_drivers (group_id, user_id, name)
                        VALUES ($1, $2, $3)
                        ON CONFLICT (group_id, user_id) DO UPDATE SET name = $3""",
-                    group_id, int(d["user_id"]), d["name"],
+                    group_id, int(d["user_id"]), tidy_name(d["name"]),
                 )
             await conn.execute(
                 "UPDATE groups SET setup_complete = TRUE WHERE group_id = $1", group_id
@@ -641,7 +667,7 @@ async def swap_driver(group_id: int, old_user_id: int, new_user_id: int,
                 """INSERT INTO group_drivers (group_id, user_id, name)
                    VALUES ($1, $2, $3)
                    ON CONFLICT (group_id, user_id) DO UPDATE SET name = $3""",
-                group_id, new_user_id, name,
+                group_id, new_user_id, tidy_name(name),
             )
     return True
 
@@ -661,6 +687,9 @@ async def set_driver_names(updates: list[tuple[int, int, str]]) -> int:
     async with pool.acquire() as conn:
         async with conn.transaction():
             for group_id, user_id, name in updates:
+                # Tidied before the comparison too, so renaming "Saintil Fedj"
+                # to "SAINTIL, FEDJ" is the no-op it is, not a counted change.
+                name = tidy_name(name)
                 rows = await conn.fetch(
                     """UPDATE group_drivers SET name = $3
                         WHERE group_id = $1 AND user_id = $2

@@ -42,18 +42,39 @@ _WORD = re.compile(r"[^\W\d_]{3,}")
 MAX_NAME_CHARS = 64
 
 
+def tidy_name(raw: str | None) -> str:
+    """The one stored shape of a driver name: 'SAINTIL,  FEDJ' -> 'Saintil Fedj'.
+
+    Every name that reaches `group_drivers` goes through this (utils/db applies
+    it on each write), whoever typed it: the About text, the title, an admin in
+    the panel or `/adddriver`. Before that, an automatic setup stored
+    "Vazquez Lizbeth" and an admin fixing the group next door stored
+    "SAINTIL, FEDJ", and the fleet report printed both styles down one column.
+
+    Commas and runs of whitespace go -- the fleet writes SURNAME, GIVEN, and the
+    comma is punctuation, not part of the name. A name typed in one case (all
+    capitals, or all lower case) is title-cased. A name with any mixed casing is
+    left exactly as it is: that is somebody's deliberate spelling, and .title()
+    would turn McDonald into Mcdonald.
+    """
+    name = " ".join((raw or "").replace(",", " ").split())
+    if name.isupper() or name.islower():
+        return name.title()
+    return name
+
+
 def _clean_name(raw: str) -> str:
     """'ZAMA, EMILE ' -> 'Zama Emile'. Empty when it isn't a name at all."""
-    name = " ".join(raw.replace(",", " ").split())
+    name = tidy_name(raw)
     if not name or len(name) > MAX_NAME_CHARS:
         return ""
     # A digit means the line was "Driver: 718-864-1154" or similar -- a label,
     # not a name. Storing it would be worse than falling back to Telegram.
+    # (A name an admin types is not held to this: "Lovensky 509" is how that
+    # driver is known, and tidy_name keeps it.)
     if any(ch.isdigit() for ch in name) or not _HAS_LETTER.search(name):
         return ""
-    # The fleet's lists SHOUT, but a properly-cased name is left alone:
-    # .title() would turn McDonald into Mcdonald.
-    return name.title() if name.isupper() else name
+    return name
 
 
 def parse_driver_names(text: str) -> list[str]:
