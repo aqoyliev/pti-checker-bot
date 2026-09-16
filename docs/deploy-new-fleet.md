@@ -131,6 +131,18 @@ railway ssh -- python /app/scripts/setup_groups.py --apply
 Groups it declines are printed with an `/onboard <group_id>` line each; those
 need a person. Run it again whenever another batch of drivers has been added.
 
+Most declines are one of the two numbers matching no Telegram account — the
+driver is in the chat but cannot be found by phone, which is their own privacy
+setting. For those, ask for the reading rather than the write:
+
+```bash
+railway ssh -- python /app/scripts/setup_groups.py --suggest --sleep 1
+```
+
+It pairs the names the fleet wrote against each member list and prints only the
+pairs it can prove, with the word that proved them. Nothing is written; confirm
+each one in the panel's driver search or through `/onboard <group_id>`.
+
 ## 5. Things that do not travel between fleets
 
 - Telethon sessions (above).

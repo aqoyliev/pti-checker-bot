@@ -278,6 +278,28 @@ It needs the bot's own credentials (bot token for the roster, the lookup
 session for the numbers), so unlike `scripts/fleet_report.py` it runs on the
 deployment — `railway ssh -- python /app/scripts/setup_groups.py`.
 
+**`--suggest` is for what is left over, and it never writes.** Measured on
+Cross USA on 2026-09-16: of 41 groups, 22 configured themselves and 16 declined
+because *one of the two numbers matched no Telegram account* — the driver is in
+the chat, they simply cannot be found by phone, which is a privacy setting and
+theirs to keep. No amount of retrying moves those, so the mode does the reading
+a person would otherwise do: it pairs the names the fleet wrote against the
+member list with `match_names_to_drivers` — the same proven-only rule
+`/fixnames` uses — and prints the pairs, the shared word that proved each one,
+and the candidates for any name it would have had to guess at. Three rules:
+
+- **it writes nothing and spends no phone lookup** (`--suggest --apply` is
+  refused outright): every pair is confirmed by a person, in the panel or
+  through `/onboard`;
+- **the About text is read first, the title only as a fallback**
+  (`_names_from_title`). About half these groups name the drivers in the title
+  and nowhere a parser can see them — no label, no phone line beneath — so a
+  title read is better than nothing, but it is the weaker source and the report
+  says which one it used;
+- **it flags a suggested person who is on the non-driver list.** After a
+  fleet-wide setup that is common, and the picker hides them behind "Show N
+  hidden" until someone asks.
+
 ### `/fixnames`: the backfill for groups configured earlier
 
 Groups set up before that are filed under Telegram names, and re-resolving every

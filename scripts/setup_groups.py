@@ -20,6 +20,15 @@ need an admin, and the report names them with the command to open each one.
     python scripts/setup_groups.py                     # preview, writes nothing
     python scripts/setup_groups.py --apply
     python scripts/setup_groups.py --group -1001234 --apply
+    python scripts/setup_groups.py --suggest           # who to pick, for a person
+
+`--suggest` is for what is left over. The commonest decline by far is one of
+the two numbers matching no Telegram account -- the driver is in the chat, they
+just cannot be found by phone (that is a privacy setting, and their own to
+keep) -- so the pairing has to come from a person. This mode does the reading
+for them: it pairs the names the fleet wrote against the member list and prints
+only the pairs that are proven, by the same rule /fixnames uses. It writes
+nothing, ever, and spends no phone lookup at all.
 
 Preview is the default because this writes unattended, to a live fleet, over
 every group at once -- the same reason `/titlecheck` and `/fixnames` show their
@@ -36,6 +45,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -51,6 +61,15 @@ from handlers.admin.onboard import (  # noqa: E402
 )
 from loader import bot  # noqa: E402
 from utils import db, phone_lookup, userbot  # noqa: E402
+# _words is the tokenizer the pairing rule is defined in terms of, so the
+# explanation printed beside a suggestion is drawn from the same words the
+# decision was made on rather than from a second opinion about them.
+from utils.driver_names import (  # noqa: E402
+    _words,
+    match_names_to_drivers,
+    parse_driver_names,
+)
+from utils.auto_onboard import MAX_DRIVERS  # noqa: E402
 from utils.unit_parse import guess_unit  # noqa: E402
 
 # Once the lookup account is contact-import limited, every remaining group gets
@@ -88,6 +107,113 @@ async def _setup_one(group: dict, apply: bool) -> tuple[str, str]:
         return "would-configure", f"unit {plan.unit} — {who}"
     await _apply_auto_config(gid, plan, roster)
     return "configured", f"unit {plan.unit} — {who}"
+
+
+# Words a title puts around the unit number rather than around a name.
+_TITLE_LABELS = {"unit", "truck", "sub", "trailer", "lo", "jr", "no", "u"}
+
+
+def _names_from_title(title: str, unit: str | None) -> list[str]:
+    """Driver names as the chat title writes them: "<unit> - NAME / NAME".
+
+    A fallback source for the suggestion report, tried only after the About
+    text, which is the fleet's own record. Roughly half of these groups write
+    the drivers into the title and nowhere a parser can see them otherwise --
+    no label, no phone line to sit above. Nothing read this way decides
+    anything: it is a name to show a person, and they confirm the pick.
+    """
+    text = title.replace(unit, " ") if unit else title
+    out = []
+    for part in re.split(r"[/;|]", text):
+        words = [w.strip("()#.,-") for w in re.split(r"[\s,]+", part) if w]
+        words = [w for w in words
+                 if w and not any(ch.isdigit() for ch in w)
+                 and w.lower() not in _TITLE_LABELS]
+        name = " ".join(words).strip()
+        # A part has to carry a real word to be a name at all; initials and
+        # leftovers like "D" or "-" are not.
+        if any(len(w) >= 3 for w in words):
+            out.append(name)
+    return out[:MAX_DRIVERS]
+
+
+async def _suggest_one(group: dict, hidden: set[int]) -> tuple[int, list[str]]:
+    """(proven pairs, report lines) for one group. Writes nothing, asks nothing.
+
+    The pairing is `match_names_to_drivers`, the same proven-only rule
+    /fixnames uses -- a shared word of three letters or more that picks out
+    exactly one person, with nobody claimed twice. Two members sharing a
+    surname pair to neither, and a name that cannot be placed is printed with
+    its candidates rather than resolved by guess.
+    """
+    gid = group["group_id"]
+    try:
+        chat = await bot.get_chat(gid)
+    except Exception as e:
+        return 0, [f"{gid:>15}  unreachable — {type(e).__name__}: {e}"]
+    title = chat.title or ""
+    roster = [m for m in await userbot.list_members(gid) if not m.is_bot]
+    if not roster:
+        return 0, [f"{gid:>15}  no member list (is the bot still in the chat?)"]
+    description = await userbot.get_description(gid)
+    unit, _source = guess_unit(title, description)
+
+    names = parse_driver_names(description)
+    where = "About text"
+    if not names:
+        names = _names_from_title(title, unit)
+        where = "title"
+    head = f"{gid:>15}  unit {unit or '?'}  ·  {len(roster)} members  ·  {title[:44]}"
+    if not names:
+        return 0, [head, "      no driver names in the About text or the title"]
+
+    people = [{"user_id": m.user_id, "name": m.label} for m in roster]
+    placed, unplaced = match_names_to_drivers(names, people)
+    by_id = {m.user_id: m for m in roster}
+
+    lines = [head, f"      names read from the {where}"]
+    for uid, name in placed.items():
+        m = by_id[uid]
+        shared = ", ".join(sorted(_words(name) & _words(m.label)))
+        # Say so when the person to pick is one the automatic sweep has since
+        # filed as a non-driver: they are real, and the picker hides them
+        # behind "Show N hidden" until someone asks for them.
+        flag = "   [hidden as a non-driver — tap Show hidden]" if uid in hidden else ""
+        lines.append(f"      ✓ {name}  →  {m.label} ({uid})   shared: {shared}{flag}")
+    for name in unplaced:
+        cands = [m for m in roster if _words(name) & _words(m.label)]
+        if not cands:
+            lines.append(f"      ? {name}  —  no member's name shares a word with it")
+        else:
+            who = "; ".join(f"{m.label} ({m.user_id})" for m in cands[:4])
+            lines.append(f"      ? {name}  —  {len(cands)} possible: {who}")
+    return len(placed), lines
+
+
+async def suggest(only: list[int], sleep: float, limit: int | None) -> int:
+    """Report who to pick for every group still unconfigured. Writes nothing."""
+    await db.init_db()
+    groups = await db.get_unconfigured_groups()
+    if only:
+        groups = [g for g in groups if g["group_id"] in set(only)]
+    if limit:
+        groups = groups[:limit]
+    hidden = await db.get_non_driver_ids()
+    print(f"{len(groups)} unconfigured group(s) — suggestions only, nothing is "
+          f"written and no phone lookup is spent\n")
+
+    proven = 0
+    for i, g in enumerate(groups):
+        pairs, lines = await _suggest_one(g, hidden)
+        proven += pairs
+        print("\n".join(lines))
+        if sleep and i + 1 < len(groups):
+            await asyncio.sleep(sleep)
+
+    print(f"\n{proven} proven pair(s) across {len(groups)} group(s).")
+    print("Confirm each in the web panel (the group's driver search takes the "
+          "name above), or run /onboard <group_id> in the bot's DM and tap it.")
+    return 0
 
 
 async def run(apply: bool, only: list[int], sleep: float, limit: int | None) -> int:
@@ -134,6 +260,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--apply", action="store_true",
                    help="write the units and drivers (default: preview only)")
+    p.add_argument("--suggest", action="store_true",
+                   help="report who to pick for the groups that need a person; "
+                        "writes nothing and spends no phone lookup")
     p.add_argument("--group", type=int, action="append", default=[],
                    metavar="ID", help="only this group id (repeatable)")
     p.add_argument("--sleep", type=float, default=4.0, metavar="SECONDS",
@@ -146,8 +275,13 @@ def main() -> int:
     # Telethon narrates every connection at INFO, which buries the report.
     logging.getLogger("telethon").setLevel(logging.WARNING)
 
+    if args.suggest and args.apply:
+        p.error("--suggest reports; it never writes. Drop --apply.")
+
     async def _main():
         try:
+            if args.suggest:
+                return await suggest(args.group, args.sleep, args.limit)
             return await run(args.apply, args.group, args.sleep, args.limit)
         finally:
             # Both MTProto clients get a clean disconnect: the lookup account is

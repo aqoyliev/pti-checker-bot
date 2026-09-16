@@ -131,3 +131,99 @@ def test_the_failure_streak_resets_on_a_group_that_worked(monkeypatch):
     seen = _run(monkeypatch, [refused, refused, ok, refused, refused, ok])
 
     assert len(seen) == 6
+
+
+# ---------- the suggestion report ----------
+
+def test_names_come_out_of_the_title_when_the_about_text_has_none():
+    """Half these groups write the drivers into the title and nowhere else --
+    no label, no phone line under them, nothing a parser can hold on to."""
+    assert setup_groups._names_from_title(
+        "2643 |GONZALEZ OSVALDO / VAZQUEZ LIZBETH", "2643"
+    ) == ["GONZALEZ OSVALDO", "VAZQUEZ LIZBETH"]
+    assert setup_groups._names_from_title(
+        "1164 - SINEUS RUDOLPH / KNIGHT, DAMON", "1164"
+    ) == ["SINEUS RUDOLPH", "KNIGHT DAMON"]
+    # "UNIT" labels the number, "( LO )" labels the lease, neither is a name.
+    assert setup_groups._names_from_title(
+        "UNIT 2644 MOLO, DAVID / JOSEPH , NICKEL ( LO )", "2644"
+    ) == ["MOLO DAVID", "JOSEPH NICKEL"]
+    # Some titles carry the phone numbers too; a word with a digit in it is not
+    # part of anybody's name.
+    assert setup_groups._names_from_title(
+        "212582 - GAITER ERIC 772-489-1955 ; MILLER MURTON 772-626-4417", "212582"
+    ) == ["GAITER ERIC", "MILLER MURTON"]
+
+
+def test_a_title_with_no_names_yields_none():
+    assert setup_groups._names_from_title("UNIT 2002", "2002") == []
+
+
+def _suggest(monkeypatch, *, title, about, roster, hidden=frozenset()):
+    monkeypatch.setattr(setup_groups.bot, "get_chat",
+                        AsyncMock(return_value=SimpleNamespace(title=title)))
+    monkeypatch.setattr(setup_groups.userbot, "list_members",
+                        AsyncMock(return_value=list(roster)))
+    monkeypatch.setattr(setup_groups.userbot, "get_description",
+                        AsyncMock(return_value=about))
+    return asyncio.run(setup_groups._suggest_one({"group_id": -100123}, set(hidden)))
+
+
+def test_a_proven_pair_is_reported_with_the_word_that_proved_it(monkeypatch, wired):
+    roster = [SimpleNamespace(user_id=11, label="Osvaldo Gonzalez", is_bot=False),
+              SimpleNamespace(user_id=12, label="Lizbeth V", is_bot=False),
+              SimpleNamespace(user_id=13, label="Dispatch Ana", is_bot=False)]
+
+    pairs, lines = _suggest(monkeypatch, title="2643 GONZALEZ OSVALDO / LIZBETH",
+                            about="", roster=roster)
+
+    assert pairs == 2
+    report = "\n".join(lines)
+    assert "Osvaldo Gonzalez (11)" in report and "Lizbeth V (12)" in report
+    assert "gonzalez" in report          # the shared word is shown, not implied
+    assert "Dispatch Ana" not in report
+    # It reads and reports. Nothing here may write or spend a phone lookup.
+    wired["_try_auto_config"].assert_not_awaited()
+    wired["_apply_auto_config"].assert_not_awaited()
+
+
+def test_two_members_sharing_a_surname_are_left_to_the_person(monkeypatch, wired):
+    """The rule /fixnames uses: a pair that could be either is not a pair."""
+    roster = [SimpleNamespace(user_id=11, label="Jama Mohamed", is_bot=False),
+              SimpleNamespace(user_id=12, label="Mohamed Jama", is_bot=False)]
+
+    pairs, lines = _suggest(monkeypatch, title="2629 JAMA MOHAMMED / JAMA MOHAMED",
+                            about="", roster=roster)
+
+    assert pairs == 0
+    report = "\n".join(lines)
+    assert "2 possible" in report
+    assert "Jama Mohamed (11)" in report and "Mohamed Jama (12)" in report
+
+
+def test_the_about_text_wins_over_the_title(monkeypatch, wired):
+    roster = [SimpleNamespace(user_id=11, label="Anel B", is_bot=False)]
+
+    _, lines = _suggest(monkeypatch, title="215237 SOMEBODY ELSE",
+                        about="Name: BEAUCICOT ANEL\nPhone# 407-785-9127",
+                        roster=roster)
+
+    assert "names read from the About text" in "\n".join(lines)
+
+
+def test_a_driver_the_sweep_has_hidden_says_so(monkeypatch, wired):
+    """After a fleet-wide setup the person to pick is often on the non-driver
+    list, and the picker hides them until someone taps Show hidden."""
+    roster = [SimpleNamespace(user_id=11, label="Osvaldo Gonzalez", is_bot=False)]
+
+    _, lines = _suggest(monkeypatch, title="2643 GONZALEZ OSVALDO", about="",
+                        roster=roster, hidden={11})
+
+    assert "Show hidden" in "\n".join(lines)
+
+
+def test_a_group_with_no_roster_is_reported_not_guessed(monkeypatch, wired):
+    pairs, lines = _suggest(monkeypatch, title="OVQAT GRUPPA", about="", roster=[])
+
+    assert pairs == 0
+    assert "no member list" in "\n".join(lines)
