@@ -6,19 +6,31 @@ guards on *what it declines to touch* are the whole test surface.
 from datetime import date, datetime
 
 from handlers.admin.units import (
+    apply_reactivations,
     apply_renames,
     title_deactivations,
+    title_reactivations,
     title_sweep_due,
     title_unit_changes,
 )
 
 
-def _g(gid: int, unit, title, active=True) -> dict:
-    return {"group_id": gid, "unit_number": unit, "title": title, "is_active": active}
+def _g(gid: int, unit, title, active=True, by=None) -> dict:
+    return {"group_id": gid, "unit_number": unit, "title": title,
+            "is_active": active, "deactivated_by": by}
+
+
+def _off(gid: int, unit, title, by="title") -> dict:
+    """An inactive group, retired by the title sweep unless said otherwise."""
+    return _g(gid, unit, title, active=False, by=by)
 
 
 def _dead(groups: list[dict]) -> list[int]:
     return [c["group"]["group_id"] for c in title_deactivations(groups)]
+
+
+def _back(groups: list[dict], **kw) -> list[tuple[int, str]]:
+    return [(r["group"]["group_id"], r["unit"]) for r in title_reactivations(groups, **kw)]
 
 
 # ---------- what gets retired ----------
@@ -123,6 +135,117 @@ def test_a_collision_leaves_both_groups_alone():
     renames = title_unit_changes(groups)
     assert renames == []
     assert _dead(apply_renames(groups, renames)) == []
+
+
+# ---------- what comes back ----------
+#
+# The mirror image of the retirement: a retired group whose title names a unit
+# again is revived. Before 2026-09-18 nothing reactivated at all, so a truck
+# whose group lost its number and got it back stayed off the reports for good.
+
+def test_a_title_naming_the_stored_unit_again_revives_the_group():
+    assert _back([_off(1, "1225", "1225 / MAGAN")]) == [(1, "1225")]
+
+
+def test_a_title_naming_another_unit_revives_under_that_unit():
+    # The chat was handed to another truck while it was off: it comes back
+    # under the number the title names now, not the one it was retired with.
+    assert _back([_off(1, "1225", "UNIT 1330 / MAGAN")]) == [(1, "1330")]
+
+
+def test_the_stored_unit_on_the_title_wins_over_the_parser():
+    # Same veto as the retirement: "T-120" is on the title, whatever parse_unit
+    # would have made of it.
+    assert _back([_off(1, "T-120", "T-120 QUINTERO, JOHN")]) == [(1, "T-120")]
+
+
+def test_a_retired_marker_keeps_the_group_off():
+    assert _back([_off(1, "1225", "INACTIVE - 1225 MAGAN")]) == []
+
+
+def test_a_title_with_no_unit_keeps_the_group_off():
+    assert _back([_off(1, "1225", "MAGAN, MOHAMED")]) == []
+
+
+def test_unconfigured_group_is_never_revived():
+    # No stored unit: never onboarded, so there is nothing to bring back.
+    assert _back([_off(1, None, "UNIT 1330 / MAGAN")]) == []
+
+
+def test_unreadable_title_is_no_evidence_for_revival_either():
+    assert _back([_off(1, "1225", None)]) == []
+
+
+def test_an_active_group_is_not_a_revival():
+    assert _back([_g(1, "1225", "1225 / MAGAN")]) == []
+
+
+def test_a_unit_held_by_an_active_group_blocks_the_revival():
+    # Two groups under one number is a broken compliance denominator -- the
+    # same collision rule the rename applies.
+    groups = [_off(1, "1225", "1225 / OLD"), _g(2, "1225", "1225 / NEW")]
+    assert _back(groups) == []
+
+
+def test_two_revivals_claiming_one_unit_are_both_skipped():
+    groups = [_off(1, "1225", "UNIT 1330 / A"), _off(2, "1330", "1330 / B")]
+    assert _back(groups) == []
+
+
+# ---------- whose retirement the sweep may reverse ----------
+
+def test_a_panel_deactivation_is_never_reversed():
+    # An admin's own decision about a chat whose title may say anything;
+    # reversing it every morning would make the button useless. Not even
+    # /titlecheck offers it -- the panel has its own Reactivate.
+    groups = [_off(1, "1225", "1225 / MAGAN", by="panel")]
+    assert _back(groups) == []
+    assert _back(groups, unattended=True) == []
+
+
+def test_the_unattended_sweep_reverses_only_its_own_and_unreachable():
+    # 'title': its own retirement. 'unreachable': three failed sends, which the
+    # local Bot API server produces for chats it merely forgot -- a title read
+    # fresh from that very chat is the proof the alarm was false.
+    groups = [_off(1, "1225", "1225 / A", by="title"),
+              _off(2, "1226", "1226 / B", by="unreachable"),
+              _off(3, "1227", "1227 / C", by=None)]
+    assert _back(groups, unattended=True) == [(1, "1225"), (2, "1226")]
+
+
+def test_titlecheck_also_offers_the_legacy_backlog():
+    # Retired before the reason was recorded: a person confirms each one.
+    groups = [_off(3, "1227", "1227 / C", by=None)]
+    assert _back(groups) == [(3, "1227")]
+
+
+# ---------- revive first, then re-file, then retire ----------
+
+def test_a_revived_group_holds_its_unit_against_a_rename():
+    # Group 2's title now claims 1225, the very number group 1 comes back
+    # under. Group 1 is active from the first pass on, so the rename collides
+    # with it instead of landing beside it.
+    groups = [_off(1, "1225", "1225 / A"), _g(2, "1400", "UNIT 1225 / B")]
+    revives = title_reactivations(groups, unattended=True)
+    after = apply_reactivations(groups, revives)
+    assert [(g["group_id"], g["is_active"], g["unit_number"]) for g in after] == \
+        [(1, True, "1225"), (2, True, "1400")]
+    assert title_unit_changes(after) == []
+
+
+def test_a_revived_group_is_not_retired_in_the_same_sweep():
+    groups = [_off(1, "1225", "UNIT 1330 / A")]
+    after = apply_reactivations(groups, title_reactivations(groups, unattended=True))
+    assert after[0]["unit_number"] == "1330"
+    assert _dead(after) == []
+    assert title_unit_changes(after) == []
+
+
+def test_apply_reactivations_leaves_other_groups_untouched():
+    groups = [_off(1, "1225", "1225 / A"), _off(2, "1226", "B"), _g(3, "1227", "1227 / C")]
+    after = apply_reactivations(groups, title_reactivations(groups))
+    assert [(g["group_id"], g["is_active"]) for g in after] == [(1, True), (2, False), (3, True)]
+    assert after[1] is groups[1]
 
 
 # ---------- the schedule ----------

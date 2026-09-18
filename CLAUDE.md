@@ -382,15 +382,17 @@ appeared on screen must not be swept into a fleet-wide non-driver decision.
 Everything about *membership* still reads the full roster.
 
 **Titles are swept once a day.** `run_title_sweep` (keyed on the UTC date, from
-`title_sweep_loop`) re-checks every active group's title and reports only when
-something changed. The posting-permission sweep rides the same daily gate for
-the same reason — one throttled pass over every active group, once — but is
-guarded separately so a failure there can't undo a title sweep that already ran:
+`title_sweep_loop`) re-checks every group's title — active *and* retired — and
+reports only when something changed. The posting-permission sweep rides the
+same daily gate for the same reason — one throttled pass over every active
+group, once — but is guarded separately so a failure there can't undo a title
+sweep that already ran:
 
 | The title now names | Result |
 | --- | --- |
 | a different unit | re-filed under it |
 | no unit at all, or INACTIVE / moved | deactivated |
+| a unit again, on a group the sweep retired | reactivated, under the unit the title names now |
 | the same unit it always did | silent |
 
 It writes unattended, so four things hold it up:
@@ -417,9 +419,42 @@ It writes unattended, so four things hold it up:
   the fleet leaves the number on those titles.
 
 `title_deactivations` **reads the title alone**, and one rule is already a wide
-net: ~20% of fleet titles carry no parseable number. Reversing a retirement is a
-manual panel decision, same as any other reactivation — nothing here ever
-reactivates a group on its own.
+net: ~20% of fleet titles carry no parseable number.
+
+**Retire and revive are one rule, read in both directions** (as of 2026-09-18).
+The fleet retires a truck by taking the number off the title and revives one
+by putting it back, and until then only the first half was automatic: a group
+retired for a lost number came back under a new driver and stayed off the
+reports for good — the fleet found 37 such groups on Gurman alone.
+`title_reactivations` is the mirror of `title_deactivations`, on the same
+evidence and the same guards (retired marker, no title, no stored unit, the
+rename's collision rule), and it comes back **under the unit the title names
+now** — a chat handed to another truck while it was off is re-filed in the
+same write that switches it on. Two things keep it from undoing a decision
+that wasn't the title's:
+
+- **`groups.deactivated_by` records who switched a group off**: `'title'`
+  (sweep or `/titlecheck`), `'panel'`, `'unreachable'` (three failed sends).
+  Every reactivation clears it. The unattended sweep reverses only `'title'`
+  and `'unreachable'` — the second because a title read fresh from the very
+  chat three sends "could not reach" is the proof that alarm was false (the
+  local Bot API server answers "chat not found" for every chat it forgot on
+  restart, which is what `scripts/reactivate_groups.py` used to clean up). A
+  `'panel'` deactivation is an admin's own decision about a chat whose title
+  may say anything, and reversing it every morning would make the button
+  useless: it stays off until the panel turns it on, and not even
+  `/titlecheck` offers it.
+- **Groups retired before the reason was recorded (`NULL`) are left to
+  `/titlecheck`**, which shows the retire and revive candidates together, each
+  a toggle, and applies both in one transaction. The sweep can't tell a
+  pre-2026-09-18 title retirement from an old panel decision, so a person
+  looks at that backlog once; from then on the sweep knows.
+
+The sweep reads the retired groups' titles too (`get_chat` on every group, not
+just the active ones — a few seconds more a day); a retired chat the bot was
+removed from can't be read and simply stays retired, and is not counted among
+the "couldn't be read" groups the report lists, since that would name every
+dead chat in the fleet every morning.
 
 A rename needs the group to be already configured and its title not to read as
 retired. Collisions — two titles claiming one unit, or a unit another active
@@ -606,9 +641,10 @@ railway run py -3.11 scripts/tg_session_to_railway.py \
 
 Two different things, deliberately kept apart:
 
-- **`groups.is_active`** is an administrative switch — the daily title sweep and
-  the panel's Deactivate/Reactivate set it. It says whether a group *should*
-  still be running, not whether anyone is using it.
+- **`groups.is_active`** is an administrative switch — the daily title sweep
+  (both ways), the unreachable strikes and the panel's Deactivate/Reactivate
+  set it, and `groups.deactivated_by` says which one did. It says whether a
+  group *should* still be running, not whether anyone is using it.
 - **Quiet** is derived from traffic: at most `GROUP_QUIET_MAX_MESSAGES` (env,
   default **3**) human messages in `GROUP_QUIET_DAYS` (env, default **3**) days.
   `middlewares/group_activity.py` counts one per human message into

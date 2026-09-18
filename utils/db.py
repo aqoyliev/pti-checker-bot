@@ -74,6 +74,15 @@ async def init_db():
 
             ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 
+            -- Who switched an inactive group off: 'title' (the daily sweep or
+            -- /titlecheck -- the title stopped naming a unit), 'panel' (an
+            -- admin's own decision), 'unreachable' (three failed sends). NULL
+            -- while active, and for groups retired before this was recorded.
+            -- The title sweep reverses only its own retirements and the
+            -- unreachable path's false alarms; a panel decision stays put.
+            -- See handlers/admin/units.title_reactivations.
+            ALTER TABLE groups ADD COLUMN IF NOT EXISTS deactivated_by TEXT;
+
             ALTER TABLE pti_log ADD COLUMN IF NOT EXISTS content_signature TEXT;
 
             -- Consecutive "unreachable" sends. A single failure is not proof a
@@ -228,20 +237,38 @@ async def set_setting(key: str, value: str) -> None:
 
 async def apply_title_sweep(
     renames: list[tuple[int, str]], group_ids: list[int],
-) -> tuple[int, int]:
-    """Re-file and retire groups from what their titles now say.
+    revive: list[tuple[int, str]] = (),
+) -> tuple[int, int, int]:
+    """Re-file, retire and revive groups from what their titles now say.
 
-    Returns ``(refiled_count, deactivated_count)``.
+    Returns ``(refiled_count, deactivated_count, reactivated_count)``.
 
     One transaction, so the summary DM'd to the admin describes what actually
     landed rather than what was attempted. ``unit_number`` only, never
     ``setup_complete`` -- a group being re-filed is already configured, and
     flipping that flag would hide an un-onboarded group from the setup nag.
+
+    ``revive`` is ``(group_id, unit)``: the unit is the one the title names
+    *now*, written in the same statement that switches the group back on, so
+    a chat handed to another truck while it was off never spends a day active
+    under the old number. Reviving also clears ``unreachable_strikes`` -- a
+    group brought back with three strikes still on it would be retired again
+    by the next single failed send.
     """
     pool = _pool_check()
-    refiled = deactivated = 0
+    refiled = deactivated = reactivated = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
+            for gid, unit in revive:
+                rows = await conn.fetch(
+                    """UPDATE groups
+                          SET is_active = TRUE, unit_number = $1,
+                              deactivated_by = NULL, unreachable_strikes = 0
+                        WHERE group_id = $2 AND COALESCE(is_active, TRUE) = FALSE
+                    RETURNING group_id""",
+                    normalize_unit(unit), gid,
+                )
+                reactivated += len(rows)
             for gid, new_unit in renames:
                 rows = await conn.fetch(
                     """UPDATE groups SET unit_number = $1
@@ -252,14 +279,14 @@ async def apply_title_sweep(
                 refiled += len(rows)
             if group_ids:
                 rows = await conn.fetch(
-                    """UPDATE groups SET is_active = FALSE
+                    """UPDATE groups SET is_active = FALSE, deactivated_by = 'title'
                         WHERE group_id = ANY($1::bigint[])
                           AND COALESCE(is_active, TRUE) = TRUE
                     RETURNING group_id""",
                     group_ids,
                 )
                 deactivated = len(rows)
-    return refiled, deactivated
+    return refiled, deactivated, reactivated
 
 
 # ---------- non-drivers (fleet-wide picker exclusions) ----------
@@ -357,7 +384,7 @@ async def upsert_group(group_id: int):
     await _pool_check().execute(
         """INSERT INTO groups (group_id, last_setup_nag_at)
            VALUES ($1, NOW())
-           ON CONFLICT (group_id) DO UPDATE SET is_active = TRUE""",
+           ON CONFLICT (group_id) DO UPDATE SET is_active = TRUE, deactivated_by = NULL""",
         group_id,
     )
 
@@ -427,8 +454,10 @@ async def migrate_group_id(old_id: int, new_id: int) -> bool:
 
 
 async def mark_group_inactive(group_id: int):
+    """The unreachable path's deactivation (UNREACHABLE_LIMIT strikes)."""
     await _pool_check().execute(
-        "UPDATE groups SET is_active = FALSE WHERE group_id = $1", group_id,
+        "UPDATE groups SET is_active = FALSE, deactivated_by = 'unreachable'"
+        " WHERE group_id = $1", group_id,
     )
 
 
@@ -884,27 +913,15 @@ async def get_active_group_ids() -> list[int]:
 
 
 async def set_group_active(group_id: int, active: bool):
+    """The panel's switch. A deactivation is recorded as the admin's own, which
+    is the one kind the title sweep never reverses."""
     await _pool_check().execute(
-        "UPDATE groups SET is_active = $1 WHERE group_id = $2", active, group_id,
+        """UPDATE groups
+              SET is_active = $1,
+                  deactivated_by = CASE WHEN $1 THEN NULL ELSE 'panel' END
+            WHERE group_id = $2""",
+        active, group_id,
     )
-
-
-async def deactivate_group_ids(group_ids: list[int]) -> int:
-    """Bulk-deactivate arbitrary groups. Returns how many were actually flipped.
-
-    For a manual, admin-confirmed bulk action (e.g. /titlecheck), kept apart
-    from the daily sweep's own transaction in ``apply_title_sweep``.
-    """
-    if not group_ids:
-        return 0
-    rows = await _pool_check().fetch(
-        """UPDATE groups SET is_active = FALSE
-            WHERE group_id = ANY($1::bigint[])
-              AND COALESCE(is_active, TRUE) = TRUE
-        RETURNING group_id""",
-        group_ids,
-    )
-    return len(rows)
 
 
 async def bump_group_message_count(group_id: int) -> None:

@@ -3,12 +3,14 @@
 Onboarding guesses a unit from a group's title or description, but a title
 outlives the truck: groups get renamed late, or not at all. So the titles are
 swept once a day (``run_title_sweep``). A title naming a different unit re-files
-the group under it; a title that has stopped naming a unit retires it; a title
-still naming the stored unit is silent. The sweep runs unattended, so it reads
-the titles fresh from Telegram and skips every group it cannot read: "couldn't
-fetch" must never be mistaken for "the truck is gone".
+the group under it; a title that has stopped naming a unit retires it; a
+retired group's title naming a unit again revives it; a title still saying what
+it said is silent. The sweep runs unattended, so it reads the titles fresh from
+Telegram and skips every group it cannot read: "couldn't fetch" must never be
+mistaken for "the truck is gone".
 
-  /titlecheck   preview the groups whose title says the truck is gone
+  /titlecheck   preview the groups whose title says the truck is gone, and the
+                retired groups whose title names a unit again
   /retitle      preview the groups whose title now names a different unit
   /quiet        the groups that have gone quiet (display only)
 
@@ -24,11 +26,14 @@ the unattended half of the job on 2026-08-17 for the reasons measured in
 retire running trucks. A unit is now decided from the group's own title and the
 driver's own video, never from a list of what the fleet is supposed to have.
 
-Two deliberate asymmetries outlived it:
+Two rules outlived it:
 
-- **Deactivate only.** Nothing here reactivates a group; that stays a manual
-  panel decision, so a sweep can never undo a deactivation someone made for an
-  unrelated reason.
+- **The sweep reverses only its own retirements.** Until 2026-09-18 it did not
+  reactivate at all -- a group retired for losing its number stayed off when
+  the number came back, which left trucks off the reports for good. Now it
+  does, but only for groups it retired itself or the unreachable path switched
+  off; a group an admin turned off in the panel stays off until the panel
+  turns it on (``groups.deactivated_by``, see ``title_reactivations``).
 - **A group with no unit is left alone.** A group still waiting for onboarding
   has no unit to match, and reading that as "gone" would retire every group
   before it was ever configured.
@@ -48,7 +53,6 @@ from data.config import ADMINS
 from loader import bot, dp
 from utils.db import (
     apply_title_sweep,
-    deactivate_group_ids,
     get_all_groups,
     get_group_message_counts,
     get_setting,
@@ -216,6 +220,98 @@ def apply_renames(groups: list[dict], renames: list[dict]) -> list[dict]:
             for g in groups]
 
 
+# Which retirements the unattended sweep may reverse, by ``deactivated_by``:
+# its own, and the unreachable path's. A title read fresh from the very chat
+# three sends "could not reach" is the proof that alarm was false -- the local
+# Bot API server answers "chat not found" for every chat it forgot on restart.
+_SWEEP_REVIVES = frozenset({"title", "unreachable"})
+
+
+def title_reactivations(groups: list[dict], unattended: bool = False) -> list[dict]:
+    """Inactive, configured groups whose title names a unit again.
+
+    Returns ``[{"group": g, "unit": str}]``, by unit -- the unit the group
+    comes back under, which is the one its title names *now*: the stored one,
+    or a new one when the chat was handed to another truck while it was off.
+    It is written in the same statement that switches the group on, so a
+    revived group never spends a day active under a number its title has
+    stopped carrying.
+
+    The mirror image of ``title_deactivations``, on the same evidence. A fleet
+    that retires a truck by taking the number off the title revives one by
+    putting it back, and until 2026-09-18 that second half was a panel button
+    nobody was told to press: a group retired for a lost number came back
+    under a new driver and stayed off the reports for good.
+
+    Skipped on purpose:
+
+    * **a title with a retired marker or no unit** -- the truck is still gone;
+    * **no stored unit** -- never configured, so there is nothing to bring
+      back; that chat belongs to onboarding;
+    * **no title** -- the sweep drops groups it could not read, and a blank
+      is no evidence either way;
+    * **a unit another active group holds, or two revivals claiming one** --
+      two groups under one number is a broken compliance denominator, the
+      same collision rule ``title_unit_changes`` applies;
+    * **a group switched off in the panel** (``deactivated_by == "panel"``).
+      That is an admin's own decision about a chat whose title may say
+      anything, and reversing it every morning would make the button useless.
+
+    With ``unattended`` set -- the daily sweep -- it is narrower still: only
+    groups the title logic itself retired or the unreachable path switched
+    off (``_SWEEP_REVIVES``). Everything else, including groups retired before
+    the reason was recorded, waits for ``/titlecheck``, where a person
+    confirms each one.
+    """
+    active_units = {normalize_unit(g.get("unit_number"))
+                    for g in groups if g.get("is_active", True)}
+
+    candidates: list[dict] = []
+    for g in groups:
+        if g.get("is_active", True):
+            continue
+        by = g.get("deactivated_by")
+        if by == "panel" or (unattended and by not in _SWEEP_REVIVES):
+            continue
+        stored = normalize_unit(g.get("unit_number"))
+        if not stored:
+            continue
+        title = g.get("title")
+        if not title or looks_retired(title):
+            continue
+        if title_names_unit(title, stored):
+            unit = stored
+        else:
+            unit = normalize_unit(parse_unit(title) or "")
+        if not unit:
+            continue
+        candidates.append({"group": g, "unit": unit})
+
+    claims: dict[str, int] = {}
+    for c in candidates:
+        claims[c["unit"]] = claims.get(c["unit"], 0) + 1
+
+    out = [c for c in candidates
+           if claims[c["unit"]] == 1 and c["unit"] not in active_units]
+    out.sort(key=lambda c: c["unit"])
+    return out
+
+
+def apply_reactivations(groups: list[dict], revives: list[dict]) -> list[dict]:
+    """Group rows as they will be *after* the revivals land: active, under the
+    unit the title names.
+
+    The rename and retirement passes run on these, so a revived group counts
+    as holding its unit against a rename that claims the same number, and is
+    never retired in the same sweep for the number it just came back under.
+    """
+    back = {r["group"]["group_id"]: r["unit"] for r in revives}
+    return [{**g, "is_active": True, "unit_number": back[g["group_id"]],
+             "deactivated_by": None}
+            if g["group_id"] in back else g
+            for g in groups]
+
+
 def _group_line(g: dict) -> str:
     unit = escape(normalize_unit(g.get("unit_number")) or "—")
     title = escape(g.get("title") or str(g["group_id"]))
@@ -225,6 +321,17 @@ def _group_line(g: dict) -> str:
 def _rename_line(r: dict) -> str:
     title = escape(r["group"].get("title") or str(r["group"]["group_id"]))
     return f"• <b>{escape(r['old'])} → {escape(r['new'])}</b> — {title}"
+
+
+def _revive_unit(r: dict) -> str:
+    """"1225", or "1225 → 1330" when the group comes back under a new number."""
+    stored = normalize_unit(r["group"].get("unit_number")) or "—"
+    return stored if r["unit"] == stored else f"{stored} → {r['unit']}"
+
+
+def _revive_line(r: dict) -> str:
+    title = escape(r["group"].get("title") or str(r["group"]["group_id"]))
+    return f"• <b>{escape(_revive_unit(r))}</b> — {title}"
 
 
 async def _quiet_report() -> str:
@@ -263,11 +370,12 @@ async def cmd_quiet(message: types.Message):
 
 # ---------- the automatic title sweep ----------
 #
-# Two decisions on a timer, against the group titles alone: a title naming a
+# Three decisions on a timer, against the group titles alone: a title naming a
 # different unit re-files the group, a title that has stopped naming a unit
-# retires it, and a title that still says what it said is silent. It writes
-# without asking anyone, so it leans entirely on the guards in the two pure
-# functions above -- collisions, unreadable titles, unconfigured groups.
+# retires it, a retired group's title naming a unit again revives it, and a
+# title that still says what it said is silent. It writes without asking
+# anyone, so it leans entirely on the guards in the three pure functions above
+# -- collisions, unreadable titles, unconfigured groups, panel decisions.
 
 _TITLE_SWEEP_KEY = "title_sweep_last_run_on"
 # Pause between get_chat calls; ~150 groups, so this costs half a minute and
@@ -308,19 +416,26 @@ async def _refresh_titles(groups: list[dict]) -> tuple[list[dict], int]:
     A group that can't be fetched is **dropped, not defaulted**: a chat the bot
     was removed from, or a Bot API server that is briefly unhappy, must not read
     as "title has no unit any more" and retire a live truck.
+
+    Only *active* groups count towards ``skipped``. An inactive group the bot
+    cannot read is the ordinary state of a retired chat -- the bot was removed
+    long ago -- and it simply stays retired; reporting it would list every dead
+    chat in the fleet every day.
     """
     fresh: list[dict] = []
     skipped = 0
     for g in groups:
+        active = bool(g.get("is_active", True))
         try:
             chat = await bot.get_chat(g["group_id"])
         except Exception as exc:
-            logging.warning("title sweep could not read chat %s: %s", g["group_id"], exc)
-            skipped += 1
+            logging.log(logging.WARNING if active else logging.INFO,
+                        "title sweep could not read chat %s: %s", g["group_id"], exc)
+            skipped += 1 if active else 0
             continue
         title = getattr(chat, "title", None)
         if not title:
-            skipped += 1
+            skipped += 1 if active else 0
             continue
         if title != g.get("title"):
             await set_group_title(g["group_id"], title)
@@ -333,13 +448,21 @@ def _casualty_line(c: dict) -> str:
     return f"{_group_line(c['group'])} — <i>{escape(c['reason'])}</i>"
 
 
-def _sweep_report(renames: list[dict], casualties: list[dict],
-                  refiled: int, deactivated: int, skipped: int) -> str:
+def _sweep_report(renames: list[dict], casualties: list[dict], revives: list[dict],
+                  refiled: int, deactivated: int, reactivated: int,
+                  skipped: int) -> str:
     lines = ["🔎 <b>Title check</b> — group titles changed since the last sweep."]
+
+    if revives:
+        lines += ["", f"♻️ <b>{reactivated} group(s) reactivated</b> — the title "
+                      f"names a unit again:", ""]
+        lines += [_revive_line(r) for r in revives[:_PREVIEW_LIMIT]]
+        if len(revives) > _PREVIEW_LIMIT:
+            lines.append(f"…and {len(revives) - _PREVIEW_LIMIT} more.")
 
     if renames:
         lines += ["", f"🔄 <b>{refiled} group(s) re-filed</b> — the title now names "
-                      f"another unit from the active list:", ""]
+                      f"another unit:", ""]
         lines += [_rename_line(r) for r in renames[:_PREVIEW_LIMIT]]
         if len(renames) > _PREVIEW_LIMIT:
             lines.append(f"…and {len(renames) - _PREVIEW_LIMIT} more.")
@@ -350,8 +473,9 @@ def _sweep_report(renames: list[dict], casualties: list[dict],
         lines += [_casualty_line(c) for c in casualties[:_PREVIEW_LIMIT]]
         if len(casualties) > _PREVIEW_LIMIT:
             lines.append(f"…and {len(casualties) - _PREVIEW_LIMIT} more.")
-        lines += ["", "Reactivate any of these from the web panel if the truck is "
-                      "still running."]
+        lines += ["", "If a truck is still running, put its unit number back on "
+                      "the title and the next sweep reactivates the group — or "
+                      "reactivate it from the web panel."]
 
     if skipped:
         lines += ["", f"<i>{skipped} group(s) couldn't be read and were left "
@@ -360,35 +484,39 @@ def _sweep_report(renames: list[dict], casualties: list[dict],
 
 
 async def run_title_sweep() -> str | None:
-    """Re-file and retire active groups from their current titles.
+    """Revive, re-file and retire groups from their current titles.
 
     Returns the report that was sent, or ``None`` when nothing changed -- a
     sweep that finds every title saying what it said before is silent, which is
     most of them.
     """
-    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
-    fresh, skipped = await _refresh_titles(groups)
+    fresh, skipped = await _refresh_titles(await get_all_groups())
 
-    # Same order as the weekly sweep: re-file first, then judge what is left. A
-    # truck whose title now names another unit is not a truck that lost its
-    # number -- judging it before the re-file would retire it for naming the
-    # new one.
-    renames = title_unit_changes(fresh)
-    casualties = title_deactivations(apply_renames(fresh, renames))
+    # Revive first, then re-file, then judge what is left. A revived group is
+    # active from the first pass on, so a rename claiming its number collides
+    # with it instead of landing beside it; and a truck whose title now names
+    # another unit is not a truck that lost its number -- judging it before
+    # the re-file would retire it for naming the new one.
+    revives = title_reactivations(fresh, unattended=True)
+    after = apply_reactivations(fresh, revives)
+    renames = title_unit_changes(after)
+    casualties = title_deactivations(apply_renames(after, renames))
 
-    if not renames and not casualties:
+    if not renames and not casualties and not revives:
         logging.info("title sweep: no changes (%s groups read, %s skipped)",
                      len(fresh), skipped)
         return None
 
     pairs = [(r["group"]["group_id"], r["new"]) for r in renames]
     dead = [c["group"]["group_id"] for c in casualties]
-    refiled, deactivated = await apply_title_sweep(pairs, dead)
-    logging.info("title sweep re-filed %s (%s) and deactivated %s (%s)",
-                 refiled, pairs, deactivated,
+    back = [(r["group"]["group_id"], r["unit"]) for r in revives]
+    refiled, deactivated, reactivated = await apply_title_sweep(pairs, dead, back)
+    logging.info("title sweep reactivated %s (%s), re-filed %s (%s) and deactivated %s (%s)",
+                 reactivated, back, refiled, pairs, deactivated,
                  [(c["group"]["group_id"], c["reason"]) for c in casualties])
 
-    report = _sweep_report(renames, casualties, refiled, deactivated, skipped)
+    report = _sweep_report(renames, casualties, revives,
+                           refiled, deactivated, reactivated, skipped)
     for admin_id in _ADMIN_IDS:
         try:
             await bot.send_message(admin_id, report, parse_mode="HTML")
@@ -397,19 +525,26 @@ async def run_title_sweep() -> str | None:
     return report
 
 
+def _titlecheck_unit(c: dict) -> str:
+    if c["kind"] == "on":
+        return _revive_unit(c)
+    return normalize_unit(c["group"].get("unit_number")) or "—"
+
+
 def _titlecheck_button_label(c: dict, selected: bool) -> str:
-    unit = normalize_unit(c["group"].get("unit_number")) or "—"
     title = c["group"].get("title") or str(c["group"]["group_id"])
     mark = "✅" if selected else "⬜"
-    label = f"{mark} {unit} — {title}"
+    verb = "♻️" if c["kind"] == "on" else "💤"
+    label = f"{mark}{verb} {_titlecheck_unit(c)} — {title}"
     return label if len(label) <= 40 else label[:39] + "…"
 
 
 def _titlecheck_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboardMarkup:
     """One toggle row per group, defaulting to selected -- a plain tap on
-    Deactivate still behaves like "deactivate everything shown", but a known
-    false positive (the title parser missed a unit it does carry) can be
-    unchecked first instead of forcing an all-or-nothing choice."""
+    Apply still behaves like "do everything shown", but a known false
+    positive (the title parser missed a unit it does carry, or a chat the
+    fleet has not really brought back) can be unchecked first instead of
+    forcing an all-or-nothing choice. 💤 rows deactivate, ♻️ rows reactivate."""
     kb = InlineKeyboardMarkup()
     for c in candidates:
         gid = c["group"]["group_id"]
@@ -418,7 +553,7 @@ def _titlecheck_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboard
             callback_data=f"tc:t:{gid}",
         ))
     kb.row(
-        InlineKeyboardButton(f"💤 Deactivate selected ({len(selected)})", callback_data="tc:ok"),
+        InlineKeyboardButton(f"✔️ Apply selected ({len(selected)})", callback_data="tc:ok"),
         InlineKeyboardButton("✖️ Cancel", callback_data="tc:no"),
     )
     return kb
@@ -426,32 +561,39 @@ def _titlecheck_kb(candidates: list[dict], selected: set[int]) -> InlineKeyboard
 
 @dp.message_handler(commands=["titlecheck"], chat_type=types.ChatType.PRIVATE)
 async def cmd_titlecheck(message: types.Message):
-    """On-demand version of the title sweep's one surviving rule.
+    """On-demand version of the title sweep's retire-and-revive halves.
 
     Titles are read fresh from Telegram (same as the sweep), and a group that
     can't be fetched is left out rather than flagged -- "couldn't read it" is
-    not evidence its title lost the unit. Nothing is deactivated here without
-    a tap: this only ever reads ``title_deactivations``, the same pure,
-    list-free check the automatic sweep runs, and hands the result to a human,
-    who can deselect individual groups before confirming -- the parser is
-    conservative but not perfect, and a title it can't read a unit out of
-    (e.g. one buried after other words) may still name a live truck.
+    not evidence its title lost the unit. Nothing is written here without a
+    tap: this only ever reads ``title_deactivations`` and
+    ``title_reactivations``, the same pure checks the automatic sweep runs,
+    and hands the result to a human, who can deselect individual groups before
+    confirming -- the parser is conservative but not perfect, and a title it
+    can't read a unit out of (e.g. one buried after other words) may still
+    name a live truck.
+
+    The revive half is *wider* here than in the sweep: it also offers groups
+    retired before the reason was recorded (``deactivated_by`` NULL), which
+    the unattended sweep leaves alone. A person is looking at each line, so
+    this is where that backlog gets decided.
     """
     if message.from_user.id not in _ADMIN_IDS:
         return
 
-    # _refresh_titles reads every active group from Telegram one at a time
-    # (throttled, ~150 groups) -- that's tens of seconds with nothing on
+    # _refresh_titles reads every group from Telegram one at a time
+    # (throttled, ~150-250 groups) -- that's tens of seconds with nothing on
     # screen, so say so up front instead of leaving the admin wondering if the
     # command did anything.
     status = await message.answer("🔎 Checking group titles — this can take a "
                                   "minute for the full fleet…")
-    groups = [g for g in await get_all_groups() if g.get("is_active", True)]
-    fresh, skipped = await _refresh_titles(groups)
-    candidates = title_deactivations(fresh)
+    fresh, skipped = await _refresh_titles(await get_all_groups())
+    casualties = [{"kind": "off", **c} for c in title_deactivations(fresh)]
+    revives = [{"kind": "on", **r} for r in title_reactivations(fresh)]
 
-    if not candidates:
-        text = "🟢 Every active group's title still carries a unit number."
+    if not casualties and not revives:
+        text = ("🟢 Titles and records agree — every active group's title carries "
+                "a unit number, and no retired group's title has one back.")
         if skipped:
             text += f"\n\n<i>{skipped} group(s) couldn't be read and were skipped.</i>"
         await status.edit_text(text, parse_mode="HTML")
@@ -459,24 +601,32 @@ async def cmd_titlecheck(message: types.Message):
 
     # Only the shown subset is ever toggleable/actionable in one round -- acting
     # on a group the admin never saw a line for would defeat the point of this
-    # being a reviewed, not automatic, deactivation.
-    shown = candidates[:_PREVIEW_LIMIT]
+    # being a reviewed, not automatic, change.
+    shown = (casualties + revives)[:_PREVIEW_LIMIT]
     selected = {c["group"]["group_id"] for c in shown}
     _pending_titlecheck[message.from_user.id] = {
         "candidates": shown,
         "selected": selected,
         "at": monotonic(),
     }
-    lines = [f"🔎 <b>{len(candidates)} active group(s)</b> whose title carries "
-             f"no unit number:", ""]
-    lines += [_casualty_line(c) for c in shown]
-    if len(candidates) > len(shown):
-        lines.append(f"…and {len(candidates) - len(shown)} more -- re-run "
-                     f"/titlecheck after these are handled to reach them.")
+    off = [c for c in shown if c["kind"] == "off"]
+    on = [c for c in shown if c["kind"] == "on"]
+    lines = ["🔎 <b>Title check</b>"]
+    if off:
+        lines += ["", f"💤 <b>{len(casualties)} active group(s)</b> whose title "
+                      f"carries no unit number:", ""]
+        lines += [_casualty_line(c) for c in off]
+    if on:
+        lines += ["", f"♻️ <b>{len(revives)} inactive group(s)</b> whose title "
+                      f"names a unit again:", ""]
+        lines += [_revive_line(r) for r in on]
+    left = len(casualties) + len(revives) - len(shown)
+    if left:
+        lines.append(f"\n…and {left} more — re-run /titlecheck after these are "
+                     f"handled to reach them.")
     if skipped:
         lines.append(f"\n<i>{skipped} group(s) couldn't be read and were left out.</i>")
-    lines.append("\nTap a group to uncheck it if its title actually does name a "
-                 "unit. Nothing has been deactivated yet.")
+    lines.append("\nTap a group to uncheck it. Nothing has been changed yet.")
     await status.edit_text("\n".join(lines), parse_mode="HTML",
                            reply_markup=_titlecheck_kb(shown, selected))
 
@@ -501,7 +651,7 @@ async def titlecheck_callback(query: types.CallbackQuery):
 
     if action == "no":
         _pending_titlecheck.pop(uid, None)
-        await query.message.edit_text("✖️ Cancelled — nothing was deactivated.")
+        await query.message.edit_text("✖️ Cancelled — nothing was changed.")
         await query.answer()
         return
 
@@ -520,29 +670,36 @@ async def titlecheck_callback(query: types.CallbackQuery):
 
     # action == "ok"
     _pending_titlecheck.pop(uid, None)
-    group_ids = list(state["selected"])
-    if not group_ids:
-        await query.message.edit_text("Nothing selected — nothing was deactivated.")
+    chosen = [c for c in state["candidates"] if c["group"]["group_id"] in state["selected"]]
+    if not chosen:
+        await query.message.edit_text("Nothing selected — nothing was changed.")
         await query.answer()
         return
 
+    dead = [c["group"]["group_id"] for c in chosen if c["kind"] == "off"]
+    back = [(c["group"]["group_id"], c["unit"]) for c in chosen if c["kind"] == "on"]
     try:
-        deactivated = await deactivate_group_ids(group_ids)
+        _, deactivated, reactivated = await apply_title_sweep([], dead, back)
     except Exception:
-        logging.exception("titlecheck bulk deactivate failed for admin %s", uid)
+        logging.exception("titlecheck bulk apply failed for admin %s", uid)
         await query.message.edit_text(
-            "⚠️ <b>Something went wrong — nothing was deactivated.</b>\n"
+            "⚠️ <b>Something went wrong — nothing was changed.</b>\n"
             "Send /titlecheck again to retry.",
             parse_mode="HTML",
         )
         await query.answer()
         return
 
-    await query.message.edit_text(
-        f"💤 <b>{deactivated} group(s) deactivated.</b>\n"
-        "Reactivate any of these from the web panel if a truck is still running.",
-        parse_mode="HTML",
-    )
+    parts = []
+    if dead:
+        parts.append(f"💤 {deactivated} group(s) deactivated")
+    if back:
+        parts.append(f"♻️ {reactivated} group(s) reactivated")
+    text = "<b>" + ", ".join(parts) + ".</b>"
+    if dead:
+        text += ("\nIf a truck is still running, put its unit number back on the "
+                 "title — the next sweep reactivates the group.")
+    await query.message.edit_text(text, parse_mode="HTML")
     await query.answer()
 
 
@@ -660,7 +817,7 @@ async def retitle_callback(query: types.CallbackQuery):
 
     pairs = [(r["group"]["group_id"], r["new"]) for r in chosen]
     try:
-        refiled, _ = await apply_title_sweep(pairs, [])
+        refiled, _, _ = await apply_title_sweep(pairs, [])
     except Exception:
         logging.exception("retitle bulk rename failed for admin %s", uid)
         await query.message.edit_text(
