@@ -332,8 +332,17 @@ async def _tell_the_group(group_id: int, plan) -> None:
     It is a statement, not a request: no commands, no buttons, nothing for a
     driver to do. Changing any of it is an admin's job, which is why the DM and
     not this message carries the /onboard line.
+
+    Each driver is tagged rather than merely named. A tg://user link is the
+    only way to do that here: the label has to stay the *fleet's* name (that is
+    the whole point of reading it out of the About text), and half these
+    accounts have no @username to fall back on. The tag is also what puts the
+    message in front of the person it registered -- the one reader who can tell
+    that the wrong name landed on them.
     """
-    drivers = "\n".join(f"• {escape(name)}" for _, name in plan.drivers)
+    drivers = "\n".join(
+        f'• <a href="tg://user?id={user_id}">{escape(name)}</a>'
+        for user_id, name in plan.drivers)
     try:
         await bot.send_message(
             group_id,

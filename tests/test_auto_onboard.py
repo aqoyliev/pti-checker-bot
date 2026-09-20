@@ -465,6 +465,10 @@ def test_the_group_is_told_that_it_configured_itself(monkeypatch):
     text = post.args[1]
     assert "1216" in text
     assert "M Mgn" in text and "Noor Dubat" in text
+    # Tagged, not just named: the message has to reach the two people it
+    # registered, and the label stays the fleet's name rather than a @handle.
+    assert 'tg://user?id=8063167928' in text
+    assert 'tg://user?id=6066541941' in text
     # A statement, not a request: nothing in the group to tap or to type.
     assert "/onboard" not in text
     assert "reply_markup" not in post.kwargs
