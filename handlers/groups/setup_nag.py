@@ -4,8 +4,9 @@ A group the bot joined but nobody set up shows nothing in the chat -- drivers
 are never asked to configure anything -- so the only thing that can move it
 along is an admin. This loop finds such groups once a minute and hands each
 one to ``start_onboarding``, which DMs the admins the member picker (or
-configures the group outright from its About text). It never posts into the
-group itself.
+configures the group outright from its About text). The only thing that ever
+reaches the group is the confirmation of a setup that configured itself; it is
+never asked for anything.
 
 Each group is prompted **once**: the ceiling lives in the query
 (``get_groups_needing_setup_nag`` returns groups with ``setup_nag_count < 1``),

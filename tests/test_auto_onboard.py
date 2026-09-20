@@ -9,6 +9,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from aiogram.utils.exceptions import BadRequest
+
 from handlers.admin import onboard
 from utils.auto_onboard import plan_auto_config
 from utils.phone_lookup import LookupUnavailable, Match
@@ -152,6 +154,27 @@ ROSTER = [Member(8063167928, "M Mgn", None, False),
           Member(6066541941, "Noor Dubat", "noor", False)]
 
 
+ADMIN = 7564871221
+
+
+def _admin_notice(sent):
+    """The DM to the admin -- no longer simply the last thing that was sent.
+
+    An automatic setup also posts into the group itself now, so a test that
+    reached for `await_args` would be reading the group's copy and still
+    pass.
+    """
+    calls = [c for c in sent.await_args_list if c.args[0] == ADMIN]
+    assert calls, "no admin notice was sent"
+    return calls[-1]
+
+
+def _group_post(sent, group_id=-100123):
+    """What the drivers' own group was told, or None if it was told nothing."""
+    calls = [c for c in sent.await_args_list if c.args[0] == group_id]
+    return calls[-1] if calls else None
+
+
 def _wire(monkeypatch, *, lookup, description=ABOUT, members=ROSTER):
     """Stub everything start_onboarding touches except the decision itself."""
     monkeypatch.setattr(onboard.userbot, "list_members",
@@ -159,7 +182,7 @@ def _wire(monkeypatch, *, lookup, description=ABOUT, members=ROSTER):
     monkeypatch.setattr(onboard.userbot, "get_description",
                         AsyncMock(return_value=description))
     monkeypatch.setattr(onboard, "get_non_driver_ids", AsyncMock(return_value=set()))
-    monkeypatch.setattr(onboard, "_ADMIN_IDS", [7564871221])
+    monkeypatch.setattr(onboard, "_ADMIN_IDS", [ADMIN])
     monkeypatch.setattr(onboard.phone_lookup, "is_configured", lambda: True)
     monkeypatch.setattr(onboard.phone_lookup, "lookup", lookup)
 
@@ -190,7 +213,8 @@ def test_a_clean_group_configures_itself_and_only_reports(monkeypatch):
         {"user_id": 8063167928, "name": "M Mgn"},
         {"user_id": 6066541941, "name": "Noor Dubat"},
     ]
-    text, kwargs = sent.await_args.args[1], sent.await_args.kwargs
+    notice = _admin_notice(sent)
+    text, kwargs = notice.args[1], notice.kwargs
     assert "configured automatically" in text
     # Informational, and nothing more: no button on a setup that went right.
     # The way to change one is named in the text instead.
@@ -265,7 +289,7 @@ def test_drivers_are_stored_under_their_fleet_names(monkeypatch):
     ]
     # Both names in the notice: the fleet's is what was stored, Telegram's is
     # how the admin recognises the person it was stored against.
-    text = sent.await_args.args[1]
+    text = _admin_notice(sent).args[1]
     assert "Zama Emile" in text and "Emile ✈️" in text
 
 
@@ -376,7 +400,7 @@ def test_the_notice_says_a_fleet_wide_exclusion_was_written(monkeypatch):
 
     asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
 
-    text = sent.await_args.args[1]
+    text = _admin_notice(sent).args[1]
     assert "1 other member(s)" in text
     assert "/nondrivers clear" in text
 
@@ -388,7 +412,7 @@ def test_nothing_new_to_hide_says_nothing(monkeypatch):
 
     asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
 
-    assert "recorded as non-drivers" not in sent.await_args.args[1]
+    assert "recorded as non-drivers" not in _admin_notice(sent).args[1]
 
 
 def test_the_picker_path_marks_nobody_up_front(monkeypatch):
@@ -420,3 +444,81 @@ def test_a_setup_short_of_a_driver_sweeps_nobody(monkeypatch):
     assert writes["replace_drivers"].await_args.args[1] == [
         {"user_id": 8063167928, "name": "M Mgn"}]
     writes["mark_non_drivers"].assert_not_awaited()
+
+
+# ---------- what the group itself is told ----------
+
+def test_the_group_is_told_that_it_configured_itself(monkeypatch):
+    """Nobody in the chat saw any of this happen.
+
+    The roster and the About text are read over MTProto and the writes are
+    reported in a DM, so the next thing the drivers would see is an overdue
+    reminder naming someone who never saw themselves registered -- and they
+    are the only people who can tell that a name went to the wrong driver.
+    """
+    _, sent = _wire(monkeypatch, lookup=_clean_lookup())
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    post = _group_post(sent)
+    assert post is not None, "the group was told nothing"
+    text = post.args[1]
+    assert "1216" in text
+    assert "M Mgn" in text and "Noor Dubat" in text
+    # A statement, not a request: nothing in the group to tap or to type.
+    assert "/onboard" not in text
+    assert "reply_markup" not in post.kwargs
+
+
+def test_the_admin_notice_still_goes_out_alongside_it(monkeypatch):
+    """The group post is the news; the DM is still the record of the write."""
+    _, sent = _wire(monkeypatch, lookup=_clean_lookup())
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert "configured automatically" in _admin_notice(sent).args[1]
+
+
+def test_the_manual_path_does_not_announce_in_the_group(monkeypatch):
+    """/onboard re-reads a group that is already configured, and the Edit
+    button on that notice can change these very picks a tap later -- the
+    drivers would have been told something that is about to be wrong."""
+    _, sent = _wire(monkeypatch, lookup=_clean_lookup())
+
+    asyncio.run(
+        onboard.start_onboarding(-100123, "UNIT 1216 SMITH", manual=True))
+
+    assert _group_post(sent) is None
+
+
+def test_the_picker_path_says_nothing_in_the_group(monkeypatch):
+    """Drivers are never asked to configure anything. A setup the bot could
+    not finish is an admin's question, and the group must not see it."""
+    resolved = {"+17864882619": Match("+17864882619", 8063167928, "M Mgn",
+                                      None, False),
+                "+15616747866": None}
+    _, sent = _wire(monkeypatch, lookup=AsyncMock(return_value=resolved))
+
+    asyncio.run(onboard.start_onboarding(-100123, "UNIT 1216 SMITH"))
+
+    assert _group_post(sent) is None
+
+
+def test_a_group_the_bot_cannot_post_in_is_recorded_not_raised(monkeypatch):
+    """Often the first thing the bot says in a chat, so it is the first
+    chance to notice it is muted there -- and the setup itself still
+    stands, since the write already happened."""
+    _, sent = _wire(monkeypatch, lookup=_clean_lookup())
+    noted = AsyncMock()
+    monkeypatch.setattr(onboard, "note_send_failure", noted)
+
+    def fail(chat_id, *args, **kwargs):
+        if chat_id == -100123:
+            raise BadRequest("have no rights to send a message")
+        return True
+
+    sent.side_effect = fail
+
+    assert asyncio.run(
+        onboard.start_onboarding(-100123, "UNIT 1216 SMITH")) is True
+    assert noted.await_args.args[0] == -100123

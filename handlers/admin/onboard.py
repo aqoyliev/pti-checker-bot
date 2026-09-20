@@ -14,6 +14,10 @@ asked to configure anything now. Instead, when the bot is added to a group it:
 The admin taps the drivers, confirms the unit, and the group is configured.
 Nothing is written until they press Save, so a bad title guess can't reach the
 database on its own.
+
+The one thing that ever reaches the driver's group is the confirmation that a
+setup went through on its own (`_tell_the_group`) -- a statement, never a
+request. Nothing here asks the people in the group to configure anything.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from loader import bot, dp
 from utils import phone_lookup, userbot
 from utils.auto_onboard import plan_auto_config
 from utils.driver_names import parse_driver_names
+from utils.group_health import note_send_failure
 from utils.db import (
     clear_non_drivers,
     get_drivers,
@@ -314,8 +319,46 @@ async def _apply_auto_config(group_id: int, plan, members: list) -> str:
     return "\n".join(lines)
 
 
+async def _tell_the_group(group_id: int, plan) -> None:
+    """Say in the drivers' own group that it just configured itself.
+
+    An automatic setup is invisible from inside the chat: the roster and the
+    About text are read over MTProto and the writes are reported in a DM, so
+    the next thing anyone in the group would see is an overdue reminder naming
+    a driver who never saw themselves registered. The people in the chat are
+    also the only ones who can spot a wrong name -- the admin reading the DM is
+    comparing two strings, neither of which they wrote.
+
+    It is a statement, not a request: no commands, no buttons, nothing for a
+    driver to do. Changing any of it is an admin's job, which is why the DM and
+    not this message carries the /onboard line.
+    """
+    drivers = "\n".join(f"• {escape(name)}" for _, name in plan.drivers)
+    try:
+        await bot.send_message(
+            group_id,
+            f"✅ <b>Unit {escape(plan.unit)}</b> — this group is set up.\n\n"
+            f"Registered driver(s):\n{drivers}\n\n"
+            f"<i>Read from the group's name and the phone numbers in its About "
+            f"text. If anything here is wrong, let a fleet admin know.</i>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        # Never fatal -- the group is configured either way, and the admins have
+        # been told in DM regardless. But a post that comes back "no rights" is
+        # worth recording: the bot is sitting in a chat it cannot speak in, and
+        # nothing else would say so until a reminder next came due.
+        logging.warning("could not announce the setup of %s: %s",
+                        group_id, type(e).__name__)
+        await note_send_failure(group_id, e)
+
+
 async def start_onboarding(group_id: int, title: str, manual: bool = False) -> bool:
-    """Called when the bot joins a group. Never messages the group itself.
+    """Called when the bot joins a group. Asks the group itself for nothing.
+
+    The only thing it ever posts there is `_tell_the_group`'s confirmation of a
+    setup that went through on its own; the picker and every question go to an
+    admin in DM.
 
     `manual` marks a deliberate admin request (/onboard <group_id>) rather than
     the passive join/nag trigger. It changes exactly one thing: an auto-config
@@ -352,6 +395,14 @@ async def start_onboarding(group_id: int, title: str, manual: bool = False) -> b
             except Exception:
                 logging.exception("could not tell admin %s about the auto-config "
                                   "of %s", admin_id, group_id)
+        if not manual:
+            # Last, and only on the passive path. Last because the admin notice
+            # is the record of what was written and must not wait on a send into
+            # a group that may be muted; passive-only because /onboard re-reads
+            # a group that is already configured, and its Edit button may change
+            # these very picks a tap later -- the drivers would have been told
+            # something that is about to be wrong.
+            await _tell_the_group(group_id, plan)
         # The group is configured either way; an unreachable admin is not a
         # reason to leave it unconfigured, and there is nothing to nag about.
         return True

@@ -172,7 +172,7 @@ then works the setup out on its own:
 1. guess the unit from the chat **title**, falling back to the **description**;
 2. read the member roster through `utils/userbot.py`;
 3. resolve the phone numbers in the About text into accounts, and configure the
-   group outright if everything checks out (below);
+   group outright if everything checks out, saying so in the group (below);
 4. otherwise DM the admins the title, the About text, the unit guess *and where
    it came from*, the reason step 3 declined, and one button per member.
 
@@ -190,6 +190,34 @@ than asked: a DM naming the unit, both drivers and the number each came from,
 and **no button** on the passive path (the bot joining, or the setup nag) — a
 setup that went right is news, not a question, and an Edit button on every one
 of them invites a tap on the ones that were correct.
+
+**The group is told too** (as of 2026-09-20), and it is the one thing
+onboarding ever posts into a driver's group: the unit, the driver names, and a
+line saying where they were read from — no command, no button, nothing for a
+driver to do about it (`onboard._tell_the_group`). An automatic setup is
+otherwise invisible from inside the chat — the roster and the About text are
+read over MTProto and the result is reported in a DM — so the next thing the
+drivers would see is an overdue reminder naming someone who never saw
+themselves registered. They are also the only people who can tell that a name
+landed on the wrong driver: the admin reading the notice is comparing two
+strings, neither of which they wrote. Two rules:
+
+- **Passive path only.** A `/onboard` re-run is an admin looking at a group
+  that is already configured, and the Edit button on that notice can change
+  these very picks a tap later — the group would have been told something
+  that is about to be wrong. It is the same `manual` flag the Edit button
+  rides on.
+- **The admin DM goes first, and a refused post is recorded, not raised.**
+  The notice is the record of what was written and must not wait on a send
+  into a group that may be muted; a post that comes back "no rights" goes to
+  `utils/group_health.note_send_failure`, because this is often the bot's
+  first real message in that chat and therefore the first chance to notice
+  the permission is missing. The setup stands either way — the write already
+  happened.
+
+`scripts/setup_groups.py` deliberately announces nothing: it calls
+`_apply_auto_config` directly and sends no messages at all, so a fleet-wide
+backfill cannot post into sixty driver groups at once.
 
 Changing an automatic setup is `/onboard <group_id>`, named in the notice
 itself, which re-reads the roster and the About text instead of reopening a
