@@ -33,7 +33,9 @@ Two rules outlived it:
   the number came back, which left trucks off the reports for good. Now it
   does, but only for groups it retired itself or the unreachable path switched
   off; a group an admin turned off in the panel stays off until the panel
-  turns it on (``groups.deactivated_by``, see ``title_reactivations``).
+  turns it on (``groups.deactivated_by``, see ``title_reactivations``). And
+  only for a chat the bot is still in (``_still_in_the_chat``): a readable
+  title does not prove that.
 - **A group with no unit is left alone.** A group still waiting for onboarding
   has no unit to match, and reading that as "gone" would retire every group
   before it was ever configured.
@@ -50,7 +52,7 @@ from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from data.config import ADMINS
-from loader import bot, dp
+from loader import bot, bot_id, dp
 from utils.db import (
     apply_title_sweep,
     get_all_groups,
@@ -221,9 +223,11 @@ def apply_renames(groups: list[dict], renames: list[dict]) -> list[dict]:
 
 
 # Which retirements the unattended sweep may reverse, by ``deactivated_by``:
-# its own, and the unreachable path's. A title read fresh from the very chat
-# three sends "could not reach" is the proof that alarm was false -- the local
-# Bot API server answers "chat not found" for every chat it forgot on restart.
+# its own, and the unreachable path's -- the local Bot API server answers
+# "chat not found" for every chat it forgot on restart, so three failed sends
+# can be a false alarm. A readable title is *not* what proves it was one: a
+# basic group answers getChat for a bot that was kicked from it, title and
+# all. The bot's own membership does (``_still_in_the_chat``).
 _SWEEP_REVIVES = frozenset({"title", "unreachable"})
 
 
@@ -444,6 +448,52 @@ async def _refresh_titles(groups: list[dict]) -> tuple[list[dict], int]:
     return fresh, skipped
 
 
+# What getChatMember says about a bot that is no longer in the chat.
+_GONE = frozenset({"left", "kicked"})
+
+
+async def _still_in_the_chat(revives: list[dict]) -> list[dict]:
+    """The revive candidates whose chat the bot is still a member of.
+
+    A readable title does not prove the bot can reach the chat: a basic group
+    answers ``getChat`` for a bot that was kicked from it, title and all. On
+    JRD two such groups' titles named their units every morning, so the sweep
+    switched them back on, three reminders came back ``BotKicked`` and retired
+    them again, and the admins were told "2 group(s) reactivated" every day
+    (2026-09-20..22). A group the bot is not in can file no PTI and take no
+    reminder; reviving it only lists it as a unit that never inspects.
+
+    So the bot's own membership decides -- one ``getChatMember`` per candidate,
+    a handful a day rather than the fleet. A group that can't be asked stays
+    off: off is where it already is, and "couldn't ask" is never an answer.
+    Nothing is lost by waiting, because adding the bot back reactivates the
+    group on its own (``upsert_group``). A *muted* bot is still a member, and
+    that is ``utils/group_health``'s business, not a reason to keep a running
+    truck off the reports.
+    """
+    if not revives:
+        return []
+    me = await bot_id()
+    kept: list[dict] = []
+    for r in revives:
+        await asyncio.sleep(_TITLE_FETCH_DELAY)
+        gid = r["group"]["group_id"]
+        try:
+            member = await bot.get_chat_member(gid, me)
+        except Exception as exc:
+            logging.info("not reviving %s: its membership could not be read (%s)",
+                         gid, type(exc).__name__)
+            continue
+        status = getattr(member, "status", "")
+        # "restricted" can also describe someone who has left while restricted.
+        if status in _GONE or not getattr(member, "is_member", True):
+            logging.info("not reviving %s: the bot is no longer in the chat (%s)",
+                         gid, status)
+            continue
+        kept.append(r)
+    return kept
+
+
 def _casualty_line(c: dict) -> str:
     return f"{_group_line(c['group'])} — <i>{escape(c['reason'])}</i>"
 
@@ -497,7 +547,7 @@ async def run_title_sweep() -> str | None:
     # with it instead of landing beside it; and a truck whose title now names
     # another unit is not a truck that lost its number -- judging it before
     # the re-file would retire it for naming the new one.
-    revives = title_reactivations(fresh, unattended=True)
+    revives = await _still_in_the_chat(title_reactivations(fresh, unattended=True))
     after = apply_reactivations(fresh, revives)
     renames = title_unit_changes(after)
     casualties = title_deactivations(apply_renames(after, renames))
@@ -589,7 +639,8 @@ async def cmd_titlecheck(message: types.Message):
                                   "minute for the full fleet…")
     fresh, skipped = await _refresh_titles(await get_all_groups())
     casualties = [{"kind": "off", **c} for c in title_deactivations(fresh)]
-    revives = [{"kind": "on", **r} for r in title_reactivations(fresh)]
+    revives = [{"kind": "on", **r}
+               for r in await _still_in_the_chat(title_reactivations(fresh))]
 
     if not casualties and not revives:
         text = ("🟢 Titles and records agree — every active group's title carries "

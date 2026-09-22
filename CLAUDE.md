@@ -43,8 +43,8 @@ issues) is posted back into the group.
   above the groups list, and its list of overdue drivers is the **Due**
   filter plus the names already on every row.
 - **`handlers/groups/setup_nag.py`** — the "nag" loop for still-unconfigured
-  groups (it re-sends the onboarding prompt to admins in DM; it does not
-  message the group).
+  groups (it re-sends the onboarding prompt to admins in DM; the group itself
+  only ever hears that a setup went through on its own).
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
@@ -469,10 +469,10 @@ that wasn't the title's:
 - **`groups.deactivated_by` records who switched a group off**: `'title'`
   (sweep or `/titlecheck`), `'panel'`, `'unreachable'` (three failed sends).
   Every reactivation clears it. The unattended sweep reverses only `'title'`
-  and `'unreachable'` — the second because a title read fresh from the very
-  chat three sends "could not reach" is the proof that alarm was false (the
-  local Bot API server answers "chat not found" for every chat it forgot on
-  restart, which is what `scripts/reactivate_groups.py` used to clean up). A
+  and `'unreachable'` — the second because three failed sends can be a false
+  alarm (the local Bot API server answers "chat not found" for every chat it
+  forgot on restart, which is what `scripts/reactivate_groups.py` used to
+  clean up). A
   `'panel'` deactivation is an admin's own decision about a chat whose title
   may say anything, and reversing it every morning would make the button
   useless: it stays off until the panel turns it on, and not even
@@ -482,6 +482,18 @@ that wasn't the title's:
   a toggle, and applies both in one transaction. The sweep can't tell a
   pre-2026-09-18 title retirement from an old panel decision, so a person
   looks at that backlog once; from then on the sweep knows.
+- **Nothing comes back unless the bot is still in the chat**
+  (`_still_in_the_chat`, as of 2026-09-22). A readable title is not that
+  proof: a basic group answers `getChat` for a bot that was kicked from it,
+  title and all. On JRD two such groups named their units every morning, so
+  the sweep switched them on, three reminders came back `BotKicked` and
+  retired them again, and the admins read "2 group(s) reactivated" every day
+  for three days. One `getChatMember` per revive candidate — a handful a day,
+  not the fleet — decides it, for the sweep and for `/titlecheck` alike;
+  `left`/`kicked`, or an answer that can't be had, keeps the group off.
+  Nothing is lost by that: adding the bot back reactivates the group on its
+  own (`upsert_group`). A muted bot is still a member, and stays
+  `utils/group_health`'s business.
 
 The sweep reads the retired groups' titles too (`get_chat` on every group, not
 just the active ones — a few seconds more a day); a retired chat the bot was
