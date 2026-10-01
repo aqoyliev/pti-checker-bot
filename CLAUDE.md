@@ -58,6 +58,9 @@ issues) is posted back into the group.
 - **`utils/group_health.py`** — "the bot is muted in this group" vs. "the
   bot was removed", and the DM to the admins when the first one starts or
   stops (below).
+- **`utils/setup_notice.py`** — the one message a driver's group ever gets
+  about its own setup, sent by whichever path configured it, and only when
+  that group *became* usable (below).
 - **`utils/userbot.py`** — read-only Telethon client, logged in as the bot
   itself over MTProto. It exists for the one thing the Bot API cannot do: list
   a group's members (plus the About text). No separate account needed — see
@@ -195,7 +198,7 @@ of them invites a tap on the ones that were correct.
 onboarding ever posts into a driver's group: the unit, both drivers **tagged**
 under the names they were stored with, and a line saying where those came from
 — no command, no button, nothing for a driver to do about it
-(`onboard._tell_the_group`). An automatic setup is otherwise invisible from
+(`utils/setup_notice.py`). An automatic setup is otherwise invisible from
 inside the chat — the roster and the About text are read over MTProto and the
 result is reported in a DM — so the next thing the drivers would see is an
 overdue reminder naming someone who never saw themselves registered. They are
@@ -223,6 +226,39 @@ rules:
 `scripts/setup_groups.py` deliberately announces nothing: it calls
 `_apply_auto_config` directly and sends no messages at all, so a fleet-wide
 backfill cannot post into sixty driver groups at once.
+
+**Every setup path sends it, not just the automatic one** (as of 2026-10-01).
+Pressing Save on the picker, or setting the unit and adding a driver in the web
+panel, configures a group just as invisibly as the About text does — and the
+drivers' only sign that anything was missing was `/check` refusing to run,
+telling them the fleet admins had been asked to assign the unit and the drivers
+and that `/check` would work once they had. Nothing ever came back to say it
+did, so what the drivers learned was that the bot had stopped answering.
+`utils/setup_notice.py` holds the message for all three paths and fires it on
+the **transition**: `is_usable` — a unit on file *and* at least one registered
+driver, which is exactly what `/check` demands — is read before the writes and
+again after, and the post goes out only when the answer moved. Four things
+follow:
+
+- **A correction to a working group posts nothing.** Save is also the Edit path
+  for a group that configured itself, and those drivers have already been told;
+  a notice per correction turns the one message that matters into traffic.
+- **Half a setup posts nothing.** The panel's ordinary order is the unit first
+  and the roster search after, so a group with a unit and no driver is a normal
+  intermediate state — and `groups.setup_complete` is already `TRUE` there,
+  since `set_group_unit` flips it on its own. That is why the test is
+  `is_usable` and not that flag: a group whose videos belong to nobody has not
+  been set up, whatever the column says.
+- **The caller opts in.** It is a pair of calls around the writes rather than
+  something `utils/db` does, because a write-level post would make the
+  fleet-wide backfill above land in sixty driver groups at once.
+- **The in-group commands are left out.** An admin running `/setunit` or
+  `/adddriver` is standing in the group, and the bot's own "✅ Setup complete"
+  reply is already on screen for everyone in it.
+
+It is sent **last**, after the admin has their own confirmation, for the same
+reason the automatic path's DM goes first: that confirmation is the record of
+what was written and must not wait on a send into a group that may be muted.
 
 Changing an automatic setup is `/onboard <group_id>`, named in the notice
 itself, which re-reads the roster and the About text instead of reopening a

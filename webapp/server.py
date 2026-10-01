@@ -34,6 +34,7 @@ from utils.admins import resolve_admin
 from utils.driver_names import match_names_to_drivers, parse_driver_contacts, tidy_name
 from utils.group_health import note_send_failure, note_send_ok
 from utils.phones import find_phones
+from utils.setup_notice import FROM_AN_ADMIN, announce_if_now_usable, is_usable
 from utils.db import (
     add_admin,
     add_driver,
@@ -387,9 +388,15 @@ async def api_group_set_unit(request: web.Request) -> web.Response:
         return _err(400, "Unit number can't be empty.")
     if not await get_group(gid):
         return _err(404, "Group not found.")
+    was_usable = await is_usable(gid)
     await set_group_unit(gid, unit)
     logging.info("web panel: admin %s set unit=%r for group %s",
                  request["admin"]["user_id"], unit, gid)
+    # A group configured from here is as invisible to its drivers as one
+    # configured from the DM prompt: they were told to wait for an admin to
+    # assign the unit and the drivers, and this is the half that arrives last
+    # as often as not.
+    await announce_if_now_usable(gid, was_usable, FROM_AN_ADMIN)
     return _json({"ok": True})
 
 
@@ -485,6 +492,7 @@ async def api_add_driver(request: web.Request) -> web.Response:
         return _err(400, "Driver name can't be empty.")
     if not await get_group(gid):
         return _err(404, "Group not found.")
+    was_usable = await is_usable(gid)
     if not await add_driver(gid, uid, name):
         return _err(400, "That person is already a driver in this group.")
     # Being chosen as a driver outranks a stale fleet-wide "not a driver" row,
@@ -494,6 +502,10 @@ async def api_add_driver(request: web.Request) -> web.Response:
     await unmark_non_drivers([uid])
     logging.info("web panel: admin %s added driver %s (%r) to group %s",
                  request["admin"]["user_id"], uid, name, gid)
+    # The unit may have been set first, in which case this driver is what
+    # finally makes /check work in that chat. Adding a *second* driver to a
+    # group that already had one announces nothing.
+    await announce_if_now_usable(gid, was_usable, FROM_AN_ADMIN)
     return _json({"ok": True, "name": name})
 
 

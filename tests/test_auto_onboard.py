@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 from aiogram.utils.exceptions import BadRequest
 
 from handlers.admin import onboard
+from utils import setup_notice
 from utils.auto_onboard import plan_auto_config
 from utils.phone_lookup import LookupUnavailable, Match
 from utils.userbot import Member
@@ -195,6 +196,20 @@ def _wire(monkeypatch, *, lookup, description=ABOUT, members=ROSTER):
     }
     for name, mock in writes.items():
         monkeypatch.setattr(onboard, name, mock)
+
+    # The group post reads the group's row back instead of taking the plan's
+    # word for it -- it is the same message a setup from the panel produces --
+    # so the stubbed writes have to remember what they were handed.
+    stored: dict = {"unit": None, "drivers": []}
+    writes["set_group_unit"].side_effect = (
+        lambda gid, unit: stored.__setitem__("unit", unit))
+    writes["replace_drivers"].side_effect = (
+        lambda gid, drivers: stored.__setitem__("drivers", list(drivers)))
+    monkeypatch.setattr(setup_notice, "get_group", AsyncMock(
+        side_effect=lambda gid: {"unit_number": stored["unit"]}))
+    monkeypatch.setattr(setup_notice, "get_drivers", AsyncMock(
+        side_effect=lambda gid: list(stored["drivers"])))
+
     sent = AsyncMock(return_value=True)
     monkeypatch.setattr(onboard.bot, "send_message", sent)
     return writes, sent
@@ -514,7 +529,7 @@ def test_a_group_the_bot_cannot_post_in_is_recorded_not_raised(monkeypatch):
     stands, since the write already happened."""
     _, sent = _wire(monkeypatch, lookup=_clean_lookup())
     noted = AsyncMock()
-    monkeypatch.setattr(onboard, "note_send_failure", noted)
+    monkeypatch.setattr(setup_notice, "note_send_failure", noted)
 
     def fail(chat_id, *args, **kwargs):
         if chat_id == -100123:

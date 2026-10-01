@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from utils import setup_notice
 from utils.userbot import Member
 from webapp import server
 
@@ -68,7 +69,28 @@ def db(monkeypatch):
     }
     for name, stub in stubs.items():
         monkeypatch.setattr(server, name, stub)
+    # Every write here also asks whether the group just became usable, which
+    # reads its row back. The stub group has no unit, so by default these
+    # endpoints announce nothing -- see the section at the bottom for the
+    # transition itself.
+    monkeypatch.setattr(setup_notice, "get_group", stubs["get_group"])
+    monkeypatch.setattr(setup_notice, "get_drivers", stubs["get_drivers"])
     return stubs
+
+
+def _group_row(monkeypatch, stored):
+    """Serve the group's row off `stored`, the way the transition rule reads it.
+
+    A static stub cannot test this: `is_usable` is asked before the write and
+    again after, and the answer has to move in between.
+    """
+    monkeypatch.setattr(setup_notice, "get_group", AsyncMock(
+        side_effect=lambda gid: {"unit_number": stored["unit"]}))
+    monkeypatch.setattr(setup_notice, "get_drivers", AsyncMock(
+        side_effect=lambda gid: list(stored["drivers"])))
+    sent = AsyncMock(return_value=True)
+    monkeypatch.setattr(setup_notice.bot, "send_message", sent)
+    return sent
 
 
 # --- the roster endpoint -------------------------------------------------
@@ -258,3 +280,61 @@ def test_adding_answers_with_the_name_as_stored(db):
 
     assert status == 200 and body["name"] == "Gonzalez Osvaldo"
     db["add_driver"].assert_awaited_once_with(-100, 2002, "Gonzalez Osvaldo")
+
+
+# --- telling the group its setup landed ----------------------------------
+#
+# A group configured from the panel is as invisible to its drivers as one
+# configured from the DM prompt: all they ever saw was /check refusing to run
+# until an admin assigned the unit and the drivers.
+
+def test_setting_the_unit_on_a_group_that_has_a_driver_tells_the_group(db, monkeypatch):
+    stored = {"unit": None,
+              "drivers": [{"user_id": 2001, "name": "Jacques Fleurmond"}]}
+    sent = _group_row(monkeypatch, stored)
+    monkeypatch.setattr(server, "set_group_unit", AsyncMock(
+        side_effect=lambda gid, unit: stored.__setitem__("unit", unit)))
+
+    status, _ = _call(server.api_group_set_unit,
+                      match_info={"gid": -100}, body={"unit": "1216"})
+
+    assert status == 200
+    assert sent.await_args.args[0] == -100
+    assert "1216" in sent.await_args.args[1]
+
+
+def test_adding_the_first_driver_to_a_unit_tells_the_group(db, monkeypatch):
+    """The other order: the unit was typed first and this is the half that
+    finally makes /check work in that chat."""
+    stored = {"unit": "1216", "drivers": []}
+    sent = _group_row(monkeypatch, stored)
+
+    async def _add(gid, uid, name):
+        stored["drivers"].append({"user_id": uid, "name": name})
+        return True
+
+    monkeypatch.setattr(server, "add_driver", AsyncMock(side_effect=_add))
+
+    status, _ = _call(server.api_add_driver, match_info={"gid": -100},
+                      body={"user_id": 2001, "name": "Jacques Fleurmond"})
+
+    assert status == 200
+    sent.assert_awaited_once()
+
+
+def test_adding_a_second_driver_tells_the_group_nothing(db, monkeypatch):
+    """That group already works and has already been told. A notice per write
+    turns the one message that matters into traffic."""
+    stored = {"unit": "1216", "drivers": [{"user_id": 2001, "name": "Jacques"}]}
+    sent = _group_row(monkeypatch, stored)
+
+    async def _add(gid, uid, name):
+        stored["drivers"].append({"user_id": uid, "name": name})
+        return True
+
+    monkeypatch.setattr(server, "add_driver", AsyncMock(side_effect=_add))
+
+    _call(server.api_add_driver, match_info={"gid": -100},
+          body={"user_id": 2002, "name": "Arlette Sanon"})
+
+    sent.assert_not_awaited()

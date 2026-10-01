@@ -15,9 +15,9 @@ The admin taps the drivers, confirms the unit, and the group is configured.
 Nothing is written until they press Save, so a bad title guess can't reach the
 database on its own.
 
-The one thing that ever reaches the driver's group is the confirmation that a
-setup went through on its own (`_tell_the_group`) -- a statement, never a
-request. Nothing here asks the people in the group to configure anything.
+The one thing that ever reaches the driver's group is the confirmation that it
+is now set up (`utils/setup_notice`) -- a statement, never a request. Nothing
+here asks the people in the group to configure anything.
 """
 from __future__ import annotations
 
@@ -35,7 +35,13 @@ from loader import bot, dp
 from utils import phone_lookup, userbot
 from utils.auto_onboard import plan_auto_config
 from utils.driver_names import parse_driver_names
-from utils.group_health import note_send_failure
+from utils.setup_notice import (
+    FROM_ABOUT_TEXT,
+    FROM_AN_ADMIN,
+    announce_if_now_usable,
+    is_usable,
+    tell_the_group,
+)
 from utils.db import (
     clear_non_drivers,
     get_drivers,
@@ -319,55 +325,12 @@ async def _apply_auto_config(group_id: int, plan, members: list) -> str:
     return "\n".join(lines)
 
 
-async def _tell_the_group(group_id: int, plan) -> None:
-    """Say in the drivers' own group that it just configured itself.
-
-    An automatic setup is invisible from inside the chat: the roster and the
-    About text are read over MTProto and the writes are reported in a DM, so
-    the next thing anyone in the group would see is an overdue reminder naming
-    a driver who never saw themselves registered. The people in the chat are
-    also the only ones who can spot a wrong name -- the admin reading the DM is
-    comparing two strings, neither of which they wrote.
-
-    It is a statement, not a request: no commands, no buttons, nothing for a
-    driver to do. Changing any of it is an admin's job, which is why the DM and
-    not this message carries the /onboard line.
-
-    Each driver is tagged rather than merely named. A tg://user link is the
-    only way to do that here: the label has to stay the *fleet's* name (that is
-    the whole point of reading it out of the About text), and half these
-    accounts have no @username to fall back on. The tag is also what puts the
-    message in front of the person it registered -- the one reader who can tell
-    that the wrong name landed on them.
-    """
-    drivers = "\n".join(
-        f'• <a href="tg://user?id={user_id}">{escape(name)}</a>'
-        for user_id, name in plan.drivers)
-    try:
-        await bot.send_message(
-            group_id,
-            f"✅ <b>Unit {escape(plan.unit)}</b> — this group is set up.\n\n"
-            f"Registered driver(s):\n{drivers}\n\n"
-            f"<i>Read from the group's name and the phone numbers in its About "
-            f"text. If anything here is wrong, let a fleet admin know.</i>",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        # Never fatal -- the group is configured either way, and the admins have
-        # been told in DM regardless. But a post that comes back "no rights" is
-        # worth recording: the bot is sitting in a chat it cannot speak in, and
-        # nothing else would say so until a reminder next came due.
-        logging.warning("could not announce the setup of %s: %s",
-                        group_id, type(e).__name__)
-        await note_send_failure(group_id, e)
-
-
 async def start_onboarding(group_id: int, title: str, manual: bool = False) -> bool:
     """Called when the bot joins a group. Asks the group itself for nothing.
 
-    The only thing it ever posts there is `_tell_the_group`'s confirmation of a
-    setup that went through on its own; the picker and every question go to an
-    admin in DM.
+    The only thing it ever posts there is `utils/setup_notice`'s confirmation
+    that the group is now set up; the picker and every question go to an admin
+    in DM.
 
     `manual` marks a deliberate admin request (/onboard <group_id>) rather than
     the passive join/nag trigger. It changes exactly one thing: an auto-config
@@ -411,7 +374,7 @@ async def start_onboarding(group_id: int, title: str, manual: bool = False) -> b
             # a group that is already configured, and its Edit button may change
             # these very picks a tap later -- the drivers would have been told
             # something that is about to be wrong.
-            await _tell_the_group(group_id, plan)
+            await tell_the_group(group_id, FROM_ABOUT_TEXT)
         # The group is configured either way; an unreachable admin is not a
         # reason to leave it unconfigured, and there is nothing to nag about.
         return True
@@ -604,6 +567,11 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
             await call.answer("Select at least one driver.", show_alert=True)
             return
 
+        # Read before the writes, for the group post at the end: it is for a
+        # group that just became usable, not for a correction to one that
+        # already works.
+        was_usable = await is_usable(group_id)
+
         await set_group_unit(group_id, st["unit"])
         # A driver already registered here keeps the name they were stored with.
         # This prompt is also the Edit path for a group configured from its
@@ -639,6 +607,12 @@ async def on_onboard_click(call: types.CallbackQuery, state: FSMContext):
                          f"— they won't be offered again.</i>")
         await call.message.edit_text("\n".join(lines), parse_mode="HTML")
         await call.answer("Saved")
+
+        # Last. The drivers were told /check would start working once an admin
+        # had assigned the unit and the drivers, and nothing ever came back to
+        # say it had -- but the edit above is the record of the write and must
+        # not wait on a send into a group that may be muted.
+        await announce_if_now_usable(group_id, was_usable, FROM_AN_ADMIN)
 
 
 @dp.message_handler(state=OnboardSG.unit, chat_type=types.ChatType.PRIVATE)
