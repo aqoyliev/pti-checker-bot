@@ -13,6 +13,11 @@ Each group is prompted **once**: the ceiling lives in the query
 because the prompt is a DM with a picker in it, and re-sending turns an admin's
 chat into a stack of identical prompts, all but the newest already dead. A
 group that never got one is reachable with ``/onboard <group_id>``.
+
+Before each pass it also registers any chat that has traffic but no ``groups``
+row (``_register_unrecorded_chats``). Such a chat is invisible to everything
+else -- this loop, the title sweep and the panel all read that table -- so
+nothing would ever ask about it, however busy it gets.
 """
 from __future__ import annotations
 
@@ -28,9 +33,11 @@ from utils.db import (
     UNREACHABLE_LIMIT,
     bump_setup_nag,
     clear_unreachable,
+    get_chats_without_a_record,
     get_groups_needing_setup_nag,
     mark_group_inactive,
     mark_unreachable,
+    upsert_group,
 )
 
 # How long after the bot joins (or after its last prompt) before this loop
@@ -46,11 +53,39 @@ _UNREACHABLE = (Unauthorized, ChatNotFound, MethodIsNotAvailable)
 
 async def setup_nag_loop():
     while True:
+        # Two steps, guarded separately: a chat that cannot be registered must
+        # not cost the prompt for every group that already has a row.
+        try:
+            await _register_unrecorded_chats()
+        except Exception:
+            logging.exception("registering unrecorded chats failed")
         try:
             await _run_setup_nag_pass()
         except Exception:
             logging.exception("setup nag pass failed")
         await asyncio.sleep(60)
+
+
+async def _register_unrecorded_chats() -> int:
+    """Give a ``groups`` row to every chat that has traffic but no record.
+
+    Registering is the whole of it. The row is what makes the group visible,
+    and the pass below then prompts the admins for it exactly as it does for
+    any group whose join-time prompt reached nobody -- so there is no second
+    notification to build and no second way for this to go wrong. A chat the
+    bot is no longer in fails that prompt and is retired by the usual
+    unreachable strikes.
+
+    Logged at warning level, because the row being absent means the join was
+    missed and the drivers have been getting ``/check``'s refusal ever since.
+    """
+    registered = 0
+    for group_id in await get_chats_without_a_record():
+        await upsert_group(group_id)
+        logging.warning("registered group %s: it had traffic but no record, so "
+                        "nothing could ask for its setup", group_id)
+        registered += 1
+    return registered
 
 
 async def _run_setup_nag_pass():

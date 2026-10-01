@@ -540,6 +540,43 @@ async def get_groups_needing_setup_nag() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_chats_without_a_record(limit: int = 25) -> list[int]:
+    """Chats the bot is demonstrably in -- they have message buckets -- that
+    have no ``groups`` row at all.
+
+    ``upsert_group`` runs when the bot is *added* to a group, off the join
+    service message, and that update is simply lost if the process happened to
+    be restarting: the bot then sits in a chat that nothing can see, because
+    the setup nag, the daily title sweep and the web panel all read ``groups``.
+    Found live on Gurman on 2026-10-01 -- one chat with 911 messages over 45
+    days whose drivers had been answered "this group isn't set up yet" the
+    whole time, and nothing in the system was able to notice.
+
+    The message counter is the one thing that still records such a chat
+    (``middlewares/group_activity``), so it is also the one place that can
+    find it. **No row at all** is the test, not an unconfigured row: a chat the
+    bot has in fact been removed from is registered once, fails the nag's own
+    prompt and is retired by the usual strikes -- and then keeps its row, so
+    this never resurrects it.
+
+    The scan is bounded on both sides: ``prune_group_message_days`` keeps a
+    fortnight of buckets, and ``limit`` hands a fleet-wide gap over several
+    passes rather than all at once. Busiest first, since that is the chat
+    losing the most inspections.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT d.group_id
+             FROM group_message_days d
+             LEFT JOIN groups g ON g.group_id = d.group_id
+            WHERE g.group_id IS NULL
+         GROUP BY d.group_id
+         ORDER BY SUM(d.msg_count) DESC
+            LIMIT $1""",
+        limit,
+    )
+    return [r["group_id"] for r in rows]
+
+
 async def get_unconfigured_groups() -> list[dict]:
     """Active groups with no unit and no drivers, whether they were nagged or not.
 

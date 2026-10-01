@@ -44,7 +44,9 @@ issues) is posted back into the group.
   filter plus the names already on every row.
 - **`handlers/groups/setup_nag.py`** — the "nag" loop for still-unconfigured
   groups (it re-sends the onboarding prompt to admins in DM; the group itself
-  only ever hears that a setup went through on its own).
+  only ever hears that a setup went through on its own). It also registers any
+  chat that has traffic but no `groups` row, which is the one state nothing
+  else can see (below).
 - **`handlers/admin/onboard.py`** — admin-driven group onboarding (below), plus
   `/onboard <group_id>` to re-open the prompt for a group.
 - **`utils/unit_parse.py`** — group title/description → unit-number *guess*.
@@ -329,6 +331,43 @@ with `str.title()` and two definitions of the shape would drift. The panel and
 `/adddriver` answer with the stored name, not the typed one. Unlike
 `_clean_name` (which parses About text, and so refuses digits), `tidy_name`
 shapes a name and never judges it — `Lovensky 509` is how that driver is known.
+
+### The chat with no record at all
+
+`upsert_group` runs off the join service message, and that update is simply
+lost if the process happened to be restarting when the bot was added — a
+deploy, or the local Bot API server coming back. The bot then sits in the chat
+receiving everything while **nothing in the system can see the group**: the
+setup nag, the daily title sweep and the web panel all read `groups`. Its
+drivers get `/check`'s "this group isn't set up yet — the fleet admins have
+been asked", which is not true: nobody was asked, and nobody could be.
+
+Found on Gurman on 2026-10-01, two such chats — one of them with **911
+messages over 45 days**. The other was a group the fleet had opened for a
+truck whose previous chat was already configured, so that title was in the
+database twice and only the abandoned copy was on the reports.
+
+The message counter is the one thing that still records such a chat
+(`middlewares/group_activity` writes `group_message_days`, which has no
+foreign key to `groups`), so it is also the only place that can notice.
+`setup_nag_loop` registers them before each pass
+(`db.get_chats_without_a_record` → `upsert_group`) and then prompts for them
+exactly as it does for a group whose join-time prompt reached nobody. Three
+rules:
+
+- **No row at all is the test**, not an unconfigured row. A chat the bot has
+  really been removed from is registered once, fails that prompt and is
+  retired by the usual unreachable strikes — it keeps its row through that, so
+  an anti-join can never resurrect it. A query for "unconfigured and inactive"
+  would re-prompt it every minute for as long as its buckets survived.
+- **Registering is the whole of it.** The row is what makes the group visible,
+  and the existing prompt does the asking: a second notification would be a
+  second thing to get wrong, and an MTProto roster read per pass would spend
+  the lookup budget onboarding depends on.
+- **Bounded on both sides.** `prune_group_message_days` keeps a fortnight of
+  buckets and the query takes the busiest 25, so a fleet-wide gap is handed
+  over several passes rather than all at once — busiest first, since that is
+  the chat losing the most inspections.
 
 ### `scripts/setup_groups.py`: the groups that were asked too early
 
