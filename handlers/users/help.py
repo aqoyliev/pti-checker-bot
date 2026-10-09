@@ -32,9 +32,9 @@ _GROUP = (
     "• A video you already sent (same length and size) is rejected — record a new one.\n"
     "• Videos over 15 minutes are too long to analyse.\n"
     "• Setting this group up can be done right here: reply "
-    "<code>/adddriver</code> to a message the driver sent, and name the truck "
-    "with <code>/setunit 1234</code>. The fleet's admins usually have it done "
-    "already.\n"
+    "<code>/adddriver</code> to a message the driver sent, and name the "
+    "truck with <code>/setunit &lt;truck unit&gt;</code>. The fleet's admins "
+    "usually have it done already.\n"
 )
 
 _DM = (

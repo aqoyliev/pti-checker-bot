@@ -242,7 +242,7 @@ async def handle_check_group(message: types.Message):
                 "Anyone here can set it up:\n"
                 "• reply <code>/adddriver</code> to a message from each "
                 "driver;\n"
-                "• name the truck with <code>/setunit 1234</code>."
+                "• name the truck with <code>/setunit &lt;truck unit&gt;</code>."
             )
         await message.answer(
             "⚠️ <b>This group isn't set up yet.</b>\n"

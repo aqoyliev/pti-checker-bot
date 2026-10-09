@@ -198,7 +198,7 @@ async def cmd_add_driver(message: types.Message):
         names = " & ".join(d["name"] for d in drivers)
         source = "" if stored else (
             "\nThat unit came from this group's title — if it is wrong, "
-            "<code>/setunit 1234</code>."
+            "<code>/setunit &lt;truck unit&gt;</code>."
         )
         await message.reply(
             f"✅ {escape(driver_name)} registered.\n"
@@ -209,7 +209,7 @@ async def cmd_add_driver(message: types.Message):
     else:
         await message.reply(
             f"✅ {escape(driver_name)} registered. Now name the truck:\n"
-            f"<code>/setunit 1234</code>",
+            f"<code>/setunit &lt;truck unit&gt;</code>",
             parse_mode="HTML",
         )
 
@@ -220,7 +220,7 @@ async def cmd_set_unit(message: types.Message):
     unit = message.get_args().strip()
     if not unit:
         await message.reply(
-            "Usage: <code>/setunit &lt;unit_number&gt;</code>",
+            "Usage: <code>/setunit &lt;truck unit&gt;</code>",
             parse_mode="HTML",
         )
         return
