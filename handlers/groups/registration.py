@@ -31,16 +31,19 @@ INTRO_MESSAGE = (
     "sent after it."
 )
 
-# NOTE: there is deliberately no "this group is not configured, run /setunit"
-# message any more. Drivers are never asked to register or configure anything;
-# the unit comes off the title/description and the drivers are picked by an
-# admin in DM. /adddriver, /setunit and /removedriver still work as a manual
-# escape hatch -- for the fleet's admins only. Left open to every member, a
-# driver could re-file the truck with one /setunit, or drop the co-driver out
-# of compliance with /removedriver, so the refusal below is the whole guard:
-# /setunit and /adddriver are in the group command menu
-# (utils/set_bot_commands.py), since an admin configuring a group by hand is in
-# the group rather than in the panel.
+# NOTE: /setunit and /adddriver are open to EVERY member of the group as of
+# 2026-10-10, at the fleet's instruction, and /check's own refusals now name
+# them. Both people a setup needs are already in that chat -- the driver, to be
+# replied to, and whoever read the refusal -- and routing it through an admin
+# who is not there is what left groups unconfigured for weeks while their
+# drivers watched a bot that had stopped answering. The cost is known and
+# accepted: a member can re-file the truck with one /setunit, and the daily
+# title sweep is what corrects that.
+#
+# /removedriver stays admin-only, and off the group command menu. It is the one
+# that takes a driver *out* of compliance, nothing about setting a group up
+# needs it, and /adddriver's own reply names it only for the group that already
+# has two drivers.
 
 _NOT_ADMIN = "Only the fleet's admins can change a group's setup."
 
@@ -115,15 +118,14 @@ async def on_bot_added(message: types.Message):
 
 @dp.message_handler(commands=["adddriver"], chat_type=GROUP_TYPES)
 async def cmd_add_driver(message: types.Message):
-    if not await _admin_only(message):
-        return
+    # Open to every member -- see the NOTE above.
     args = message.get_args().strip()
     reply = message.reply_to_message
 
     if not reply or not reply.from_user:
         await message.reply(
-            "Reply to the driver's message with:\n"
-            "<code>/adddriver Driver Name</code>",
+            "Reply to the driver's own message with <code>/adddriver</code> — "
+            "that reply is how I learn which account is theirs.",
             parse_mode="HTML",
         )
         return
@@ -148,9 +150,19 @@ async def cmd_add_driver(message: types.Message):
     driver_name = tidy_name(driver_name)
 
     if not driver_name:
+        # Telegram's own name rather than a refusal (2026-10-10). A bare
+        # /adddriver replying to the driver has already said who is meant, and
+        # the name is only a label -- the fleet's own one is better, which is
+        # what reading the About text is for, and the panel's rename,
+        # /fixnames and a per-group /onboard all exist to replace this one
+        # later. Refusing instead left the group with no driver at all, which
+        # is the state that stops /check.
+        driver_name = tidy_name(reply.from_user.full_name or "")
+
+    if not driver_name:
         await message.reply(
-            "Please include the driver's name.\n"
-            "Usage: <code>/adddriver Driver Name</code>",
+            "Please include the driver's name: "
+            "<code>/adddriver Driver Name</code>",
             parse_mode="HTML",
         )
         return
@@ -162,9 +174,10 @@ async def cmd_add_driver(message: types.Message):
     if len(existing) >= 2:
         names = " & ".join(d["name"] for d in existing)
         await message.reply(
-            f"This group already has 2 registered drivers: <b>{names}</b>.\n\n"
-            "To replace one, reply to their message with:\n"
-            "<code>/removedriver</code>",
+            f"This group already has 2 registered drivers: "
+            f"<b>{escape(names)}</b>.\n\n"
+            "To replace one, a fleet admin can reply "
+            "<code>/removedriver</code> to their message.",
             parse_mode="HTML",
         )
         return
@@ -187,16 +200,15 @@ async def cmd_add_driver(message: types.Message):
         )
     else:
         await message.reply(
-            f"✅ {escape(driver_name)} registered. Now set the unit number:\n"
-            f"<code>/setunit &lt;unit_number&gt;</code>",
+            f"✅ {escape(driver_name)} registered. Now name the truck:\n"
+            f"<code>/setunit 1234</code>",
             parse_mode="HTML",
         )
 
 
 @dp.message_handler(commands=["setunit"], chat_type=GROUP_TYPES)
 async def cmd_set_unit(message: types.Message):
-    if not await _admin_only(message):
-        return
+    # Open to every member -- see the NOTE above.
     unit = message.get_args().strip()
     if not unit:
         await message.reply(
@@ -216,8 +228,9 @@ async def cmd_set_unit(message: types.Message):
         )
     else:
         await message.reply(
-            f"✅ Unit <b>{escape(unit)}</b> saved. Now register the driver(s) — have them send a message, "
-            f"then anyone reply with <code>/adddriver Driver Name</code>.",
+            f"✅ Unit <b>{escape(unit)}</b> saved. Now register the "
+            f"driver(s): reply <code>/adddriver</code> to a message each of "
+            f"them sent.",
             parse_mode="HTML",
         )
 

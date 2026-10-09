@@ -93,8 +93,8 @@ The account must be a member of the groups it needs to resolve numbers for.
 
 Skipping it is supported: `/whois` and the phone-based auto-config path are
 off, and drivers are added by hand — the web panel's member search (which
-still works off the bot-token roster either way), or an admin running
-`/adddriver` / `/setunit` in the group.
+still works off the bot-token roster either way), or `/adddriver` / `/setunit`
+in the group, which any member may run.
 
 ## 4. Verify the first deploy
 

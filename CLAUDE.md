@@ -605,28 +605,44 @@ gone. A unit is decided from the group's own title and the driver's own video.
 > unread, and dropping a column of fleet history is not something a deploy
 > should do on its own.
 
-`/adddriver`, `/setunit` and `/removedriver` still work as a manual escape
-hatch — **for the fleet's admins only** (`utils/admins.is_admin`; anyone else
-gets a one-line refusal). Left open to every member, a driver could re-file the
-truck with one `/setunit` or drop the co-driver out of compliance with
-`/removedriver`, so that refusal is the whole guard: `/setunit` and `/adddriver`
-are **in** the group command menu, because an admin configuring a group by hand
-is standing in the group rather than in the panel, and a command nothing lists
-has to be typed from memory. `/removedriver` is not listed — `/adddriver`'s own
-reply names it in the single case it is needed, a group that already has two
+`/setunit` and `/adddriver` are the in-group setup path, and **anyone in the
+group may run them** (2026-10-10, at the fleet's instruction). Both people a
+setup needs are already in that chat — the driver, to be replied to, and
+whoever read the refusal — and routing it through an admin who is not there is
+what left groups unconfigured for weeks while their drivers watched a bot that
+had stopped answering. The cost is known and accepted: a member can re-file the
+truck with one `/setunit`, and the daily title sweep is what corrects that.
+Both are **in** the group command menu, since a command nothing lists has to be
+typed from memory.
+
+`/removedriver` **stays admin-only** (`utils/admins.is_admin`; anyone else gets
+a one-line refusal) and stays off that menu. It is the one that takes a driver
+*out* of compliance, nothing about setting a group up needs it, and
+`/adddriver`'s own reply names it only for the group that already has two
 drivers.
 
-**The `/check` refusal names both commands** (2026-10-10, at the fleet's
-instruction). It used to say only that the admins had been asked, which is
-true and gives the one person who could finish the setup in ten seconds --
-an admin standing in that very group -- nothing to do about it; the admin-only
-refusal above is what makes naming them safe. It names `/setunit` as well as
-`/adddriver` because that is the half which clears the refusal:
-`setup_complete` is flipped by the unit write alone (`set_group_unit`), so a
-group told only to add drivers would register them and be refused again. It
-also carries the out-of-reach line, because a group being set up today is
-exactly the group whose drivers then reply `/check` to the PTI filmed that
-morning.
+**`/adddriver` takes no name.** The reply is what identifies the account, and
+that is the part only someone in the chat can supply; a bare `/adddriver`
+stores the driver's Telegram name. That is the weaker label — reading the
+fleet's own name out of the About text is the whole point of
+`utils/driver_names` — but refusing left the group with no driver at all,
+which is the state that stops `/check`. The panel's rename, `/fixnames` and a
+per-group `/onboard` all exist to replace it afterwards. A name typed after the
+command still wins.
+
+**The `/check` refusals name what is missing, and only that** (2026-10-10, at
+the fleet's instruction). An unconfigured group used to be told that the admins
+had been asked, which is true and gives the people standing in that group
+nothing to do. Now:
+
+| What the group has | What the refusal asks for |
+| --- | --- |
+| nothing | `/adddriver`, and `/setunit` — the unit write is what flips `setup_complete` (`set_group_unit`), so a group told only to add drivers would register them and be refused again |
+| a unit, no driver | `/adddriver` alone. This is the "not from a registered driver" refusal as well, which is where half a finished automatic setup actually lands |
+
+The unconfigured one also carries the out-of-reach line, because a group being
+set up today is exactly the group whose drivers then reply `/check` to the PTI
+filmed that morning.
 
 **The roster read no longer needs a user session at all.** Before 2026-09-12
 this ran on a *user* account (`TELEGRAM_SESSION`), and inherited the same

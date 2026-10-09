@@ -3,10 +3,10 @@ from aiogram.dispatcher.filters.builtin import CommandHelp
 
 from loader import dp
 
-# The help text describes what the bot actually does today. Two things it
-# deliberately does NOT say: how to configure a group (drivers are never asked
-# to -- the fleet's admins do that from their side), and which AI vendor is
-# behind the verdict.
+# The help text describes what the bot actually does today. It names the two
+# setup commands, because as of 2026-10-10 anyone in the group may run them and
+# /check's own refusals name them (handlers/groups/registration.py); what it
+# deliberately does not say is which AI vendor is behind the verdict.
 
 _INTRO = (
     "🛠️ <b>PTI Checker Bot — Help</b>\n\n"
@@ -31,8 +31,10 @@ _GROUP = (
     "• Only a registered driver's video counts. Anyone in the group may type /check.\n"
     "• A video you already sent (same length and size) is rejected — record a new one.\n"
     "• Videos over 15 minutes are too long to analyse.\n"
-    "• Group setup — the unit number and who the drivers are — is done by the "
-    "fleet's admins, not in the chat.\n"
+    "• Setting this group up can be done right here: reply "
+    "<code>/adddriver</code> to a message the driver sent, and name the truck "
+    "with <code>/setunit 1234</code>. The fleet's admins usually have it done "
+    "already.\n"
 )
 
 _DM = (

@@ -212,23 +212,37 @@ async def handle_check_group(message: types.Message):
     if not await _group_ready(message):
         # The commands are named rather than withheld (2026-10-10, at the
         # fleet's instruction). "The fleet admins have been asked" is true and
-        # leaves the one person who could finish this in ten seconds -- an
-        # admin standing in this very group -- nothing to do about it; the
-        # admin-only guard on both commands is what makes naming them safe.
+        # leaves the people standing in this very group -- who can finish it in
+        # ten seconds, and who are the only ones able to point at the driver's
+        # own message -- nothing to do about it.
         #
-        # `/setunit` is named because it is the half that clears this refusal:
-        # `setup_complete` is flipped by the unit write alone, so a group told
-        # only to add drivers would register them and be refused again.
+        # Only what is actually missing is asked for. The unit write is what
+        # clears this refusal (`setup_complete` is flipped by it alone), so a
+        # group with nothing on file is told about `/setunit` as well or it
+        # would register its drivers and be refused again; a group that already
+        # has its unit is asked for the driver and nothing else.
         #
         # The out-of-reach line belongs here too. A group being set up today is
         # exactly the group whose drivers then reply `/check` to the PTI filmed
         # this morning, which the bot was never handed.
+        group = await get_group(message.chat.id)
+        unit = (group or {}).get("unit_number")
+        if unit:
+            setup = (
+                f"Unit <b>{html.escape(str(unit))}</b> is on file — all that "
+                "is left is the driver: reply <code>/adddriver</code> to a "
+                "message they sent."
+            )
+        else:
+            setup = (
+                "Anyone here can set it up:\n"
+                "• reply <code>/adddriver</code> to a message from each "
+                "driver;\n"
+                "• name the truck with <code>/setunit 1234</code>."
+            )
         await message.answer(
             "⚠️ <b>This group isn't set up yet.</b>\n"
-            "To set it up — a fleet admin, here in the group:\n"
-            "• reply <code>/adddriver Driver Name</code> to a message from "
-            "each driver;\n"
-            "• name the truck with <code>/setunit 1234</code>.\n\n"
+            f"{setup}\n\n"
             f"⚠️ {OUT_OF_REACH} — so once that is done, send the PTI "
             "video again and reply <code>/check</code> to the new one.",
             parse_mode="HTML",
@@ -271,10 +285,16 @@ async def handle_check_group(message: types.Message):
     elif forward_uid and await is_registered_driver(message.chat.id, forward_uid):
         driver_uid = forward_uid
     if driver_uid is None:
+        # The group this lands in has its unit and no driver -- half an
+        # automatic setup, and the state `/check` cannot be talked out of. So
+        # it asks for the one thing missing, from the people who can give it:
+        # the reply is what identifies the account, and only someone in the
+        # chat can point at it. Sending them to the admin panel asked the one
+        # person who is not there.
         await message.answer(
-            "⚠️ This video isn't from a registered driver, so it can't be checked.\n"
-            "Reply <code>/check</code> to a <b>registered driver's</b> video. If the "
-            "driver is missing, a fleet admin can add them from the admin panel.",
+            "⚠️ <b>This video isn't from a registered driver.</b>\n"
+            "To register them, reply <code>/adddriver</code> to a message that "
+            "driver sent — anyone in the group can.",
             parse_mode="HTML",
         )
         return

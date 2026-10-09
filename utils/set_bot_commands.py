@@ -10,18 +10,18 @@ _PRIVATE_COMMANDS = [
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
 ]
 
-# /setunit and /adddriver are listed even though they are admin-only: an admin
-# setting a group up by hand is standing in the group, and a command nothing
-# lists has to be typed from memory. What keeps them admin-only is the refusal
-# in handlers/groups/registration.py, not their absence from this list.
-# /removedriver stays off it -- it is the one that can drop a driver out of
-# compliance, and /adddriver's own reply names it in the single case it is
-# needed, a group that already has two drivers.
+# /setunit and /adddriver are listed because setting a group up happens in the
+# group, by whoever is in it -- they are open to every member as of 2026-10-10
+# (handlers/groups/registration.py) -- and a command nothing lists has to be
+# typed from memory. /removedriver stays off this list and stays admin-only:
+# it is the one that can drop a driver out of compliance, and /adddriver's own
+# reply names it in the single case it is needed, a group that already has two
+# drivers.
 _GROUP_COMMANDS = [
     types.BotCommand("help", "Help"),
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
-    types.BotCommand("setunit", "Admin: set this group's unit number"),
-    types.BotCommand("adddriver", "Admin: register a driver (reply to them)"),
+    types.BotCommand("setunit", "Set this group's unit number"),
+    types.BotCommand("adddriver", "Register a driver (reply to their message)"),
 ]
 
 # DM-only, admin-only commands from handlers/admin/*.py.

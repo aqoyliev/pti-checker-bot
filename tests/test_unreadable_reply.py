@@ -161,3 +161,36 @@ def test_the_setup_refusal_names_the_commands_that_clear_it(monkeypatch):
     # The group being set up today is the one whose drivers reply /check to
     # this morning's video next.
     assert pti.OUT_OF_REACH in said
+
+
+def test_the_setup_refusal_asks_only_for_the_driver_once_the_unit_is_known(monkeypatch):
+    """Only what is missing. `/setunit` is not it, and offering it invites a
+    member to type a unit over the one the title already proved."""
+    monkeypatch.setattr(pti, "get_group", AsyncMock(
+        return_value={"setup_complete": False, "unit_number": "1216"}))
+    answer = AsyncMock()
+    asyncio.run(pti.handle_check_group(SimpleNamespace(
+        chat=SimpleNamespace(id=GROUP_ID), reply_to_message=None,
+        answer=answer)))
+
+    said = answer.await_args.args[0]
+    assert "1216" in said
+    assert "/adddriver" in said
+    assert "/setunit" not in said
+
+
+def test_an_unregistered_driver_is_told_how_to_register(monkeypatch):
+    """A unit on file and an empty roster -- half an automatic setup.
+
+    The reply is what identifies the account, so the only people who can fix
+    it are the ones in the chat. The admin panel sent them to the one person
+    who is not.
+    """
+    answer, _, run_pti = _check(monkeypatch, _readable(video=VIDEO),
+                                registered=False)
+
+    said = answer.await_args.args[0]
+    assert "/adddriver" in said
+    assert "admin panel" not in said
+    assert "/setunit" not in said
+    run_pti.assert_not_awaited()
