@@ -16,7 +16,7 @@ from utils.db import (
     reset_group_reminders,
 )
 from utils import pti_gate
-from utils.pti_processor import deliver_result, process_mixed_media
+from utils.pti_processor import OUT_OF_REACH, deliver_result, process_mixed_media
 from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
@@ -69,6 +69,36 @@ def _items_from_reply(reply: types.Message) -> list[dict] | None:
     if reply.document and (reply.document.mime_type or "").startswith("video/"):
         return [{"kind": "video_doc", "obj": reply.document}]
     return None
+
+
+_CANT_OPEN = (
+    "⚠️ <b>I can't open that message.</b>\n"
+    f"{OUT_OF_REACH} — and so is one that has been deleted since.\n\n"
+    "Please send the video here again and reply <code>/check</code> to the "
+    "new one."
+)
+
+
+def _reply_is_unreadable(reply: types.Message) -> bool:
+    """True when Telegram handed us a placeholder instead of the message.
+
+    A bot is given a chat only from the moment it is added, so a reply to
+    anything above that line -- or to a message deleted since -- arrives as
+    its id and nothing else: no sender, no media, no text, not even a date.
+
+    Drivers hit this on every new group. The truck's PTI was filmed before
+    anyone added the bot, so the first thing they do is reply ``/check`` to
+    it, and what is missing from the placeholder is the *sender* as much as
+    the video -- which means the first guard it fails is the roster one, and
+    the answer they used to read was that their own video was not from a
+    registered driver, with a line sending an admin into the panel to add a
+    driver who is already there.
+
+    The pair of signals is the test: a message a bot can really read has
+    *some* content type, and an unrecognised service message (a newer Bot API
+    one this aiogram does not know) still names who caused it.
+    """
+    return reply.content_type == ContentType.UNKNOWN and reply.from_user is None
 
 
 def _items_from_buffered(buf_item) -> dict | None:
@@ -186,7 +216,18 @@ async def handle_check_group(message: types.Message):
 
     reply = message.reply_to_message
     if not reply:
-        await message.answer("Reply to a video or photo with /check.")
+        await message.answer(
+            "Reply to a video or photo with <code>/check</code>.\n"
+            f"({OUT_OF_REACH} — if that is what you replied to, please send "
+            "the video again.)",
+            parse_mode="HTML",
+        )
+        return
+
+    # Before the roster check, which is the guard a placeholder fails first --
+    # it is the sender that is missing, not only the video.
+    if _reply_is_unreadable(reply):
+        await message.answer(_CANT_OPEN, parse_mode="HTML")
         return
 
     direct_uid = reply.from_user.id if reply.from_user else None

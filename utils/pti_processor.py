@@ -744,6 +744,15 @@ def format_result(data: dict, photos: int = 0, videos: int = 0, driver_name: str
     return "\n".join(lines)
 
 
+# Said by every refusal a driver can reach by replying /check to a video the
+# bot cannot fetch: the two in handlers/groups/pti (no reply at all, and the
+# placeholder Telegram sends for a message from before the bot was added) and
+# the download below. It lives here because this is the one of the three that
+# cannot import the others.
+OUT_OF_REACH = ("Anything posted before I was added to this group is out of "
+                "my reach")
+
+
 async def process_mixed_media(
     items,
     reply_to,
@@ -849,7 +858,13 @@ async def process_mixed_media(
         video_labels = [(p, "image/jpeg", f"Video frame at {_fmt_timestamp(t)}") for t, p in capped_frames]
         all_images = photo_labels + video_labels
         if not all_images:
-            msg = "Could not download any of the media (files may be too large)." if skipped else "No usable media to analyze."
+            # Not the file's size, usually: a video posted before the bot was
+            # added to the group is out of its reach, and that is the one the
+            # drivers of a new group reply to first.
+            msg = (
+                f"⚠️ Couldn't download the media — please send it again. "
+                f"{OUT_OF_REACH}, and very large files can fail too."
+            ) if skipped else "No usable media to analyze."
             await status_msg.edit_text(msg)
             return None, None, status_msg
 

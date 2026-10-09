@@ -21,7 +21,14 @@ INTRO_MESSAGE = (
     "👋 Hi! I'm the <b>PTI Checker Bot</b>.\n\n"
     "I review pre-trip inspection photos and videos and decide PASS / FAIL "
     "using a DOT-trained model. Reply to a driver's PTI media with <code>/check</code> "
-    "and I'll do the rest. Type <code>/help</code> any time for the full guide."
+    "and I'll do the rest. Type <code>/help</code> any time for the full guide.\n\n"
+    # The one place this rule is visible rather than asserted: the message is
+    # in the chat, above the videos it is talking about. Drivers otherwise
+    # reply /check to the PTI filmed before anyone added the bot, and the
+    # refusal they get is the first thing that tells them.
+    "⚠️ I can only read what is posted <b>from here on</b> — anything above "
+    "this message is out of my reach, so reply <code>/check</code> to a video "
+    "sent after it."
 )
 
 # NOTE: there is deliberately no "this group is not configured, run /setunit"

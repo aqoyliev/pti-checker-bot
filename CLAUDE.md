@@ -865,6 +865,38 @@ already sitting in the chat, its join long since missed. It used to be a
 hardcoded pair in `pti.py` belonging to one fleet; this repo serves several, so
 nothing fleet-specific may be hardcoded.
 
+### The video from before the bot was there
+
+A bot is handed a chat only from the moment it is added, and the first thing a
+new group does is reply `/check` to the PTI that was filmed that morning.
+Telegram answers that reply with a **placeholder** — the message's id and
+nothing else: no sender, no media, no text, not even a date. What is missing
+from it is therefore the *sender* as much as the video, so the first guard it
+fails is the roster one, and what the driver read was that their own video was
+"not from a registered driver", under a line sending an admin into the panel
+to add a driver who was already there.
+
+`_reply_is_unreadable` is checked **before the roster**, on the pair of signals
+a placeholder has and a real message cannot: no content type at all *and* no
+sender. Both halves are needed — a newer Bot API service message this aiogram
+cannot classify has no content type either, and replying `/check` to one is the
+ordinary "that isn't a video" mistake, which keeps the ordinary answer.
+
+The driver is told what is actually wrong and what to do about it: send the
+video again. All three refusals this can land on carry the same sentence
+(`pti_processor.OUT_OF_REACH`, which lives there only because it is the one of
+the three that cannot import the others) — the placeholder, a `/check` with no
+reply at all (the same dead end if the placeholder is ever not delivered), and
+a download that came back with nothing, which used to blame the file's size
+instead.
+
+**It is also said once, up front.** The intro the bot posts on joining ends
+with the line that everything above it is out of its reach. That message sits
+in the chat above the videos it is talking about, which makes it the one place
+the rule is *visible* rather than asserted — and the refusals above are what
+catch it weeks later, when the intro has scrolled away and a group is only
+then being set up.
+
 ### One inspection at a time, and never two of the same video
 
 Two `/check` replies to one video used to start two full inspections, and the
