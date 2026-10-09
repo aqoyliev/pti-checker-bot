@@ -17,6 +17,7 @@ from utils.db import (
 )
 from utils import pti_gate
 from utils.pti_processor import OUT_OF_REACH, deliver_result, process_mixed_media
+from utils.unit_parse import parse_unit
 from handlers.groups.monitoring import buffer_message, get_album_media
 
 GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
@@ -219,17 +220,20 @@ async def handle_check_group(message: types.Message):
         # Only what is actually missing is asked for. The unit write is what
         # clears this refusal (`setup_complete` is flipped by it alone), so a
         # group with nothing on file is told about `/setunit` as well or it
-        # would register its drivers and be refused again; a group that already
-        # has its unit is asked for the driver and nothing else.
+        # would register its drivers and be refused again.
+        #
+        # A unit the chat title names counts as found: `/adddriver` adopts it
+        # (see `cmd_add_driver`), so asking for `/setunit` here would be asking
+        # for a number the group has already written down.
         #
         # The out-of-reach line belongs here too. A group being set up today is
         # exactly the group whose drivers then reply `/check` to the PTI filmed
         # this morning, which the bot was never handed.
         group = await get_group(message.chat.id)
-        unit = (group or {}).get("unit_number")
+        unit = (group or {}).get("unit_number") or parse_unit(message.chat.title)
         if unit:
             setup = (
-                f"Unit <b>{html.escape(str(unit))}</b> is on file — all that "
+                f"Unit <b>{html.escape(str(unit))}</b> is known — all that "
                 "is left is the driver: reply <code>/adddriver</code> to a "
                 "message they sent."
             )
@@ -293,8 +297,9 @@ async def handle_check_group(message: types.Message):
         # person who is not there.
         await message.answer(
             "⚠️ <b>This video isn't from a registered driver.</b>\n"
-            "To register them, reply <code>/adddriver</code> to a message that "
-            "driver sent — anyone in the group can.",
+            "Reply <code>/adddriver</code> to <b>that same video</b> to "
+            "register whoever sent it — anyone in the group can — then "
+            "reply <code>/check</code> to it again.",
             parse_mode="HTML",
         )
         return

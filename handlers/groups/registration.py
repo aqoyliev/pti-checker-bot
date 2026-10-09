@@ -7,8 +7,8 @@ from aiogram import types
 
 from loader import bot_id, dp
 from handlers.admin.onboard import start_onboarding
-from utils.admins import is_admin
 from utils.driver_names import tidy_name
+from utils.unit_parse import parse_unit
 from utils.db import (
     upsert_group, get_group, set_group_unit,
     get_drivers, add_driver, remove_driver,
@@ -31,28 +31,23 @@ INTRO_MESSAGE = (
     "sent after it."
 )
 
-# NOTE: /setunit and /adddriver are open to EVERY member of the group as of
-# 2026-10-10, at the fleet's instruction, and /check's own refusals now name
-# them. Both people a setup needs are already in that chat -- the driver, to be
-# replied to, and whoever read the refusal -- and routing it through an admin
-# who is not there is what left groups unconfigured for weeks while their
-# drivers watched a bot that had stopped answering. The cost is known and
-# accepted: a member can re-file the truck with one /setunit, and the daily
-# title sweep is what corrects that.
+# NOTE: all three commands here -- /setunit, /adddriver and /removedriver --
+# are open to EVERY member of the group as of 2026-10-10, at the fleet's
+# instruction, and /check's own refusals now name them. There is deliberately
+# no admin gate left in this module.
 #
-# /removedriver stays admin-only, and off the group command menu. It is the one
-# that takes a driver *out* of compliance, nothing about setting a group up
-# needs it, and /adddriver's own reply names it only for the group that already
-# has two drivers.
-
-_NOT_ADMIN = "Only the fleet's admins can change a group's setup."
-
-
-async def _admin_only(message: types.Message) -> bool:
-    if message.from_user and await is_admin(message.from_user.id):
-        return True
-    await message.reply(_NOT_ADMIN)
-    return False
+# Every person a setup needs is already in that chat: the driver, whose own
+# message is the only thing that identifies their account, and whoever read
+# the refusal. Routing it through an admin who is not there is what left groups
+# unconfigured for weeks while their drivers watched a bot that had stopped
+# answering. A member can therefore re-file the truck with one /setunit or drop
+# a driver with /removedriver; the fleet weighed that and chose this.
+#
+# /removedriver is still kept off the group command menu
+# (utils/set_bot_commands.py) -- it undoes a setup rather than making one, so
+# nothing should put it in front of someone who was not looking for it.
+# /adddriver's own reply names it in the single case it is needed, a group that
+# already has two drivers.
 
 
 @dp.message_handler(content_types=[types.ContentType.MIGRATE_TO_CHAT_ID,
@@ -176,8 +171,8 @@ async def cmd_add_driver(message: types.Message):
         await message.reply(
             f"This group already has 2 registered drivers: "
             f"<b>{escape(names)}</b>.\n\n"
-            "To replace one, a fleet admin can reply "
-            "<code>/removedriver</code> to their message.",
+            "To replace one, reply <code>/removedriver</code> to a message "
+            "from the driver who is leaving, then add the new one.",
             parse_mode="HTML",
         )
         return
@@ -189,13 +184,26 @@ async def cmd_add_driver(message: types.Message):
         return
 
     group = await get_group(message.chat.id)
-    if group and group.get("unit_number"):
-        await set_group_unit(message.chat.id, group["unit_number"])  # flips setup_complete = TRUE
+    stored = (group or {}).get("unit_number")
+    # The chat title is the fleet's own record of which truck this is, and the
+    # daily sweep re-files the group from it every morning regardless -- so a
+    # group whose title already names a unit is not made to type it in as well
+    # (2026-10-10, at the fleet's instruction). The parse is a guess, which is
+    # why the reply says where the number came from and offers /setunit: the
+    # person reading it is standing in the group and can see the title.
+    unit = stored or parse_unit(message.chat.title)
+    if unit:
+        await set_group_unit(message.chat.id, unit)  # flips setup_complete = TRUE
         drivers = await get_drivers(message.chat.id)
         names = " & ".join(d["name"] for d in drivers)
+        source = "" if stored else (
+            "\nThat unit came from this group's title — if it is wrong, "
+            "<code>/setunit 1234</code>."
+        )
         await message.reply(
             f"✅ {escape(driver_name)} registered.\n"
-            f"Setup complete: unit <b>{escape(group['unit_number'])}</b> assigned to {escape(names)}.",
+            f"Setup complete: unit <b>{escape(unit)}</b> assigned to "
+            f"{escape(names)}.{source}",
             parse_mode="HTML",
         )
     else:
@@ -237,8 +245,7 @@ async def cmd_set_unit(message: types.Message):
 
 @dp.message_handler(commands=["removedriver"], chat_type=GROUP_TYPES)
 async def cmd_remove_driver(message: types.Message):
-    if not await _admin_only(message):
-        return
+    # Open to every member -- see the NOTE above.
     reply = message.reply_to_message
     if not reply or not reply.from_user:
         drivers = await get_drivers(message.chat.id)

@@ -254,7 +254,7 @@ follow:
 - **The caller opts in.** It is a pair of calls around the writes rather than
   something `utils/db` does, because a write-level post would make the
   fleet-wide backfill above land in sixty driver groups at once.
-- **The in-group commands are left out.** An admin running `/setunit` or
+- **The in-group commands are left out.** Whoever runs `/setunit` or
   `/adddriver` is standing in the group, and the bot's own "✅ Setup complete"
   reply is already on screen for everyone in it.
 
@@ -453,13 +453,19 @@ confirm, like `/titlecheck`, and the confirmed write is one transaction
 
 Three rules that are easy to undo by accident:
 
-- **The parsed unit is a suggestion, never a value.** Measured across the 158
-  groups whose `unit_number` was already known, a naive digit-run regex scored
-  79.5% — and six titles yielded a *different valid unit* rather than nothing. A
-  wrong unit silently misattributes inspections, so it is only ever written
-  without a human when the auto-config path's *other* checks corroborate it —
-  two phone numbers that resolve to two members of that very group. Do not wire
-  `parse_unit` straight into `set_group_unit`.
+- **The parsed unit is a suggestion, never a value — unless somebody is
+  looking at it.** Measured across the 158 groups whose `unit_number` was
+  already known, a naive digit-run regex scored 79.5% — and six titles yielded
+  a *different valid unit* rather than nothing. A wrong unit silently
+  misattributes inspections, so nothing **unattended** writes one: the
+  auto-config path needs its *other* checks to corroborate it — two phone
+  numbers that resolve to two members of that very group — and the daily sweep
+  never retires a group whose title still prints the stored number. The one
+  place it is written off the title alone is `/adddriver` (2026-10-10, at the
+  fleet's instruction), which is run in the group by somebody who can see that
+  title, is told the number came from it, and is offered `/setunit` in the same
+  breath. Don't wire `parse_unit` into anything nobody is reading the answer
+  of.
 - **Descriptions are parsed more strictly than titles** — labelled forms only
   (`UNIT 1216`, `TRUCK# 147085`, `SUB x // y`). About text is free prose, where
   the title's bare-leading-number rule would read a phone number, a street
@@ -605,30 +611,32 @@ gone. A unit is decided from the group's own title and the driver's own video.
 > unread, and dropping a column of fleet history is not something a deploy
 > should do on its own.
 
-`/setunit` and `/adddriver` are the in-group setup path, and **anyone in the
-group may run them** (2026-10-10, at the fleet's instruction). Both people a
-setup needs are already in that chat — the driver, to be replied to, and
-whoever read the refusal — and routing it through an admin who is not there is
-what left groups unconfigured for weeks while their drivers watched a bot that
-had stopped answering. The cost is known and accepted: a member can re-file the
-truck with one `/setunit`, and the daily title sweep is what corrects that.
-Both are **in** the group command menu, since a command nothing lists has to be
-typed from memory.
+**The whole of `handlers/groups/registration.py` is open to every member of
+the group** — `/setunit`, `/adddriver` and `/removedriver` alike (2026-10-10,
+at the fleet's instruction; there is no admin gate left in that module).
+Everyone a setup needs is already in that chat: the driver, whose own message
+is the only thing that identifies their account, and whoever read `/check`'s
+refusal. Routing it through an admin who is not there is what left groups
+unconfigured for weeks while their drivers watched a bot that had stopped
+answering. A member can therefore re-file the truck with one `/setunit` or drop
+a driver with `/removedriver`; the fleet weighed that and chose this, so don't
+put the gate back without asking them. `/setunit` and `/adddriver` are **in**
+the group command menu, since a command nothing lists has to be typed from
+memory; `/removedriver` is kept off it because it undoes a setup rather than
+making one, and `/adddriver`'s own reply names it in the single case it is
+needed — a group that already has two drivers.
 
-`/removedriver` **stays admin-only** (`utils/admins.is_admin`; anyone else gets
-a one-line refusal) and stays off that menu. It is the one that takes a driver
-*out* of compliance, nothing about setting a group up needs it, and
-`/adddriver`'s own reply names it only for the group that already has two
-drivers.
-
-**`/adddriver` takes no name.** The reply is what identifies the account, and
-that is the part only someone in the chat can supply; a bare `/adddriver`
-stores the driver's Telegram name. That is the weaker label — reading the
-fleet's own name out of the About text is the whole point of
-`utils/driver_names` — but refusing left the group with no driver at all,
-which is the state that stops `/check`. The panel's rename, `/fixnames` and a
-per-group `/onboard` all exist to replace it afterwards. A name typed after the
-command still wins.
+**`/adddriver` takes no name, and finds the unit itself.** The reply is what
+identifies the account, and that is the part only someone in the chat can
+supply; a bare `/adddriver` stores the driver's Telegram name. That is the
+weaker label — reading the fleet's own name out of the About text is the whole
+point of `utils/driver_names` — but refusing left the group with no driver at
+all, which is the state that stops `/check`. A name typed after the command
+still wins, and the panel's rename, `/fixnames` and a per-group `/onboard` all
+exist to replace a profile name afterwards. With no unit on file it adopts the
+one the **chat title** names, so one command finishes a setup; the reply says
+the number came from the title and offers `/setunit`, which is the review that
+makes a ~80%-accurate parse safe to write (see the rule under `/fixnames`).
 
 **The `/check` refusals name what is missing, and only that** (2026-10-10, at
 the fleet's instruction). An unconfigured group used to be told that the admins
@@ -637,8 +645,9 @@ nothing to do. Now:
 
 | What the group has | What the refusal asks for |
 | --- | --- |
-| nothing | `/adddriver`, and `/setunit` — the unit write is what flips `setup_complete` (`set_group_unit`), so a group told only to add drivers would register them and be refused again |
-| a unit, no driver | `/adddriver` alone. This is the "not from a registered driver" refusal as well, which is where half a finished automatic setup actually lands |
+| no unit anywhere, not even in the title | `/adddriver`, and `/setunit` — the unit write is what flips `setup_complete` (`set_group_unit`), so a group told only to add drivers would register them and be refused again |
+| a unit on file, or one in its title | `/adddriver` alone, since that command adopts the title's number |
+| a unit and no driver, reached by replying to a video | `/adddriver` **on that very video** — it is a message from the driver, so it is the message the command needs, and this is where half a finished automatic setup actually lands |
 
 The unconfigured one also carries the out-of-reach line, because a group being
 set up today is exactly the group whose drivers then reply `/check` to the PTI

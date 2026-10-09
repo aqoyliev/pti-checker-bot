@@ -17,6 +17,9 @@ from handlers.groups import pti
 
 GROUP_ID = -1001234567890
 DRIVER_UID = 5001
+# No number in it: `/adddriver` adopts a unit the title names, so a title that
+# carries one would make "nothing on file" stop asking for `/setunit`.
+TITLE = "Team chat"
 CHAT = {"id": GROUP_ID, "type": "supergroup"}
 SENDER = {"id": DRIVER_UID, "is_bot": False, "first_name": "Sean"}
 
@@ -78,7 +81,7 @@ def _check(monkeypatch, reply, *, registered=True):
     monkeypatch.setattr(pti, "_run_pti", run_pti)
 
     answer = AsyncMock()
-    message = SimpleNamespace(chat=SimpleNamespace(id=GROUP_ID),
+    message = SimpleNamespace(chat=SimpleNamespace(id=GROUP_ID, title=TITLE),
                               reply_to_message=reply, answer=answer)
     asyncio.run(pti.handle_check_group(message))
     return answer, roster, run_pti
@@ -137,7 +140,7 @@ def test_an_unconfigured_group_is_answered_first(monkeypatch):
     monkeypatch.setattr(pti, "get_group", AsyncMock(return_value=None))
     answer = AsyncMock()
     asyncio.run(pti.handle_check_group(SimpleNamespace(
-        chat=SimpleNamespace(id=GROUP_ID), reply_to_message=_placeholder(),
+        chat=SimpleNamespace(id=GROUP_ID, title=TITLE), reply_to_message=_placeholder(),
         answer=answer)))
 
     assert "isn't set up yet" in answer.await_args.args[0]
@@ -152,7 +155,7 @@ def test_the_setup_refusal_names_the_commands_that_clear_it(monkeypatch):
     monkeypatch.setattr(pti, "get_group", AsyncMock(return_value=None))
     answer = AsyncMock()
     asyncio.run(pti.handle_check_group(SimpleNamespace(
-        chat=SimpleNamespace(id=GROUP_ID), reply_to_message=None,
+        chat=SimpleNamespace(id=GROUP_ID, title=TITLE), reply_to_message=None,
         answer=answer)))
 
     said = answer.await_args.args[0]
@@ -170,8 +173,23 @@ def test_the_setup_refusal_asks_only_for_the_driver_once_the_unit_is_known(monke
         return_value={"setup_complete": False, "unit_number": "1216"}))
     answer = AsyncMock()
     asyncio.run(pti.handle_check_group(SimpleNamespace(
-        chat=SimpleNamespace(id=GROUP_ID), reply_to_message=None,
+        chat=SimpleNamespace(id=GROUP_ID, title=TITLE), reply_to_message=None,
         answer=answer)))
+
+    said = answer.await_args.args[0]
+    assert "1216" in said
+    assert "/adddriver" in said
+    assert "/setunit" not in said
+
+
+def test_a_unit_in_the_title_counts_as_found(monkeypatch):
+    """`/adddriver` adopts it, so asking for `/setunit` as well would ask for
+    a number this group has already written down."""
+    monkeypatch.setattr(pti, "get_group", AsyncMock(return_value=None))
+    answer = AsyncMock()
+    asyncio.run(pti.handle_check_group(SimpleNamespace(
+        chat=SimpleNamespace(id=GROUP_ID, title="1216 QUINTERO, JOHN"),
+        reply_to_message=None, answer=answer)))
 
     said = answer.await_args.args[0]
     assert "1216" in said
@@ -190,7 +208,10 @@ def test_an_unregistered_driver_is_told_how_to_register(monkeypatch):
                                 registered=False)
 
     said = answer.await_args.args[0]
+    # On that very video: it is a message from the driver, so it is the message
+    # /adddriver needs, and the reply is already pointing at it.
     assert "/adddriver" in said
+    assert "that same video" in said
     assert "admin panel" not in said
     assert "/setunit" not in said
     run_pti.assert_not_awaited()

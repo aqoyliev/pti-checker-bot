@@ -24,7 +24,7 @@ Three rules hold it up:
   ``scripts/setup_groups.py`` deliberately announces nothing: it configures a
   whole fleet in one pass, and a write-level post would land in sixty driver
   groups at once. The two in-group commands (``/setunit``, ``/adddriver``) are
-  left out for the opposite reason -- an admin typing them is standing in the
+  left out for the opposite reason -- whoever typed them is standing in the
   group, and the bot's answer is already on screen for everyone in it.
 * **A refused post is recorded, not raised.** The setup stands either way and
   the admins have already been told; but this is often the bot's first real

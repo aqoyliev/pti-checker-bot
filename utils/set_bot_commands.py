@@ -11,12 +11,13 @@ _PRIVATE_COMMANDS = [
 ]
 
 # /setunit and /adddriver are listed because setting a group up happens in the
-# group, by whoever is in it -- they are open to every member as of 2026-10-10
-# (handlers/groups/registration.py) -- and a command nothing lists has to be
-# typed from memory. /removedriver stays off this list and stays admin-only:
-# it is the one that can drop a driver out of compliance, and /adddriver's own
-# reply names it in the single case it is needed, a group that already has two
-# drivers.
+# group, by whoever is in it -- every command in
+# handlers/groups/registration.py is open to every member as of 2026-10-10 --
+# and a command nothing lists has to be typed from memory. /removedriver is
+# open too but stays off this list: it undoes a setup rather than making one,
+# so nothing should put it in front of someone who was not looking for it, and
+# /adddriver's own reply names it in the single case it is needed, a group that
+# already has two drivers.
 _GROUP_COMMANDS = [
     types.BotCommand("help", "Help"),
     types.BotCommand("check", "Run PTI inspection on a replied video or photo"),
