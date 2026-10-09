@@ -86,13 +86,17 @@ def _reply_is_unreadable(reply: types.Message) -> bool:
     anything above that line -- or to a message deleted since -- arrives as
     its id and nothing else: no sender, no media, no text, not even a date.
 
-    Drivers hit this on every new group. The truck's PTI was filmed before
-    anyone added the bot, so the first thing they do is reply ``/check`` to
-    it, and what is missing from the placeholder is the *sender* as much as
-    the video -- which means the first guard it fails is the roster one, and
-    the answer they used to read was that their own video was not from a
-    registered driver, with a line sending an admin into the panel to add a
-    driver who is already there.
+    What is missing from it is the *sender* as much as the video, which means
+    the first guard it fails is the roster one -- so without this the driver
+    reads that their own video is not from a registered driver, under a line
+    sending an admin into the panel to add a driver who is already there.
+
+    **The second net, in practice.** On these deployments the reply is not
+    delivered at all: the fleet reports that a ``/check`` on a pre-join video
+    was answered "reply to a video or photo", which is the no-reply branch,
+    so that is where the explanation has to carry. Which of the two shapes
+    arrives is the local Bot API server's business rather than ours, so both
+    are answered.
 
     The pair of signals is the test: a message a bot can really read has
     *some* content type, and an unrecognised service message (a newer Bot API
@@ -216,10 +220,18 @@ async def handle_check_group(message: types.Message):
 
     reply = message.reply_to_message
     if not reply:
+        # The cause first, the instruction last. This is the branch a driver
+        # actually lands on when the video was filmed before the bot was
+        # added -- Telegram delivers no reply at all, not even the
+        # placeholder below -- and opening with "reply to a video or photo"
+        # told someone who had just done exactly that to do it again.
         await message.answer(
-            "Reply to a video or photo with <code>/check</code>.\n"
-            f"({OUT_OF_REACH} — if that is what you replied to, please send "
-            "the video again.)",
+            "⚠️ <b>I can't see a video to check.</b>\n"
+            f"{OUT_OF_REACH} — if that is what you replied to, please send "
+            "the video here again and reply <code>/check</code> to the new "
+            "one.\n\n"
+            "Otherwise, reply <code>/check</code> directly to a video or "
+            "photo.",
             parse_mode="HTML",
         )
         return

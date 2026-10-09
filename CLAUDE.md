@@ -869,26 +869,35 @@ nothing fleet-specific may be hardcoded.
 
 A bot is handed a chat only from the moment it is added, and the first thing a
 new group does is reply `/check` to the PTI that was filmed that morning.
-Telegram answers that reply with a **placeholder** — the message's id and
-nothing else: no sender, no media, no text, not even a date. What is missing
-from it is therefore the *sender* as much as the video, so the first guard it
-fails is the roster one, and what the driver read was that their own video was
-"not from a registered driver", under a line sending an admin into the panel
-to add a driver who was already there.
+**Telegram does not hand the bot that message at all** — measured by the
+fleet, which read the bot's old answer to it: *"Reply to a video or photo with
+/check"*, to a driver who had just done exactly that.
 
-`_reply_is_unreadable` is checked **before the roster**, on the pair of signals
-a placeholder has and a real message cannot: no content type at all *and* no
-sender. Both halves are needed — a newer Bot API service message this aiogram
-cannot classify has no content type either, and replying `/check` to one is the
-ordinary "that isn't a video" mistake, which keeps the ordinary answer.
+All three shapes the dead end takes are answered, because which one arrives is
+the local Bot API server's business rather than ours, and every one of them
+carries the same sentence (`pti_processor.OUT_OF_REACH`, which lives there only
+because it is the one of the three that cannot import the others) and asks for
+the same thing — send the video again. Forwarding it counts: `/check` accepts a
+forward whose origin is the driver.
 
-The driver is told what is actually wrong and what to do about it: send the
-video again. All three refusals this can land on carry the same sentence
-(`pti_processor.OUT_OF_REACH`, which lives there only because it is the one of
-the three that cannot import the others) — the placeholder, a `/check` with no
-reply at all (the same dead end if the placeholder is ever not delivered), and
-a download that came back with nothing, which used to blame the file's size
-instead.
+- **No `reply_to_message` at all**, which is what these deployments do. The
+  answer leads with the cause and closes with the instruction, not the other
+  way round: someone who has just replied to a video must not be told to reply
+  to a video, and the instruction is still there for the driver who typed the
+  command on its own.
+- **A placeholder** — the message's id and nothing else: no sender, no media,
+  no text, not even a date. `_reply_is_unreadable` is checked **before the
+  roster**, because the sender is as absent as the video and the roster is
+  therefore the guard it fails first: the driver would read that their own
+  video is "not from a registered driver", under a line sending an admin into
+  the panel to add a driver who is already there. The test is the pair of
+  signals a placeholder has and a real message cannot — no content type at all
+  *and* no sender. Both halves are needed: a newer Bot API service message this
+  aiogram cannot classify has no content type either, and replying `/check` to
+  one is the ordinary "that isn't a video" mistake, which keeps the ordinary
+  answer.
+- **A download that came back with nothing**, which used to blame the file's
+  size.
 
 **It is also said once, up front.** The intro the bot posts on joining ends
 with the line that everything above it is out of its reach. That message sits

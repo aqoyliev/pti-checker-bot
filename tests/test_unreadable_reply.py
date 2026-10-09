@@ -114,16 +114,20 @@ def test_a_readable_reply_still_goes_to_the_roster(monkeypatch):
     answer.assert_not_awaited()
 
 
-def test_the_no_reply_refusal_names_the_same_cause(monkeypatch):
-    """Two refusals, one cause.
+def test_the_no_reply_refusal_leads_with_the_cause(monkeypatch):
+    """The branch the fleet actually lands on.
 
-    A `/check` with no reply at all is the same dead end whenever the
-    placeholder is not delivered either, and a driver who did reply to the
-    morning's video must not read a flat instruction to do what they just did.
+    Telegram delivers no reply at all for a message from before the bot was
+    added -- not even the placeholder above -- so this refusal is the one that
+    has to explain, and it must not open by telling a driver who just replied
+    to the morning's video to reply to a video.
     """
     answer, _, run_pti = _check(monkeypatch, None)
 
-    assert pti.OUT_OF_REACH in answer.await_args.args[0]
+    said = answer.await_args.args[0]
+    assert pti.OUT_OF_REACH in said
+    # The instruction is for the other reading, so it comes last.
+    assert said.index(pti.OUT_OF_REACH) < said.index("Otherwise")
     run_pti.assert_not_awaited()
 
 
