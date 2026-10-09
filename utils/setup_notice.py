@@ -5,10 +5,9 @@ unit is read off the chat title, the roster and the About text come over
 MTProto, an admin taps names in a DM prompt or searches for them in the web
 panel, and what was written is reported back to the admins. From inside the
 chat the only visible trace is the refusal a driver gets for running /check too
-early -- "this group isn't set up yet, the fleet admins have been asked to
-assign its unit and drivers" -- and until now nothing ever came back to say
-that they had. The drivers were left watching a bot that had told them to wait
-for something they could not see arrive.
+early -- "this group isn't set up yet" -- and until now nothing ever came back
+to say that it had landed. The drivers were left watching a bot that had told
+them to wait for something they could not see arrive.
 
 So the group is told once, when it *becomes* usable: a unit on file and at
 least one registered driver, which is exactly the state /check demands.

@@ -141,3 +141,23 @@ def test_an_unconfigured_group_is_answered_first(monkeypatch):
         answer=answer)))
 
     assert "isn't set up yet" in answer.await_args.args[0]
+
+
+def test_the_setup_refusal_names_the_commands_that_clear_it(monkeypatch):
+    """Both of them, and the unit one above all.
+
+    ``setup_complete`` is flipped by the unit write alone, so a group told to
+    run only ``/adddriver`` would register its drivers and be refused again.
+    """
+    monkeypatch.setattr(pti, "get_group", AsyncMock(return_value=None))
+    answer = AsyncMock()
+    asyncio.run(pti.handle_check_group(SimpleNamespace(
+        chat=SimpleNamespace(id=GROUP_ID), reply_to_message=None,
+        answer=answer)))
+
+    said = answer.await_args.args[0]
+    assert "/adddriver" in said
+    assert "/setunit" in said
+    # The group being set up today is the one whose drivers reply /check to
+    # this morning's video next.
+    assert pti.OUT_OF_REACH in said

@@ -614,9 +614,19 @@ are **in** the group command menu, because an admin configuring a group by hand
 is standing in the group rather than in the panel, and a command nothing lists
 has to be typed from memory. `/removedriver` is not listed — `/adddriver`'s own
 reply names it in the single case it is needed, a group that already has two
-drivers. A driver who runs
-`/check` in an unconfigured group is told the admins have been asked to set
-it up, not handed setup commands.
+drivers.
+
+**The `/check` refusal names both commands** (2026-10-10, at the fleet's
+instruction). It used to say only that the admins had been asked, which is
+true and gives the one person who could finish the setup in ten seconds --
+an admin standing in that very group -- nothing to do about it; the admin-only
+refusal above is what makes naming them safe. It names `/setunit` as well as
+`/adddriver` because that is the half which clears the refusal:
+`setup_complete` is flipped by the unit write alone (`set_group_unit`), so a
+group told only to add drivers would register them and be refused again. It
+also carries the out-of-reach line, because a group being set up today is
+exactly the group whose drivers then reply `/check` to the PTI filmed that
+morning.
 
 **The roster read no longer needs a user session at all.** Before 2026-09-12
 this ran on a *user* account (`TELEGRAM_SESSION`), and inherited the same

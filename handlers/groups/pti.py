@@ -210,12 +210,29 @@ async def _handle_pti_result(
 @dp.message_handler(commands=["check"], chat_type=GROUP_TYPES)
 async def handle_check_group(message: types.Message):
     if not await _group_ready(message):
-        # Drivers are never asked to configure a group: the fleet's admins do
-        # that from their side (onboarding prompt, web panel), and the setup
-        # nag keeps reminding them until it is done.
+        # The commands are named rather than withheld (2026-10-10, at the
+        # fleet's instruction). "The fleet admins have been asked" is true and
+        # leaves the one person who could finish this in ten seconds -- an
+        # admin standing in this very group -- nothing to do about it; the
+        # admin-only guard on both commands is what makes naming them safe.
+        #
+        # `/setunit` is named because it is the half that clears this refusal:
+        # `setup_complete` is flipped by the unit write alone, so a group told
+        # only to add drivers would register them and be refused again.
+        #
+        # The out-of-reach line belongs here too. A group being set up today is
+        # exactly the group whose drivers then reply `/check` to the PTI filmed
+        # this morning, which the bot was never handed.
         await message.answer(
-            "This group isn't set up yet — the fleet admins have been asked to "
-            "assign its unit and drivers. Once that's done, /check will work here.")
+            "⚠️ <b>This group isn't set up yet.</b>\n"
+            "To set it up — a fleet admin, here in the group:\n"
+            "• reply <code>/adddriver Driver Name</code> to a message from "
+            "each driver;\n"
+            "• name the truck with <code>/setunit 1234</code>.\n\n"
+            f"⚠️ {OUT_OF_REACH} — so once that is done, send the PTI "
+            "video again and reply <code>/check</code> to the new one.",
+            parse_mode="HTML",
+        )
         return
 
     reply = message.reply_to_message
