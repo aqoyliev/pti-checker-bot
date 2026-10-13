@@ -82,15 +82,42 @@ def test_the_notice_answers_the_refusal_the_drivers_were_given(monkeypatch):
     assert "/check works here now" in sent.await_args.args[1]
 
 
-def test_the_notice_asks_the_group_for_nothing(monkeypatch):
-    """A statement, not a request: drivers are never asked to configure
-    anything, so there is nothing here to tap or to type."""
+def test_the_notice_asks_the_group_to_set_nothing_up(monkeypatch):
+    """The setup is done; nothing here is a prompt to finish it. No button, and
+    no `/onboard` -- re-reading the roster is the admin notice's offer, and this
+    message reaches people who cannot run it."""
     sent = _wire(monkeypatch)
 
     asyncio.run(setup_notice.tell_the_group(GROUP, setup_notice.FROM_AN_ADMIN))
 
     assert "/onboard" not in sent.await_args.args[1]
     assert "reply_markup" not in sent.await_args.kwargs
+
+
+def test_the_notice_names_the_fix_instead_of_an_absent_admin(monkeypatch):
+    """It used to say "let a fleet admin know", which cannot be done from the
+    chat: the bot relays nothing, and the admins are not in it. Every command
+    named instead is open to any member (2026-10-10)."""
+    sent = _wire(monkeypatch)
+
+    asyncio.run(setup_notice.tell_the_group(GROUP, setup_notice.FROM_AN_ADMIN))
+
+    text = sent.await_args.args[1]
+    assert "/setunit" in text
+    # Removing the only driver is the state that stops /check, so the pair is
+    # named together or not at all.
+    assert "/removedriver" in text and "/adddriver" in text
+    assert "let them know" not in text
+    assert "let a fleet admin know" not in text
+
+
+def test_both_sources_carry_the_fix(monkeypatch):
+    """Who configured the group says nothing about who can correct it."""
+    sent = _wire(monkeypatch)
+
+    for source in (setup_notice.FROM_ABOUT_TEXT, setup_notice.FROM_AN_ADMIN):
+        asyncio.run(setup_notice.tell_the_group(GROUP, source))
+        assert "/setunit" in sent.await_args.args[1]
 
 
 def test_the_notice_says_which_source_the_picks_came_from(monkeypatch):

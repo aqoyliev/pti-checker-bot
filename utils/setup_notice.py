@@ -38,9 +38,26 @@ these accounts have no @username to fall back on. The tag is also what puts the
 message in front of the person it registered, the one reader who can tell that
 the wrong name landed on them.
 
-It is a statement, not a request: no commands, no buttons, nothing for a driver
-to do about it. Correcting any of it is an admin's job, which is why the admin
-notice and not this message carries the ``/onboard`` line.
+It carries no button and asks the group to set nothing up -- that part is done.
+What it does name is the **fix**, because it used to say "let a fleet admin
+know" and there is no way to do that from this chat: the bot relays nothing to
+the admins, and the people who could act on it are not in the group. Since
+2026-10-10 they are not needed either -- ``/setunit``, ``/removedriver`` and
+``/adddriver`` are open to every member -- so the two things a driver can
+actually spot here are fixable by whoever spotted them (2026-10-13, at the
+fleet's instruction).
+
+``/removedriver`` is named here although it is deliberately kept off the group
+command menu. A menu is browsed; this is a message about this group's own
+setup, reaching the one person who would be looking for it. It is named
+together with ``/adddriver`` in one breath, because a unit left with no driver
+is itself the state that stops /check.
+
+A wrong *name* on the right account is the one case with no fix named, because
+it has none: nothing in the group can rename a registered driver, and the
+panel's rename, ``/fixnames`` and ``/onboard`` are all admin-side. Naming a fix
+that does not exist is precisely what this change is undoing. ``/onboard``
+therefore stays on the admin notice rather than here.
 """
 from __future__ import annotations
 
@@ -55,10 +72,18 @@ from utils.group_health import note_send_failure
 # people who can tell that a name landed on the wrong account, and what they
 # need in order to judge it is which source claimed it.
 FROM_ABOUT_TEXT = ("Read from the group's name and the phone numbers in its "
-                   "About text. If anything here is wrong, let a fleet admin "
-                   "know.")
-FROM_AN_ADMIN = ("Set up by one of the fleet's admins. If anything here is "
-                 "wrong, let them know.")
+                   "About text.")
+FROM_AN_ADMIN = "Set up by one of the fleet's admins."
+
+# And what to do if it is wrong, which is the whole reason the source line
+# above is here. Both sources share it: who configured the group says nothing
+# about who can correct it, and since 2026-10-10 that is anyone standing in the
+# chat. See the module docstring for why a wrong name is not in it.
+HOW_TO_FIX = ("Anyone here can fix it: for the unit, "
+              "<code>/setunit &lt;truck unit&gt;</code>. For a driver, reply "
+              "<code>/removedriver</code> to a message from whoever shouldn't "
+              "be listed, then <code>/adddriver</code> to one from the right "
+              "driver.")
 
 
 async def is_usable(group_id: int) -> bool:
@@ -90,7 +115,7 @@ async def tell_the_group(group_id: int, source: str) -> None:
             group_id,
             f"✅ <b>Unit {escape(unit)}</b> — this group is set up.\n\n"
             f"Registered driver(s):\n{tagged}\n\n"
-            f"<i>/check works here now. {source}</i>",
+            f"<i>/check works here now. {source}\n{HOW_TO_FIX}</i>",
             parse_mode="HTML",
         )
     except Exception as e:

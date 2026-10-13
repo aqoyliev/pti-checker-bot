@@ -198,11 +198,23 @@ of them invites a tap on the ones that were correct.
 
 **The group is told too** (as of 2026-09-20), and it is the one thing
 onboarding ever posts into a driver's group: the unit, both drivers **tagged**
-under the names they were stored with, and a line saying where those came from
-— no command, no button, nothing for a driver to do about it
-(`utils/setup_notice.py`). An automatic setup is otherwise invisible from
-inside the chat — the roster and the About text are read over MTProto and the
-result is reported in a DM — so the next thing the drivers would see is an
+under the names they were stored with, a line saying where those came from,
+and — since 2026-10-13, at the fleet's instruction — the commands to correct
+it with (`utils/setup_notice.py`). It carried "if anything here is wrong, let a
+fleet admin know" instead, and there is no way to do that from the chat: the
+bot relays nothing to the admins and they are not in the group. Since the
+setup commands are open to every member there is nothing to relay — the unit
+is re-filed with `/setunit`, a wrong driver with `/removedriver` and
+`/adddriver`, which are named in one breath because a unit left with no driver
+is the state that stops `/check`. A wrong *name* on the right account is the
+one case with no fix named, because the group has none: renaming is the
+panel's, `/fixnames`'s and `/onboard`'s, and naming a fix that does not exist
+is what this replaced. There is still no button, and still no
+`/onboard`.
+
+An automatic setup is otherwise invisible from inside the chat — the
+roster and the About text are read over MTProto and the result is
+reported in a DM — so the next thing the drivers would see is an
 overdue reminder naming someone who never saw themselves registered. They are
 also the only people who can tell that a name landed on the wrong driver: the
 admin reading the notice is comparing two strings, neither of which they
