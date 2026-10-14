@@ -104,6 +104,18 @@ async def init_db():
                 updated_at TIMESTAMP DEFAULT NOW()
             );
 
+            -- The Mon/Wed/Fri morning PTI call (utils/pti_broadcast.py): one
+            -- row per group per day it went to, written *before* the post, so a
+            -- restart mid-run resumes without posting anything twice. No
+            -- foreign key: it is a send log, pruned after 30 days.
+            CREATE TABLE IF NOT EXISTS broadcast_sent (
+                kind     TEXT   NOT NULL,
+                day      DATE   NOT NULL,
+                group_id BIGINT NOT NULL,
+                sent_at  TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (kind, day, group_id)
+            );
+
             -- Bot admins (separate from group admins). is_super_admin can manage
             -- other admins; every admin can open the panel and disable a group's
             -- notifications.
@@ -947,6 +959,40 @@ async def get_active_group_ids() -> list[int]:
         "SELECT group_id FROM groups WHERE COALESCE(is_active, TRUE) = TRUE ORDER BY group_id"
     )
     return [r["group_id"] for r in rows]
+
+
+async def get_broadcast_targets() -> list[int]:
+    """Groups the morning PTI call goes to.
+
+    Active ones, minus those an admin switched notifications off for, minus
+    those the bot is known to be muted in -- a post there only fails, and
+    `utils/group_health` already told the admins about it.
+    """
+    rows = await _pool_check().fetch(
+        """SELECT group_id FROM groups
+            WHERE COALESCE(is_active, TRUE)
+              AND NOT COALESCE(notifications_disabled, FALSE)
+              AND NOT COALESCE(post_blocked, FALSE)
+            ORDER BY group_id"""
+    )
+    return [r["group_id"] for r in rows]
+
+
+async def claim_broadcast(kind: str, day, group_id: int) -> bool:
+    """Reserve one group's broadcast for one day. False if it was already taken."""
+    status = await _pool_check().execute(
+        """INSERT INTO broadcast_sent (kind, day, group_id) VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING""",
+        kind, day, group_id,
+    )
+    return status.endswith(" 1")
+
+
+async def prune_broadcast_sent(keep_days: int) -> None:
+    await _pool_check().execute(
+        "DELETE FROM broadcast_sent WHERE day < CURRENT_DATE - $1::int",
+        keep_days,
+    )
 
 
 async def set_group_active(group_id: int, active: bool):

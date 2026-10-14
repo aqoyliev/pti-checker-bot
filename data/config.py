@@ -53,6 +53,14 @@ PTI_AUTOCHECK_ENABLED = env.bool("PTI_AUTOCHECK_ENABLED", default=True)
 PTI_TEST_GROUP_IDS = frozenset(
     int(x) for x in env.list("PTI_TEST_GROUP_IDS", default=[]) if x.strip())
 
+# The Mon/Wed/Fri 07:00 PTI call with the checklist picture
+# (utils/pti_broadcast.py). On by default -- it is the fleet's own message, asked
+# for 2026-10-14 -- and this is the switch for a fleet that does not want it.
+# The time zone is its own setting rather than FLEET_TZ: the safety team set
+# 07:00 *Eastern*, whatever zone a fleet's reports are printed in.
+PTI_BROADCAST_ENABLED = env.bool("PTI_BROADCAST_ENABLED", default=True)
+PTI_BROADCAST_TZ = env.str("PTI_BROADCAST_TZ", default="America/New_York")
+
 # Overdue reminders. The bot never restricts a driver under any setting — this
 # only controls whether the hourly loop sends overdue reminders to the group and
 # a summary to admins. False (default) = the loop does nothing at all.

@@ -167,6 +167,20 @@ standing one up.
   driven off the *actual* last PTI (`get_last_pti_for_group`), not a schedule.
   Don't reintroduce a reminder that fires on a fixed cadence without checking
   whether a PTI already came in.
+- **The one fixed-cadence post is the morning PTI call** (`utils/pti_broadcast.py`,
+  2026-10-14, at the fleet's instruction): the checklist picture with the
+  safety team's text as its caption, Monday / Wednesday / Friday at 07:00
+  **Eastern** (`PTI_BROADCAST_TZ`, its own setting rather than `FLEET_TZ`;
+  `PTI_BROADCAST_ENABLED` switches it off). It is a call to film *before the
+  truck moves*, not a reminder about a missing PTI, and the fleet chose it
+  knowing the nudge above was removed — at 07:00 almost nobody has filed yet.
+  Four rules: it never stamps `last_reminder_at` (three stamps a week would
+  hold the overdue escalation off for most of it); it never spends an
+  unreachable strike or deactivates a group; it skips groups with
+  notifications switched off or the bot muted, but **not** quiet ones; and every
+  group is claimed in `broadcast_sent` *before* it is posted to, so a deploy at
+  07:00 resumes the run without posting twice. A bot down at 07:00 still sends
+  until 09:00, never later.
 
 ## Group onboarding
 

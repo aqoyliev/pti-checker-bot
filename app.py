@@ -12,6 +12,7 @@ from utils.db import init_db, get_setting, seed_super_admins
 from utils.scheduler import compliance_loop
 from handlers.admin.units import title_sweep_loop
 from handlers.groups.setup_nag import setup_nag_loop
+from utils.pti_broadcast import pti_broadcast_loop
 from utils.gemini import get_active_model, set_active_model
 from webapp.server import start_webapp
 
@@ -45,6 +46,7 @@ async def on_startup(dispatcher):
     asyncio.create_task(compliance_loop())
     asyncio.create_task(setup_nag_loop())
     asyncio.create_task(title_sweep_loop())
+    asyncio.create_task(pti_broadcast_loop())
 
 
 if __name__ == '__main__':
