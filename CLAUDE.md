@@ -29,7 +29,11 @@ issues) is posted back into the group.
   `ENFORCEMENT_ENABLED`). **The bot never restricts a driver** (see Conventions).
 - **`utils/admins.py`** — who counts as an admin: env `ADMINS` are
   super-admins, the `admins` table holds the rest. Every admin check (the web
-  panel, `/admin`, the group setup commands) goes through it.
+  panel, `/admin`) goes through it. **The AI model is the super-admin's alone**
+  (2026-10-14): a regular admin is not shown the card, and `/api/model` refuses
+  them the read too. In `webapp/server.py`, test `_require_super`'s result with
+  `is not None` — an aiohttp Response is *falsy*, and the walrus-truth form left
+  every super-admin endpoint open to every admin until that day.
 - **`webapp/`** — the web admin panel (Telegram Mini App) — **the** admin
   panel; there is no inline copy of it any more. `server.py` is an aiohttp app
   started from `on_startup` (listens on `PORT`/`WEBAPP_PORT`, default 8080);
@@ -181,11 +185,18 @@ standing one up.
   skips those with notifications switched off or the bot muted, but **not**
   quiet ones; every group is claimed in `broadcast_sent` *before* it is posted
   to, so a deploy at 07:00 resumes the run without posting twice; and the
-  picture is uploaded once, then **copied** to every other group by
-  `message_id`, falling back to the photo's `file_id` when a copy fails (a
-  deleted source, a group that protects its content). The super-admins get one
-  line per run with the count. A bot down at 07:00 still sends until 09:00,
-  never later.
+  picture **always goes by `file_id`** — uploaded once, the id kept in
+  `app_settings` beside a hash of the picture, so neither a restart nor next
+  Monday uploads it again and a new picture in `media/` is uploaded once more
+  (a copy by `message_id` was tried first and dropped at the fleet's
+  instruction). The run is reported **only to the admin named "Safety
+  Monitoring"** (`PTI_BROADCAST_REPORT_ADMIN`, matched on the Telegram name) —
+  never to the super-admin, who asked not to get these — naming every group
+  it did not reach with Telegram's own reason. That account has to have
+  pressed `/start` in each fleet's bot, or the bot cannot DM it. A bot down at
+  07:00 still sends until 09:00, never later. The picture lives in `media/`,
+  not `assets/`: `.dockerignore` drops `assets/`, and the first deploy shipped
+  without it.
 
 ## Group onboarding
 

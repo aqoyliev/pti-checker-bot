@@ -60,6 +60,10 @@ PTI_TEST_GROUP_IDS = frozenset(
 # 07:00 *Eastern*, whatever zone a fleet's reports are printed in.
 PTI_BROADCAST_ENABLED = env.bool("PTI_BROADCAST_ENABLED", default=True)
 PTI_BROADCAST_TZ = env.str("PTI_BROADCAST_TZ", default="America/New_York")
+# Who hears how the run went: the admin whose Telegram name this is, and nobody
+# else -- the fleet's owner asked not to get these.
+PTI_BROADCAST_REPORT_ADMIN = env.str("PTI_BROADCAST_REPORT_ADMIN",
+                                     default="Safety Monitoring")
 
 # Overdue reminders. The bot never restricts a driver under any setting — this
 # only controls whether the hourly loop sends overdue reminders to the group and

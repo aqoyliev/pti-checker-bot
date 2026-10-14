@@ -8,8 +8,9 @@ setup commands):
 * everyone in the ``admins`` table is an admin; the row says whether they are
   super. Regular admins are added from the panel at runtime.
 
-Super-admins manage other admins and switch the AI model; regular admins can
-do everything else the panel offers.
+Super-admins manage other admins and are the only ones who see the AI model
+at all (2026-10-14: a regular admin is not shown which model runs, let alone
+offered a switch); regular admins can do everything else the panel offers.
 """
 from __future__ import annotations
 
@@ -61,4 +62,48 @@ async def notify_super_admins(text: str, **kwargs) -> int:
             sent += 1
         except Exception:
             logging.warning("could not reach admin %s", admin_id, exc_info=True)
+    return sent
+
+
+def _same_name(a: str | None, b: str | None) -> bool:
+    return " ".join((a or "").split()).casefold() == " ".join((b or "").split()).casefold()
+
+
+async def notify_admins_named(name: str, text: str, **kwargs) -> int:
+    """DM the admins whose Telegram name is `name`. Returns how many were reached.
+
+    For the reports a fleet's safety desk acts on and its owner does not want
+    -- the morning PTI call's (2026-10-14: "only the admin called Safety
+    Monitoring, not me"). Super-admins are left out on purpose, whatever they
+    are called. Matched by the name on the account, since that is how the fleet
+    named the recipient; an account the bot cannot read (it never started a DM
+    with this bot) cannot be messaged either, and is only logged.
+
+    Never raises, same as `notify_super_admins`.
+    """
+    from loader import bot
+    from utils.db import get_admins
+
+    kwargs.setdefault("parse_mode", "HTML")
+    sent = 0
+    for row in await get_admins():
+        user_id = row["user_id"]
+        if user_id in SUPER_ADMIN_IDS or row.get("is_super_admin"):
+            continue
+        try:
+            chat = await bot.get_chat(user_id)
+        except Exception as e:
+            logging.info("admin %s can't be read (%s) -- not a %r candidate",
+                         user_id, type(e).__name__, name)
+            continue
+        if not _same_name(chat.full_name, name):
+            continue
+        try:
+            await bot.send_message(user_id, text, **kwargs)
+            sent += 1
+        except Exception:
+            logging.warning("could not reach admin %s", user_id, exc_info=True)
+    if not sent:
+        logging.warning("no admin named %r could be reached; the report was "
+                        "not delivered", name)
     return sent

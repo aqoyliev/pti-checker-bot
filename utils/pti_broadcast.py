@@ -25,15 +25,21 @@ in. An unconfigured group is left out because a driver who answers the call
 there is refused by /check. Quiet groups are *not* skipped -- a group nobody
 has posted in is exactly where a PTI is missing.
 
-The picture is **uploaded once**: the first group gets it as a fresh photo, and
-every other group gets a copy of that very message (``copyMessage`` by its
-``message_id``), so nothing is re-sent over the wire. A copy can fail for a
-reason that is the source's and not the target's -- the message was deleted, or
-that group protects its content -- so a failed copy falls back to posting the
-photo by ``file_id``, and if *that* lands, the new message becomes the source.
+The picture is **always sent by ``file_id``** (2026-10-14, at the fleet's
+instruction). It is uploaded once, and the id Telegram gives back is kept in
+``app_settings`` together with a hash of the picture, so a restart does not
+upload it again and a new picture shipped in ``media/`` is uploaded once more
+rather than answered with the old one. A stored id Telegram no longer accepts
+is a file error, not the group's, and costs exactly one re-upload. (The first
+version copied the first group's message by ``message_id`` instead; a copy
+depends on a message somebody can delete and a group that may protect its
+content, and the fleet chose the file_id.)
 
-When a run has posted anything, the super-admins get one line saying how many
-groups it reached and how many failed.
+The run is reported to the **admin named "Safety Monitoring"**
+(``PTI_BROADCAST_REPORT_ADMIN``) and to nobody else -- not the super-admin,
+who asked not to get these (2026-10-14). The report names every group the call
+did not reach and Telegram's own reason, since "1 failed -- see the logs" sent
+someone to logs they cannot read.
 
 Each group is **claimed before it is posted to** (``broadcast_sent``, keyed on
 the day), so a restart in the middle of a run -- a deploy at 07:00 -- resumes
@@ -44,6 +50,7 @@ rather than arriving mid-shift.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from html import escape
@@ -51,14 +58,16 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import types
-from aiogram.utils.exceptions import MigrateToChat
+from aiogram.utils.exceptions import BadRequest, MigrateToChat
 
-from data.config import PTI_BROADCAST_ENABLED, PTI_BROADCAST_TZ
+from data.config import (
+    PTI_BROADCAST_ENABLED, PTI_BROADCAST_REPORT_ADMIN, PTI_BROADCAST_TZ,
+)
 from loader import bot
-from utils.admins import notify_super_admins
+from utils.admins import notify_admins_named
 from utils.db import (
-    claim_broadcast, get_broadcast_targets, migrate_group_id,
-    prune_broadcast_sent,
+    claim_broadcast, get_broadcast_targets, get_setting, migrate_group_id,
+    prune_broadcast_sent, set_setting,
 )
 from utils.group_health import note_send_failure, note_send_ok
 
@@ -73,10 +82,14 @@ TICK_SECONDS = 60
 # whole fleet still goes out inside half a minute.
 PAUSE_SECONDS = 0.1
 KEEP_DAYS = 30
+# How many unreached groups the report names one by one; a message holds 4096
+# characters, and past this many the count says enough.
+REPORT_LIMIT = 40
 
 # Not under assets/: .dockerignore keeps that out of the runtime image (it
 # holds the logo sources), and the first deploy of this ran without its picture.
 IMAGE = Path(__file__).resolve().parent.parent / "media" / "pti_broadcast.jpg"
+FILE_ID_SETTING = "pti_broadcast_file_id"
 
 # The safety team's text, as they wrote it. Escaped once here, because every
 # message is HTML and "safe & DOT-ready" carries a bare ampersand.
@@ -91,11 +104,9 @@ TEXT = (
 )
 CAPTION = escape(TEXT, quote=False)
 
-# The first message this process posted -- (chat_id, message_id) -- which every
-# other group gets a copy of, and the photo's file_id, the fallback when a copy
-# cannot be made. In memory only: a restart uploads the picture once more.
-_source: tuple[int, int] | None = None
+# The uploaded photo's file_id, read from app_settings once per process.
 _photo_id: str | None = None
+_photo_loaded = False
 # The day the last run finished, so the rest of the two-hour window costs
 # nothing. In memory only: after a restart the claims in the database decide.
 _done: date | None = None
@@ -116,25 +127,70 @@ def due_day(now: datetime, tz: ZoneInfo) -> date | None:
     return None
 
 
+def _image_digest() -> str:
+    return hashlib.sha256(IMAGE.read_bytes()).hexdigest()[:16]
+
+
+async def _stored_file_id() -> str | None:
+    """The file_id saved for *this* picture, or None if there is none yet."""
+    global _photo_id, _photo_loaded
+    if not _photo_loaded:
+        _photo_loaded = True
+        digest, _, file_id = (await get_setting(FILE_ID_SETTING) or "").partition(" ")
+        _photo_id = file_id if digest == _image_digest() and file_id else None
+    return _photo_id
+
+
+def _is_file_error(exc: BaseException) -> bool:
+    """A stored file_id Telegram no longer accepts -- the file's fault, not the
+    group's. Anything else (no rights, chat gone) is about the group."""
+    return isinstance(exc, BadRequest) and "file" in str(exc).lower()
+
+
 async def _post(group_id: int) -> None:
-    global _source, _photo_id
-    if _source is not None:
+    global _photo_id
+    file_id = await _stored_file_id()
+    if file_id:
         try:
-            await bot.copy_message(group_id, _source[0], _source[1])
+            await bot.send_photo(group_id, file_id, caption=CAPTION,
+                                 parse_mode="HTML")
             return
-        except MigrateToChat:
-            raise  # the target moved; that is not the source's problem
-        except Exception as e:
-            # Either side can be the reason. Posting the photo settles which:
-            # if it lands, the source was the problem and is replaced below.
-            logging.info("copying the PTI call to %s failed (%s); posting the "
-                         "photo instead", group_id, type(e).__name__)
-    photo = _photo_id or types.InputFile(str(IMAGE))
-    message = await bot.send_photo(group_id, photo, caption=CAPTION,
-                                   parse_mode="HTML")
+        except BadRequest as e:
+            if not _is_file_error(e):
+                raise
+            logging.warning("the stored PTI call file_id was refused (%s); "
+                            "uploading the picture again", e)
+            _photo_id = None
+    message = await bot.send_photo(group_id, types.InputFile(str(IMAGE)),
+                                   caption=CAPTION, parse_mode="HTML")
     if getattr(message, "photo", None):
         _photo_id = message.photo[-1].file_id
-    _source = (group_id, message.message_id)
+        await set_setting(FILE_ID_SETTING, f"{_image_digest()} {_photo_id}")
+
+
+def _group_label(group: dict) -> str:
+    """'Unit 2643 — <title>' as the fleet knows it, plus the id to act on."""
+    unit = (group.get("unit_number") or "").strip()
+    title = (group.get("title") or "").strip()
+    if title and (not unit or unit in title):
+        label = escape(title)
+    else:
+        label = f"Unit {escape(unit or '?')}"
+        if title:
+            label += f" — {escape(title)}"
+    return f"{label} <code>{group['group_id']}</code>"
+
+
+def _report(day: date, sent: int, misses: list[tuple[dict, str]]) -> str:
+    lines = [f"📣 <b>Morning PTI call — {day:%a %d %b}</b>",
+             f"Posted to {sent} group(s)."]
+    if misses:
+        lines += ["", f"⚠️ <b>{len(misses)} group(s) did not get it:</b>"]
+        for group, reason in misses[:REPORT_LIMIT]:
+            lines.append(f"• {_group_label(group)}\n  <i>{escape(reason)}</i>")
+        if len(misses) > REPORT_LIMIT:
+            lines.append(f"…and {len(misses) - REPORT_LIMIT} more.")
+    return "\n".join(lines)
 
 
 async def run_broadcast_if_due(now: datetime | None = None) -> int:
@@ -149,9 +205,11 @@ async def run_broadcast_if_due(now: datetime | None = None) -> int:
         return 0
 
     await prune_broadcast_sent(KEEP_DAYS)
-    sent = failed = 0
+    sent = 0
+    misses: list[tuple[dict, str]] = []
     migrated = False
-    for group_id in await get_broadcast_targets():
+    for group in await get_broadcast_targets():
+        group_id = group["group_id"]
         # Claimed first: a crash between the two costs this group its message,
         # never a second copy of it.
         if not await claim_broadcast(KIND, day, group_id):
@@ -166,22 +224,22 @@ async def run_broadcast_if_due(now: datetime | None = None) -> int:
             await migrate_group_id(group_id, e.migrate_to_chat_id)
             migrated = True
         except Exception as e:
-            failed += 1
+            reason = str(e) or type(e).__name__
+            misses.append((group, reason))
             await note_send_failure(group_id, e)
-            logging.warning("PTI broadcast to %s failed: %s",
-                            group_id, type(e).__name__)
+            logging.warning("PTI broadcast to %s failed: %s: %s",
+                            group_id, type(e).__name__, reason)
         await asyncio.sleep(PAUSE_SECONDS)
 
     # A group that moved to a new id still has to be reached, so a run that
     # followed one is not finished: the next tick claims and posts the new id.
     if not migrated:
         _done = day
-    if sent or failed:
+    if sent or misses:
         logging.info("PTI broadcast for %s: posted to %s group(s), %s failed",
-                     day, sent, failed)
-        await notify_super_admins(
-            f"📣 Morning PTI call ({day:%a %d %b}): posted to {sent} "
-            f"group(s)" + (f", {failed} failed — see the logs." if failed else "."))
+                     day, sent, len(misses))
+        await notify_admins_named(PTI_BROADCAST_REPORT_ADMIN,
+                                  _report(day, sent, misses))
     return sent
 
 

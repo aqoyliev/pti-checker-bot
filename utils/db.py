@@ -961,7 +961,7 @@ async def get_active_group_ids() -> list[int]:
     return [r["group_id"] for r in rows]
 
 
-async def get_broadcast_targets() -> list[int]:
+async def get_broadcast_targets() -> list[dict]:
     """Groups the morning PTI call goes to.
 
     Active and set up -- a unit and at least one driver, the same test as
@@ -971,7 +971,7 @@ async def get_broadcast_targets() -> list[int]:
     there only fails, and `utils/group_health` already told the admins.
     """
     rows = await _pool_check().fetch(
-        """SELECT g.group_id FROM groups g
+        """SELECT g.group_id, g.unit_number, g.title FROM groups g
             WHERE COALESCE(g.is_active, TRUE)
               AND NOT COALESCE(g.notifications_disabled, FALSE)
               AND NOT COALESCE(g.post_blocked, FALSE)
@@ -980,7 +980,7 @@ async def get_broadcast_targets() -> list[int]:
                            WHERE d.group_id = g.group_id)
             ORDER BY g.group_id"""
     )
-    return [r["group_id"] for r in rows]
+    return [dict(r) for r in rows]
 
 
 async def claim_broadcast(kind: str, day, group_id: int) -> bool:
