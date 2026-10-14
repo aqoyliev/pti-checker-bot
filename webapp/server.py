@@ -246,6 +246,14 @@ async def auth_middleware(request: web.Request, handler):
 
 
 def _require_super(request: web.Request) -> web.Response | None:
+    """A 403 for anyone but a super-admin, else None.
+
+    Test the result with ``is not None``, never for truth: an aiohttp Response
+    is a MutableMapping and is *falsy* while it holds no per-response state, so
+    ``if resp := _require_super(request)`` never fired. Every super-admin
+    endpoint was open to every admin through the API until 2026-10-14; only the
+    page hid the buttons.
+    """
     if not request["admin"].get("is_super_admin"):
         return _err(403, "Super-admins only.")
     return None
@@ -552,6 +560,10 @@ async def api_replace_driver(request: web.Request) -> web.Response:
 
 
 async def api_model(request: web.Request) -> web.Response:
+    # Super-admins only, reading as well as switching (2026-10-14): which model
+    # runs, and what it costs, is the owner's business and nobody else's.
+    if (resp := _require_super(request)) is not None:
+        return resp
     return _json({
         "active": get_active_model(),
         "available": [{"id": m, "hint": MODEL_HINTS.get(m, "")} for m in AVAILABLE_GEMINI_MODELS],
@@ -559,7 +571,7 @@ async def api_model(request: web.Request) -> web.Response:
 
 
 async def api_model_set(request: web.Request) -> web.Response:
-    if resp := _require_super(request):
+    if (resp := _require_super(request)) is not None:
         return resp
     model = str((await _body(request)).get("model", ""))
     if not set_active_model(model):
@@ -571,7 +583,7 @@ async def api_model_set(request: web.Request) -> web.Response:
 
 
 async def api_admins(request: web.Request) -> web.Response:
-    if resp := _require_super(request):
+    if (resp := _require_super(request)) is not None:
         return resp
     admins = await get_admins()
     cards = await _user_cards([a["user_id"] for a in admins])
@@ -584,7 +596,7 @@ async def api_admins(request: web.Request) -> web.Response:
 
 
 async def api_admins_add(request: web.Request) -> web.Response:
-    if resp := _require_super(request):
+    if (resp := _require_super(request)) is not None:
         return resp
     try:
         uid = int((await _body(request)).get("user_id"))
@@ -596,7 +608,7 @@ async def api_admins_add(request: web.Request) -> web.Response:
 
 
 async def api_admins_remove(request: web.Request) -> web.Response:
-    if resp := _require_super(request):
+    if (resp := _require_super(request)) is not None:
         return resp
     uid = _int_param(request, "uid")
     removed = await remove_admin(uid)  # refuses super-admins
