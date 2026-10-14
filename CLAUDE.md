@@ -324,7 +324,11 @@ drivers on their own line (`Name: ZAMA, EMILE / FLEURMOND, JACQUES`), and
 "Emile ✈️" or `@jacques_f`, which nobody can match against a driver list. Names
 pair with phone numbers **by position**, so any other count is not a pairing at
 all and the Telegram names are kept instead of guessing — the name is a label,
-never a reason to decline an otherwise-clean setup. The admin notice shows the
+never a reason to decline an otherwise-clean setup.
+A parenthesised note on a name line is not part of the name (2026-10-14): the fleet
+writes `(LO)`, `(OO)`, `(ML)` or `(MD)` — lease-operator, owner-operator, company
+trucks — right beside the driver, and `_clean_name` drops it. Before that it was stored
+as `Mentor Juvenson (Lo)` and `/fixnames` proposed the suffix as a rename. The admin notice shows the
 Telegram name beside the stored one when they differ, because that is the line
 on which a swapped pair becomes visible. The picker's Save keeps whatever name a
 driver is already stored with, so editing one pick can't quietly swap the other

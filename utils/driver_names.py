@@ -36,6 +36,10 @@ from utils.phones import find_phones
 _NAME_LINE = re.compile(r"^[^\S\n]*(?:driver|name)s?[^\S\n]*[:#][^\S\n]*(.+)$",
                         re.I | re.M)
 _HAS_LETTER = re.compile(r"[^\W\d_]")
+# A parenthesised note on a name line: the fleet marks lease-operator (LO),
+# owner-operator (OO), company (ML, MD) trucks right beside the driver. An
+# unclosed one runs to the end of the line.
+_ANNOTATION = re.compile(r"\([^)]*(?:\)|$)")
 # Words worth matching on: three letters or more, so initials and "Jr" can't
 # pair two unrelated people.
 _WORD = re.compile(r"[^\W\d_]{3,}")
@@ -64,8 +68,13 @@ def tidy_name(raw: str | None) -> str:
 
 
 def _clean_name(raw: str) -> str:
-    """'ZAMA, EMILE ' -> 'Zama Emile'. Empty when it isn't a name at all."""
-    name = tidy_name(raw)
+    """'ZAMA, EMILE ' -> 'Zama Emile'. Empty when it isn't a name at all.
+
+    A parenthesised note is not part of the name: 'MENTOR, JUVENSON (LO)' is
+    Mentor Juvenson, the driver of a lease-operator truck. Kept, it was stored
+    as 'Mentor Juvenson (Lo)' and printed that way on every report.
+    """
+    name = tidy_name(_ANNOTATION.sub(" ", raw or ""))
     if not name or len(name) > MAX_NAME_CHARS:
         return ""
     # A digit means the line was "Driver: 718-864-1154" or similar -- a label,

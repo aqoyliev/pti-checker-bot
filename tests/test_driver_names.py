@@ -35,6 +35,36 @@ def test_a_properly_cased_name_is_not_re_cased():
     assert parse_driver_names("Name: Ian McDonald") == ["Ian McDonald"]
 
 
+def test_a_lease_marker_is_not_part_of_the_name():
+    """`(LO)` / `(OO)` / `(ML)` / `(MD)` sit beside the driver on the fleet's
+    name line. Stored as 'Mentor Juvenson (Lo)', they were printed that way on
+    every report and made /fixnames propose the suffix as a rename."""
+    for marker in ("LO", "OO", "ML", "MD", "Lo"):
+        assert parse_driver_names(f"Name: MENTOR, JUVENSON ({marker})") == [
+            "Mentor Juvenson"]
+
+
+def test_a_marker_on_each_name_of_a_pair():
+    assert parse_driver_names(
+        "Name: MENTOR, JUVENSON (LO) / DOE, JOHN (OO)") == [
+            "Mentor Juvenson", "Doe John"]
+
+
+def test_an_unclosed_bracket_runs_to_the_end_of_the_name():
+    assert parse_driver_names("Name: MENTOR, JUVENSON (LO") == ["Mentor Juvenson"]
+
+
+def test_a_name_that_is_only_a_note_is_not_a_name():
+    assert parse_driver_names("Name: (LO)") == []
+
+
+def test_a_marker_does_not_change_the_proven_pairing():
+    placed, left = match_names_to_drivers(
+        parse_driver_names("Name: MENTOR, JUVENSON (LO)"),
+        [_d(1, "Mentor Juvenson")])
+    assert placed == {1: "Mentor Juvenson"} and left == []
+
+
 def test_a_phone_number_on_a_name_line_is_not_a_name():
     assert parse_driver_names("Driver: 786-488-2619") == []
 

@@ -125,7 +125,10 @@ async def _setup_one(group: dict, apply: bool) -> tuple[str, str]:
 
 
 # Words a title puts around the unit number rather than around a name.
-_TITLE_LABELS = {"unit", "truck", "sub", "trailer", "lo", "jr", "no", "u"}
+# "lo", "oo", "ml" and "md" are the fleet's lease-operator / owner-operator /
+# company markers, written after the names: `(LO)` loses its brackets above.
+_TITLE_LABELS = {"unit", "truck", "sub", "trailer", "lo", "oo", "ml", "md",
+                 "jr", "no", "u"}
 
 
 def _names_from_title(title: str, unit: str | None) -> list[str]:
