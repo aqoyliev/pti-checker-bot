@@ -74,7 +74,9 @@ TICK_SECONDS = 60
 PAUSE_SECONDS = 0.1
 KEEP_DAYS = 30
 
-IMAGE = Path(__file__).resolve().parent.parent / "assets" / "pti_broadcast.jpg"
+# Not under assets/: .dockerignore keeps that out of the runtime image (it
+# holds the logo sources), and the first deploy of this ran without its picture.
+IMAGE = Path(__file__).resolve().parent.parent / "media" / "pti_broadcast.jpg"
 
 # The safety team's text, as they wrote it. Escaped once here, because every
 # message is HTML and "safe & DOT-ready" carries a bare ampersand.

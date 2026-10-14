@@ -68,6 +68,19 @@ def test_the_picture_ships_with_the_code():
     assert pb.IMAGE.is_file()
 
 
+def test_the_picture_reaches_the_runtime_image():
+    """The first deploy kept it under assets/, which .dockerignore excludes,
+    so the container had no picture and the broadcast switched itself off."""
+    root = pb.IMAGE.parents[1]
+    rel = pb.IMAGE.relative_to(root).as_posix()
+    ignored = [line.strip().rstrip("/") for line in
+               (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+               if line.strip() and not line.startswith("#")]
+    parts = rel.split("/")
+    prefixes = {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+    assert not prefixes & set(ignored), rel
+
+
 # ---------- the run ----------
 
 MON = _utc(2026, 10, 12, 11, 5)
