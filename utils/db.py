@@ -964,16 +964,21 @@ async def get_active_group_ids() -> list[int]:
 async def get_broadcast_targets() -> list[int]:
     """Groups the morning PTI call goes to.
 
-    Active ones, minus those an admin switched notifications off for, minus
-    those the bot is known to be muted in -- a post there only fails, and
-    `utils/group_health` already told the admins about it.
+    Active and set up -- a unit and at least one driver, the same test as
+    `utils/setup_notice.is_usable`, since a driver answering the call in a group
+    /check refuses would only be refused -- minus those an admin switched
+    notifications off for, minus those the bot is known to be muted in: a post
+    there only fails, and `utils/group_health` already told the admins.
     """
     rows = await _pool_check().fetch(
-        """SELECT group_id FROM groups
-            WHERE COALESCE(is_active, TRUE)
-              AND NOT COALESCE(notifications_disabled, FALSE)
-              AND NOT COALESCE(post_blocked, FALSE)
-            ORDER BY group_id"""
+        """SELECT g.group_id FROM groups g
+            WHERE COALESCE(g.is_active, TRUE)
+              AND NOT COALESCE(g.notifications_disabled, FALSE)
+              AND NOT COALESCE(g.post_blocked, FALSE)
+              AND COALESCE(TRIM(g.unit_number), '') <> ''
+              AND EXISTS (SELECT 1 FROM group_drivers d
+                           WHERE d.group_id = g.group_id)
+            ORDER BY g.group_id"""
     )
     return [r["group_id"] for r in rows]
 

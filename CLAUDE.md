@@ -174,13 +174,18 @@ standing one up.
   `PTI_BROADCAST_ENABLED` switches it off). It is a call to film *before the
   truck moves*, not a reminder about a missing PTI, and the fleet chose it
   knowing the nudge above was removed — at 07:00 almost nobody has filed yet.
-  Four rules: it never stamps `last_reminder_at` (three stamps a week would
+  Five rules: it never stamps `last_reminder_at` (three stamps a week would
   hold the overdue escalation off for most of it); it never spends an
-  unreachable strike or deactivates a group; it skips groups with
-  notifications switched off or the bot muted, but **not** quiet ones; and every
-  group is claimed in `broadcast_sent` *before* it is posted to, so a deploy at
-  07:00 resumes the run without posting twice. A bot down at 07:00 still sends
-  until 09:00, never later.
+  unreachable strike or deactivates a group; it goes only to groups that are
+  set up (a unit and a driver — elsewhere `/check` would refuse the answer) and
+  skips those with notifications switched off or the bot muted, but **not**
+  quiet ones; every group is claimed in `broadcast_sent` *before* it is posted
+  to, so a deploy at 07:00 resumes the run without posting twice; and the
+  picture is uploaded once, then **copied** to every other group by
+  `message_id`, falling back to the photo's `file_id` when a copy fails (a
+  deleted source, a group that protects its content). The super-admins get one
+  line per run with the count. A bot down at 07:00 still sends until 09:00,
+  never later.
 
 ## Group onboarding
 

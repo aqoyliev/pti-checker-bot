@@ -18,9 +18,22 @@ the reminder engine on purpose:
   ``utils/group_health`` (the "bot is muted" alert) and logged; the unreachable
   strikes stay the reminder sender's business, same as the panel's broadcast.
 
-Who gets it: active groups, minus the ones an admin switched notifications off
-for, minus the ones the bot is known to be muted in. Quiet groups are *not*
-skipped -- a group nobody has posted in is exactly where a PTI is missing.
+Who gets it: active groups that are **set up** -- a unit and at least one
+registered driver, which is what /check demands -- minus the ones an admin
+switched notifications off for, minus the ones the bot is known to be muted
+in. An unconfigured group is left out because a driver who answers the call
+there is refused by /check. Quiet groups are *not* skipped -- a group nobody
+has posted in is exactly where a PTI is missing.
+
+The picture is **uploaded once**: the first group gets it as a fresh photo, and
+every other group gets a copy of that very message (``copyMessage`` by its
+``message_id``), so nothing is re-sent over the wire. A copy can fail for a
+reason that is the source's and not the target's -- the message was deleted, or
+that group protects its content -- so a failed copy falls back to posting the
+photo by ``file_id``, and if *that* lands, the new message becomes the source.
+
+When a run has posted anything, the super-admins get one line saying how many
+groups it reached and how many failed.
 
 Each group is **claimed before it is posted to** (``broadcast_sent``, keyed on
 the day), so a restart in the middle of a run -- a deploy at 07:00 -- resumes
@@ -42,6 +55,7 @@ from aiogram.utils.exceptions import MigrateToChat
 
 from data.config import PTI_BROADCAST_ENABLED, PTI_BROADCAST_TZ
 from loader import bot
+from utils.admins import notify_super_admins
 from utils.db import (
     claim_broadcast, get_broadcast_targets, migrate_group_id,
     prune_broadcast_sent,
@@ -67,7 +81,7 @@ IMAGE = Path(__file__).resolve().parent.parent / "assets" / "pti_broadcast.jpg"
 TEXT = (
     "Good morning.\n\n"
     "PTI CHECK: Hello dear drivers — please record and send a 7‑minute "
-    "walk‑around video (lights + tires + fluids + hoses ) before you move.\n\n"
+    "walk‑around video (lights + tires + fluids + hoses) before you move.\n\n"
     "▫️ Keep engine idling.\n\n"
     "Thanks for keeping the fleet safe & DOT‑ready. 👍\n\n"
     "Best regards,\n"
@@ -75,8 +89,10 @@ TEXT = (
 )
 CAPTION = escape(TEXT, quote=False)
 
-# The photo's Telegram file_id once it has been uploaded, so the picture goes up
-# once per process rather than once per group.
+# The first message this process posted -- (chat_id, message_id) -- which every
+# other group gets a copy of, and the photo's file_id, the fallback when a copy
+# cannot be made. In memory only: a restart uploads the picture once more.
+_source: tuple[int, int] | None = None
 _photo_id: str | None = None
 # The day the last run finished, so the rest of the two-hour window costs
 # nothing. In memory only: after a restart the claims in the database decide.
@@ -99,12 +115,24 @@ def due_day(now: datetime, tz: ZoneInfo) -> date | None:
 
 
 async def _post(group_id: int) -> None:
-    global _photo_id
+    global _source, _photo_id
+    if _source is not None:
+        try:
+            await bot.copy_message(group_id, _source[0], _source[1])
+            return
+        except MigrateToChat:
+            raise  # the target moved; that is not the source's problem
+        except Exception as e:
+            # Either side can be the reason. Posting the photo settles which:
+            # if it lands, the source was the problem and is replaced below.
+            logging.info("copying the PTI call to %s failed (%s); posting the "
+                         "photo instead", group_id, type(e).__name__)
     photo = _photo_id or types.InputFile(str(IMAGE))
     message = await bot.send_photo(group_id, photo, caption=CAPTION,
                                    parse_mode="HTML")
-    if _photo_id is None and getattr(message, "photo", None):
+    if getattr(message, "photo", None):
         _photo_id = message.photo[-1].file_id
+    _source = (group_id, message.message_id)
 
 
 async def run_broadcast_if_due(now: datetime | None = None) -> int:
@@ -149,6 +177,9 @@ async def run_broadcast_if_due(now: datetime | None = None) -> int:
     if sent or failed:
         logging.info("PTI broadcast for %s: posted to %s group(s), %s failed",
                      day, sent, failed)
+        await notify_super_admins(
+            f"📣 Morning PTI call ({day:%a %d %b}): posted to {sent} "
+            f"group(s)" + (f", {failed} failed — see the logs." if failed else "."))
     return sent
 
 
